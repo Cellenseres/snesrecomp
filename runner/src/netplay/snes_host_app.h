@@ -57,11 +57,18 @@ typedef struct SnesHostBarrierHooks {
 } SnesHostBarrierHooks;
 
 /*
- * MotK admit loop. Returns 1 if admitted (caller RtlRunFrame + finish_frame).
- * Returns 0 to skip the tick; *running may be cleared on soft-exit.
+ * MotK admit pump (single-shot). Returns 1 if admitted (caller RtlRunFrame +
+ * finish_frame). Returns 0 to skip sim this wall tick — present the held
+ * framebuffer and pace; *running may be cleared on soft-exit.
  */
 int snes_host_barrier_admit(int from_lobby, int *running,
                             const SnesHostBarrierHooks *hooks);
+
+/*
+ * Extra sim ticks allowed this wall frame after a successful admit
+ * (min(8, max(0, remote_lead - input_delay))).
+ */
+int snes_host_catchup_budget(void);
 
 /* Shared connect-timeout copy for on_connect_timeout modals. */
 const char *snes_host_connect_timeout_error_code(int is_ice);

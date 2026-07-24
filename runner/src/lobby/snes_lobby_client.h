@@ -49,8 +49,9 @@ typedef struct SnesLobbyMatchCaps {
     int  widescreen;       /* 0/1 */
     int  widescreen_hud;   /* 0/1 */
     int  ignore_aspect;    /* 0/1 */
-    int  input_delay;      /* recomp-net delay frames (0-16, default 2) */
+    int  input_delay;      /* recomp-net delay frames (2-20 typical; default 2) */
     int  ws_extra;         /* widescreen margin; 0 = game default / env force */
+    int  force_turn;       /* 0/1 — host: ICE relay-only (TURN) for all peers */
 } SnesLobbyMatchCaps;
 
 typedef struct SnesLobbyJoinInfo {
@@ -133,6 +134,11 @@ int  snes_lobby_set_match_caps(const SnesLobbyMatchCaps *caps);
 /* Live member table from lobby_update (and create/join). */
 int  snes_lobby_member_count(void);
 int  snes_lobby_member_get(int index, SnesLobbyMember *out);
+
+/* Waiting-room RTT to the lobby host in ms for `slot`, or -1 if unknown.
+ * Host's own seat is always -1. Guests measure via signal ping; hosts learn
+ * guest RTT from peer reports. */
+int  snes_lobby_member_latency_ms(int slot);
 
 /* True when member.player_id matches snes_lobby_host_player_id().
  * Prefer this over `slot == 0` — seats can move. */

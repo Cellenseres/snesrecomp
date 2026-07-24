@@ -47,6 +47,9 @@ typedef struct SnesNetplayConfig {
     /* 0 = auto (private/loopback peer → LAN, else ICE when lobby+ICE built),
      * 1 = force ICE, 2 = force LAN. Env SNES_NET_TRANSPORT=lan|ice overrides. */
     int         transport;
+    /* Host match_caps / UI: force ICE typ relay (TURN). Env SNES_NET_FORCE_TURN
+     * still overrides when set. */
+    int         force_turn;
 } SnesNetplayConfig;
 
 void snes_netplay_config_defaults(SnesNetplayConfig *cfg);
@@ -104,6 +107,11 @@ int  snes_netplay_poll_admit(void);
 /* Call after RtlRunFrame for an admitted tick. */
 void snes_netplay_finish_frame(void);
 
+/* highest_remote_wire - sim_tick (0 if inactive; can be negative). */
+int  snes_netplay_remote_lead(void);
+/* Session input delay frames (default 2 when inactive). */
+int  snes_netplay_input_delay(void);
+
 /* Re-apply the last slot-0 game sync bytes (normally done inside poll_admit). */
 void snes_netplay_apply_host_sync(void);
 
@@ -129,6 +137,15 @@ void snes_netplay_clear_return_to_lobby(void);
 int  snes_netplay_is_host(void);
 int  snes_netplay_request_save(int slot);
 int  snes_netplay_request_load(int slot);
+
+/*
+ * Netplay diagnostics JSONL dump (saves/netplay/net_diag_slot{N}.jsonl).
+ * Enabled when SNES_NET_DIAG=1 (or non-empty / non-zero). Optional
+ * SNES_NET_DIAG_HZ (default 2, clamp 1..30) controls sample rate.
+ * First line is a match summary; samples follow. Safe to call every
+ * poll_admit / frame; rate-limited internally.
+ */
+void snes_netplay_diag_tick(void);
 
 #ifdef __cplusplus
 }

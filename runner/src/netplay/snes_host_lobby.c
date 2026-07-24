@@ -12,6 +12,7 @@
 #endif
 
 #include "recomp_net/lan_lobby.h"
+#include "recomp_net/lan_direct.h"
 #include "recomp_net/address.h"
 
 #if !defined(RECOMP_LAUNCHER) && !defined(SNES_HOST_HAS_RECOMP_UI)
@@ -43,19 +44,47 @@ static SnesHostLobbyOpts g_opts;
 static int g_inited;
 static int g_hosting_lan;
 static int g_joined_lan;
+static int g_joined_direct; /* UDP Direct IP (remote); not file-registry */
 static RecompLauncherCNetplayLaunch g_lan_launch;
+static RNetLanLobby g_lan_room; /* host + direct-guest in-memory seat state */
+static RNetLanDirectHost *g_direct_host;
+static RNetLanDirectGuest *g_direct_guest;
+static char g_direct_peer_endpoint[64]; /* guest launch peer = typed IP:port */
 static char g_lobby_url[256];
 static char g_resume_endpoint[64];
 static char g_runtime_error[64];
 static RNetIpv4Address g_local_addresses[kMaxLocalAddresses];
 static int g_local_address_count;
 static char g_external_ip[RNET_IPV4_ADDRESS_TEXT_MAX];
+static int g_lobby_input_delay = 2; /* waiting-room setting; clamped 2..20 */
+static int g_lobby_force_turn = 0;  /* host: ICE relay-only for server lobbies */
+static int g_lan_guest_rtt_ms = -1;
+
+static int clamp_input_delay(int delay)
+{
+  if (delay < 2)
+    return 2;
+  if (delay > 20)
+    return 20;
+  return delay;
+}
 
 static const char *lan_path(void)
 {
   return g_id.lan_registry_path && g_id.lan_registry_path[0]
              ? g_id.lan_registry_path
              : "netplay_lan_lobby.txt";
+}
+
+static void close_direct_sockets(void)
+{
+  rnet_lan_direct_host_close(&g_direct_host);
+  rnet_lan_direct_guest_close(&g_direct_guest);
+}
+
+static int publish_lan_room(void)
+{
+  return rnet_lan_lobby_publish(lan_path(), &g_lan_room) == RNET_LAN_LOBBY_OK;
 }
 
 static const char *game_name(void)
@@ -74,7 +103,7 @@ static SnesLobbyMatchCaps default_caps(const RecompLauncherCSettings *settings)
   SnesLobbyMatchCaps caps;
   memset(&caps, 0, sizeof(caps));
   caps.valid = 1;
-  caps.input_delay = 2;
+  caps.input_delay = clamp_input_delay(g_lobby_input_delay);
   if (settings) {
     caps.widescreen = settings->widescreen != 0;
     caps.widescreen_hud = settings->widescreen_hud != 0;
@@ -82,6 +111,8 @@ static SnesLobbyMatchCaps default_caps(const RecompLauncherCSettings *settings)
   }
   if (g_opts.fill_match_caps)
     g_opts.fill_match_caps(g_opts.caps_ctx, settings, &caps);
+  caps.input_delay = clamp_input_delay(caps.input_delay);
+  caps.force_turn = g_lobby_force_turn ? 1 : 0;
   return caps;
 }
 
@@ -94,17 +125,21 @@ static int read_lan(RNetLanLobby *state)
 static int create_lan(const char *name, const char *endpoint,
                       const char *password)
 {
-  RNetLanLobby state;
   char advertised[RNET_LAN_LOBBY_ENDPOINT_MAX];
   const char *stored_endpoint = endpoint;
-  memset(&state, 0, sizeof(state));
-  snprintf(state.name, sizeof(state.name), "%s",
+  const char *colon;
+  const char *port;
+  char bind_hp[64];
+  memset(&g_lan_room, 0, sizeof(g_lan_room));
+  close_direct_sockets();
+  snprintf(g_lan_room.name, sizeof(g_lan_room.name), "%s",
            name && name[0]
                ? name
                : (g_id.default_lobby_name ? g_id.default_lobby_name
                                           : "LAN Lobby"));
-  snprintf(state.game, sizeof(state.game), "%s", game_name());
-  snprintf(state.game_version, sizeof(state.game_version), "%s", game_version());
+  snprintf(g_lan_room.game, sizeof(g_lan_room.game), "%s", game_name());
+  snprintf(g_lan_room.game_version, sizeof(g_lan_room.game_version), "%s",
+           game_version());
   /* Online hosts bind 0.0.0.0, but that wildcard is not a routable guest
    * destination. Keep the bind; advertise a concrete local IPv4 in the LAN
    * registry row when present. */
@@ -116,27 +151,46 @@ static int create_lan(const char *name, const char *endpoint,
       stored_endpoint = advertised;
     }
   }
-  snprintf(state.endpoint, sizeof(state.endpoint), "%s",
+  snprintf(g_lan_room.endpoint, sizeof(g_lan_room.endpoint), "%s",
            stored_endpoint && stored_endpoint[0] ? stored_endpoint
                                                  : "127.0.0.1:7777");
-  snprintf(state.host_name, sizeof(state.host_name), "%s",
+  snprintf(g_lan_room.host_name, sizeof(g_lan_room.host_name), "%s",
            snes_lobby_display_name()[0] ? snes_lobby_display_name() : "Host");
-  snprintf(state.password, sizeof(state.password), "%s",
+  snprintf(g_lan_room.password, sizeof(g_lan_room.password), "%s",
            password ? password : "");
-  state.host_slot = 0;
-  if (rnet_lan_lobby_publish(lan_path(), &state) != RNET_LAN_LOBBY_OK)
+  g_lan_room.host_slot = 0;
+  if (!publish_lan_room())
     return 0;
+  /* UDP waiting-room listen on the game port for remote Join Direct. */
+  colon = strrchr(g_lan_room.endpoint, ':');
+  port = colon ? colon + 1 : "7777";
+  snprintf(bind_hp, sizeof(bind_hp), "0.0.0.0:%s", port);
+  if (rnet_lan_direct_host_open(&g_direct_host, bind_hp, &g_lan_room) !=
+      RNET_LAN_DIRECT_OK) {
+    fprintf(stderr,
+            "snes_host_lobby: Direct IP listen failed on %s — same-machine "
+            "file join still works; remote Join Direct will time out\n",
+            bind_hp);
+  }
   g_hosting_lan = 1;
   g_joined_lan = 0;
+  g_joined_direct = 0;
+  g_direct_peer_endpoint[0] = '\0';
+  g_lan_guest_rtt_ms = -1;
   memset(&g_lan_launch, 0, sizeof(g_lan_launch));
-  snprintf(g_resume_endpoint, sizeof(g_resume_endpoint), "%s", state.endpoint);
+  snprintf(g_resume_endpoint, sizeof(g_resume_endpoint), "%s",
+           g_lan_room.endpoint);
   return 1;
 }
 
 static int fill_lan_row(RecompLauncherCNetplayLobby *out)
 {
   RNetLanLobby state;
-  if (!out || !read_lan(&state))
+  if (!out)
+    return 0;
+  if (g_hosting_lan)
+    state = g_lan_room;
+  else if (!read_lan(&state))
     return 0;
   memset(out, 0, sizeof(*out));
   snprintf(out->lobby_id, sizeof(out->lobby_id), "lan:%s", state.endpoint);
@@ -153,7 +207,14 @@ static int fill_lan_row(RecompLauncherCNetplayLobby *out)
 
 static void clear_lan_joiner(void)
 {
+  if (g_joined_direct && g_direct_guest)
+    (void)rnet_lan_direct_guest_leave(g_direct_guest);
+  close_direct_sockets();
   g_joined_lan = 0;
+  g_joined_direct = 0;
+  g_direct_peer_endpoint[0] = '\0';
+  g_lan_guest_rtt_ms = -1;
+  memset(&g_lan_room, 0, sizeof(g_lan_room));
   memset(&g_lan_launch, 0, sizeof(g_lan_launch));
 }
 
@@ -161,8 +222,18 @@ static void sync_lan_joiner(void)
 {
   RNetLanLobby state;
   const char *name;
+  int ev;
   if (!g_joined_lan)
     return;
+  if (g_joined_direct) {
+    int rtt = -1;
+    ev = rnet_lan_direct_guest_pump(g_direct_guest, &g_lan_room, &rtt);
+    if (ev == 2) /* KICK / CLOSE */
+      clear_lan_joiner();
+    else if (ev == 3 && rtt >= 0)
+      g_lan_guest_rtt_ms = rtt;
+    return;
+  }
   if (!read_lan(&state)) {
     clear_lan_joiner();
     return;
@@ -179,6 +250,10 @@ static int use_lan_members(RNetLanLobby *state)
   if (!state)
     state = &local;
   sync_lan_joiner();
+  if (g_hosting_lan || g_joined_direct) {
+    *state = g_lan_room;
+    return g_hosting_lan || g_joined_lan;
+  }
   if (!read_lan(state))
     return 0;
   if (g_joined_lan)
@@ -192,25 +267,31 @@ static void arm_lan_launch(const RNetLanLobby *state)
 {
   const char *colon;
   const char *port;
+  const char *peer;
   if (!state)
     return;
+  /* Hand the UDP port to the game session socket. */
+  if (g_hosting_lan)
+    (void)rnet_lan_direct_host_notify_start(g_direct_host, state);
+  close_direct_sockets();
   memset(&g_lan_launch, 0, sizeof(g_lan_launch));
   g_lan_launch.enabled = 1;
   g_lan_launch.local_slot =
       g_hosting_lan ? state->host_slot : 1 - state->host_slot;
   g_lan_launch.input_player = 0;
   g_lan_launch.session_id = 1;
-  g_lan_launch.input_delay = 2;
+  g_lan_launch.input_delay = clamp_input_delay(g_lobby_input_delay);
   if (g_hosting_lan) {
     colon = strrchr(state->endpoint, ':');
     port = colon ? colon + 1 : "7777";
     snprintf(g_lan_launch.bind_hostport, sizeof(g_lan_launch.bind_hostport),
              "0.0.0.0:%s", port);
   } else {
+    peer = g_direct_peer_endpoint[0] ? g_direct_peer_endpoint : state->endpoint;
     snprintf(g_lan_launch.bind_hostport, sizeof(g_lan_launch.bind_hostport),
              "0.0.0.0:0");
     snprintf(g_lan_launch.peer_hostport, sizeof(g_lan_launch.peer_hostport),
-             "%s", state->endpoint);
+             "%s", peer);
   }
 }
 
@@ -226,7 +307,11 @@ int snes_host_lobby_init(const SnesHostLobbyIdentity *id,
     g_opts = *opts;
   g_hosting_lan = 0;
   g_joined_lan = 0;
+  g_joined_direct = 0;
+  close_direct_sockets();
+  memset(&g_lan_room, 0, sizeof(g_lan_room));
   memset(&g_lan_launch, 0, sizeof(g_lan_launch));
+  g_direct_peer_endpoint[0] = '\0';
   g_lobby_url[0] = '\0';
   g_resume_endpoint[0] = '\0';
   g_runtime_error[0] = '\0';
@@ -244,8 +329,20 @@ void snes_host_lobby_shutdown(void)
 
 void snes_host_lobby_prepare_rematch(void)
 {
-  if (g_hosting_lan || g_joined_lan)
+  const char *colon;
+  const char *port;
+  char bind_hp[64];
+  if (g_hosting_lan || g_joined_lan) {
+    g_lan_room.started = 0;
     (void)rnet_lan_lobby_set_started(lan_path(), 0);
+  }
+  /* Re-bind Direct IP listen after the game session released the UDP port. */
+  if (g_hosting_lan && !g_direct_host && g_lan_room.endpoint[0]) {
+    colon = strrchr(g_lan_room.endpoint, ':');
+    port = colon ? colon + 1 : "7777";
+    snprintf(bind_hp, sizeof(bind_hp), "0.0.0.0:%s", port);
+    (void)rnet_lan_direct_host_open(&g_direct_host, bind_hp, &g_lan_room);
+  }
   if (g_opts.rematch_set_ready)
     snes_lobby_set_ready(1);
   else
@@ -257,12 +354,22 @@ void snes_host_lobby_prepare_rematch(void)
 int snes_host_lobby_leave(void)
 {
   int rc;
-  if (g_hosting_lan)
+  if (g_hosting_lan) {
+    (void)rnet_lan_direct_host_notify_close(g_direct_host);
+    close_direct_sockets();
     (void)rnet_lan_lobby_leave(lan_path(), 1);
-  else if (g_joined_lan)
+  } else if (g_joined_direct) {
+    if (g_direct_guest)
+      (void)rnet_lan_direct_guest_leave(g_direct_guest);
+    close_direct_sockets();
+  } else if (g_joined_lan) {
     (void)rnet_lan_lobby_leave(lan_path(), 0);
+  }
   g_hosting_lan = 0;
   g_joined_lan = 0;
+  g_joined_direct = 0;
+  g_direct_peer_endpoint[0] = '\0';
+  memset(&g_lan_room, 0, sizeof(g_lan_room));
   memset(&g_lan_launch, 0, sizeof(g_lan_launch));
   rc = snes_lobby_leave();
   return rc;
@@ -322,6 +429,27 @@ static void cb_pump(void *ctx)
 {
   (void)ctx;
   snes_lobby_pump();
+  if (g_hosting_lan && g_direct_host) {
+    int rtt = -1;
+    if (rnet_lan_direct_host_pump(g_direct_host, &g_lan_room, &rtt))
+      (void)publish_lan_room();
+    if (rtt >= 0)
+      g_lan_guest_rtt_ms = rtt;
+    /* Host probes guest RTT about once per second. */
+    {
+      /* rnet_os_monotonic_ms is in the static lib; use a coarse clock here. */
+      static unsigned s_tick;
+      s_tick++;
+      if ((s_tick % 60) == 0) /* ~1s at 60fps pump */
+        (void)rnet_lan_direct_host_ping(g_direct_host);
+    }
+  }
+  if (g_joined_direct && g_direct_guest) {
+    static unsigned s_gtick;
+    s_gtick++;
+    if ((s_gtick % 60) == 0)
+      (void)rnet_lan_direct_guest_ping(g_direct_guest);
+  }
   sync_lan_joiner();
   if (g_opts.auto_ready_guests && snes_lobby_in_lobby() &&
       !snes_lobby_is_host() && !snes_lobby_local_ready())
@@ -451,9 +579,11 @@ static int cb_create(void *ctx, const char *lobby_name, char *host_endpoint,
       return -1;
     return 0;
   }
+  close_direct_sockets();
   (void)rnet_lan_lobby_leave(lan_path(), 1);
   g_hosting_lan = 0;
   g_joined_lan = 0;
+  g_joined_direct = 0;
   memset(&g_lan_launch, 0, sizeof(g_lan_launch));
   return snes_lobby_create(
       lobby_name && lobby_name[0]
@@ -463,29 +593,69 @@ static int cb_create(void *ctx, const char *lobby_name, char *host_endpoint,
       &caps);
 }
 
+static int map_direct_join_rc(int rc)
+{
+  if (rc == RNET_LAN_DIRECT_OK)
+    return 0;
+  if (rc == RNET_LAN_DIRECT_ERR_PASSWORD || rc == RNET_LAN_LOBBY_ERR_PASSWORD)
+    return -2;
+  if (rc == RNET_LAN_DIRECT_ERR_TIMEOUT || rc == RNET_LAN_DIRECT_ERR_IO ||
+      rc == RNET_LAN_LOBBY_ERR_IO)
+    return -3;
+  /* full / identity / started / other */
+  return -1;
+}
+
 static int cb_join(void *ctx, const char *lobby_id, const char *password,
                    char *guest_bind)
 {
   RNetLanLobby state;
   const char *name;
+  const char *endpoint;
+  int rc;
   (void)ctx;
   memset(&g_lan_launch, 0, sizeof(g_lan_launch));
   if (lobby_id && strncmp(lobby_id, "lan:", 4) == 0) {
-    (void)guest_bind;
     name = snes_lobby_display_name();
-    if (rnet_lan_lobby_join(lan_path(), game_name(), game_version(),
-                            password ? password : "",
-                            name && name[0] ? name : "Player",
-                            &state) != RNET_LAN_LOBBY_OK)
-      return -1;
+    endpoint = lobby_id + 4;
+    close_direct_sockets();
     g_hosting_lan = 0;
+    g_joined_lan = 0;
+    g_joined_direct = 0;
+    g_direct_peer_endpoint[0] = '\0';
+
+    /* Same-machine fast path: shared file registry. */
+    rc = rnet_lan_lobby_join(lan_path(), game_name(), game_version(),
+                             password ? password : "",
+                             name && name[0] ? name : "Player", &state);
+    if (rc == RNET_LAN_LOBBY_OK) {
+      g_lan_room = state;
+      g_joined_lan = 1;
+      snprintf(g_resume_endpoint, sizeof(g_resume_endpoint), "%s",
+               state.endpoint);
+      snprintf(g_direct_peer_endpoint, sizeof(g_direct_peer_endpoint), "%s",
+               endpoint[0] ? endpoint : state.endpoint);
+      return 0;
+    }
+
+    /* Remote / cross-subnet: UDP JOIN_REQ to the typed IP:port. */
+    rc = rnet_lan_direct_guest_join(
+        endpoint, game_name(), game_version(), password ? password : "",
+        name && name[0] ? name : "Player", guest_bind, 2500, &state,
+        &g_direct_guest);
+    if (rc != RNET_LAN_DIRECT_OK)
+      return map_direct_join_rc(rc);
+    g_lan_room = state;
     g_joined_lan = 1;
-    snprintf(g_resume_endpoint, sizeof(g_resume_endpoint), "%s",
-             state.endpoint);
+    g_joined_direct = 1;
+    snprintf(g_direct_peer_endpoint, sizeof(g_direct_peer_endpoint), "%s",
+             endpoint);
+    snprintf(g_resume_endpoint, sizeof(g_resume_endpoint), "%s", endpoint);
     return 0;
   }
   g_hosting_lan = 0;
   g_joined_lan = 0;
+  g_joined_direct = 0;
   return snes_lobby_join(lobby_id, password ? password : "", guest_bind);
 }
 
@@ -526,6 +696,7 @@ static int cb_member_get(void *ctx, int index,
   if (!out)
     return 0;
   memset(out, 0, sizeof(*out));
+  out->latency_ms = -1;
   if (use_lan_members(&state)) {
     if (index < 0 || index > 1)
       return 0;
@@ -534,6 +705,9 @@ static int cb_member_get(void *ctx, int index,
     out->is_host = index == 0;
     snprintf(out->display_name, sizeof(out->display_name), "%s",
              index == 0 ? state.host_name : state.joiner_name);
+    /* Host row: N/A. Guest row: Direct-IP / LAN UDP RTT when known. */
+    if (!out->is_host && out->display_name[0] && g_lan_guest_rtt_ms >= 0)
+      out->latency_ms = g_lan_guest_rtt_ms;
     return 1;
   }
   if (!snes_lobby_member_get(index, &member))
@@ -543,16 +717,20 @@ static int cb_member_get(void *ctx, int index,
   out->is_host = snes_lobby_member_is_host(&member);
   snprintf(out->display_name, sizeof(out->display_name), "%s",
            member.display_name);
+  out->latency_ms = snes_lobby_member_latency_ms(member.slot);
   return 1;
 }
 
 static int cb_move_member(void *ctx, int from_slot, int to_slot)
 {
-  RNetLanLobby state;
   (void)ctx;
   if (g_hosting_lan && from_slot >= 0 && from_slot <= 1 && to_slot >= 0 &&
-      to_slot <= 1 && from_slot != to_slot && read_lan(&state))
-    return rnet_lan_lobby_set_host_slot(lan_path(), 1 - state.host_slot);
+      to_slot <= 1 && from_slot != to_slot) {
+    g_lan_room.host_slot = 1 - g_lan_room.host_slot;
+    g_lan_room.started = 0;
+    (void)publish_lan_room();
+    return 0;
+  }
   if (g_joined_lan)
     return -1;
   return snes_lobby_move(from_slot, to_slot);
@@ -560,16 +738,18 @@ static int cb_move_member(void *ctx, int from_slot, int to_slot)
 
 static int cb_kick_member(void *ctx, int slot)
 {
-  RNetLanLobby state;
   int guest_slot;
   (void)ctx;
   if (g_hosting_lan) {
-    if (slot < 0 || slot > 1 || !read_lan(&state))
+    guest_slot = 1 - g_lan_room.host_slot;
+    if (slot < 0 || slot > 1 || slot != guest_slot ||
+        !g_lan_room.joiner_name[0])
       return -1;
-    guest_slot = 1 - state.host_slot;
-    if (slot != guest_slot || !state.joiner_name[0])
-      return -1;
-    return rnet_lan_lobby_kick(lan_path()) == RNET_LAN_LOBBY_OK ? 0 : -1;
+    (void)rnet_lan_direct_host_notify_kick(g_direct_host);
+    g_lan_room.joiner_name[0] = '\0';
+    g_lan_room.started = 0;
+    (void)publish_lan_room();
+    return 0;
   }
   if (g_joined_lan)
     return -1;
@@ -604,15 +784,13 @@ static int cb_set_ready(void *ctx, int ready)
 static int cb_request_start(void *ctx, const RecompLauncherCSettings *settings)
 {
   SnesLobbyMatchCaps caps = default_caps(settings);
-  RNetLanLobby state;
   (void)ctx;
   if (g_hosting_lan) {
-    if (!read_lan(&state) || !state.joiner_name[0])
+    if (!g_lan_room.joiner_name[0])
       return -1;
-    if (rnet_lan_lobby_set_started(lan_path(), 1) != RNET_LAN_LOBBY_OK)
-      return -1;
-    state.started = 1;
-    arm_lan_launch(&state);
+    g_lan_room.started = 1;
+    (void)publish_lan_room();
+    arm_lan_launch(&g_lan_room);
     return 0;
   }
   return snes_lobby_request_start(&caps);
@@ -621,10 +799,22 @@ static int cb_request_start(void *ctx, const RecompLauncherCSettings *settings)
 static int cb_launch_pending(void *ctx)
 {
   RNetLanLobby state;
+  int ev;
   (void)ctx;
-  if ((g_hosting_lan || g_joined_lan) && !g_lan_launch.enabled &&
-      read_lan(&state) && state.started)
-    arm_lan_launch(&state);
+  if (g_joined_direct && !g_lan_launch.enabled) {
+    int rtt = -1;
+    ev = rnet_lan_direct_guest_pump(g_direct_guest, &g_lan_room, &rtt);
+    if (ev == 3 && rtt >= 0)
+      g_lan_guest_rtt_ms = rtt;
+    if (ev == 1 || g_lan_room.started)
+      arm_lan_launch(&g_lan_room);
+  } else if (g_joined_lan && !g_joined_direct && !g_lan_launch.enabled &&
+             read_lan(&state) && state.started) {
+    g_lan_room = state;
+    arm_lan_launch(&g_lan_room);
+  } else if (g_hosting_lan && !g_lan_launch.enabled && g_lan_room.started) {
+    arm_lan_launch(&g_lan_room);
+  }
   return g_lan_launch.enabled || snes_lobby_launch_pending();
 }
 
@@ -652,6 +842,58 @@ static void cb_clear_last_error(void *ctx)
   snes_lobby_clear_last_error();
 }
 
+static int cb_input_delay_get(void *ctx)
+{
+  const SnesLobbyMatchCaps *caps;
+  (void)ctx;
+  if (!g_hosting_lan && !g_joined_lan) {
+    caps = snes_lobby_match_caps();
+    if (caps && caps->valid)
+      return clamp_input_delay(caps->input_delay);
+  }
+  return clamp_input_delay(g_lobby_input_delay);
+}
+
+static int cb_input_delay_set(void *ctx, int delay_frames)
+{
+  SnesLobbyMatchCaps caps;
+  (void)ctx;
+  g_lobby_input_delay = clamp_input_delay(delay_frames);
+  if (g_hosting_lan || g_joined_lan)
+    return 0;
+  if (!snes_lobby_is_host())
+    return -1;
+  caps = default_caps(NULL);
+  caps.input_delay = g_lobby_input_delay;
+  return snes_lobby_set_match_caps(&caps);
+}
+
+static int cb_force_turn_get(void *ctx)
+{
+  const SnesLobbyMatchCaps *caps;
+  (void)ctx;
+  if (!g_hosting_lan && !g_joined_lan) {
+    caps = snes_lobby_match_caps();
+    if (caps && caps->valid)
+      return caps->force_turn ? 1 : 0;
+  }
+  return g_lobby_force_turn ? 1 : 0;
+}
+
+static int cb_force_turn_set(void *ctx, int force)
+{
+  SnesLobbyMatchCaps caps;
+  (void)ctx;
+  g_lobby_force_turn = force ? 1 : 0;
+  if (g_hosting_lan || g_joined_lan)
+    return 0; /* LAN/Direct IP does not use ICE TURN */
+  if (!snes_lobby_is_host())
+    return -1;
+  caps = default_caps(NULL);
+  caps.force_turn = g_lobby_force_turn;
+  return snes_lobby_set_match_caps(&caps);
+}
+
 static int cb_fill_launch(void *ctx, RecompLauncherCNetplayLaunch *out)
 {
   SnesLobbyJoinInfo join;
@@ -661,6 +903,7 @@ static int cb_fill_launch(void *ctx, RecompLauncherCNetplayLaunch *out)
     return 0;
   if (g_lan_launch.enabled) {
     *out = g_lan_launch;
+    out->force_turn = 0;
     return 1;
   }
   if (!snes_lobby_try_fill_launch(&join))
@@ -672,6 +915,7 @@ static int cb_fill_launch(void *ctx, RecompLauncherCNetplayLaunch *out)
   out->input_player = 0;
   out->session_id = join.session_id;
   out->input_delay = caps && caps->valid ? caps->input_delay : 2;
+  out->force_turn = (caps && caps->valid && caps->force_turn) ? 1 : 0;
   snprintf(out->bind_hostport, sizeof(out->bind_hostport), "%s",
            join.bind_hostport);
   snprintf(out->peer_hostport, sizeof(out->peer_hostport), "%s",
@@ -712,6 +956,10 @@ static RecompLauncherCNetplayCallbacks g_callbacks = {
     cb_kick_member,
     cb_last_error,
     cb_clear_last_error,
+    cb_input_delay_get,
+    cb_input_delay_set,
+    cb_force_turn_get,
+    cb_force_turn_set,
 };
 
 const RecompLauncherCNetplayCallbacks *snes_host_lobby_callbacks(void)

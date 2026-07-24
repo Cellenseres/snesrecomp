@@ -31,12 +31,16 @@ void snes_host_app_apply_launch(const RecompLauncherCNetplayLaunch *net,
   snprintf(out->net_cfg.peer_hostport, sizeof(out->net_cfg.peer_hostport), "%s",
            net->peer_hostport);
   snes_netplay_apply_env(&out->net_cfg);
-  if (net->input_delay >= 0 && net->input_delay <= 16)
+  if (net->input_delay >= 0 && net->input_delay <= 20)
     out->net_cfg.input_delay = net->input_delay;
+  out->net_cfg.force_turn = net->force_turn ? 1 : 0;
   {
     const SnesLobbyMatchCaps *caps = snes_lobby_match_caps();
-    if (caps && caps->valid)
+    if (caps && caps->valid) {
       out->caps_ws_extra = caps->ws_extra;
+      if (caps->force_turn)
+        out->net_cfg.force_turn = 1;
+    }
   }
 }
 
@@ -96,6 +100,10 @@ int snes_host_barrier_admit(int from_lobby, int *running,
   static int ice_fail_logged;
   uint32_t peer_ms;
   uint32_t connect_ms;
+  uint32_t dt = 0, lh = 0, rh = 0;
+  int want_soft = 0;
+  uint16_t pad;
+  const char *soft_origin;
 
   if (!snes_netplay_active())
     return 0;
@@ -105,69 +113,47 @@ int snes_host_barrier_admit(int from_lobby, int *running,
   peer_ms = hooks->peer_timeout_ms ? hooks->peer_timeout_ms : 1500u;
   connect_ms = hooks->connect_timeout_ms;
 
-  for (;;) {
-    uint32_t dt = 0, lh = 0, rh = 0;
-    int want_soft = 0;
-    uint16_t pad;
-    const char *soft_origin;
+  if (snes_netplay_peer_disconnected(peer_ms)) {
+    barrier_soft_exit(from_lobby, running, "peer_disconnect", &desync_logged,
+                      &wait_logged);
+    ice_fail_logged = 0;
+    return 0;
+  }
 
-    if (snes_netplay_peer_disconnected(peer_ms)) {
-      barrier_soft_exit(from_lobby, running, "peer_disconnect", &desync_logged,
-                        &wait_logged);
+  if (connect_ms && !snes_netplay_is_running()) {
+    if (!wait_logged) {
+      fprintf(stderr,
+              "snes_netplay: waiting for peer transport=%s timeout=%ums\n",
+              snes_netplay_transport_name(), (unsigned)connect_ms);
+      wait_logged = 1;
+    }
+    if (snes_netplay_ice_failed() && !ice_fail_logged) {
+      fprintf(stderr,
+              "snes_netplay: ICE FAILED while waiting for peer — "
+              "STUN/TURN path unusable (check Coturn / firewall)\n");
+      ice_fail_logged = 1;
+    }
+    if (snes_netplay_connect_timed_out(connect_ms)) {
+      if (hooks->on_connect_timeout)
+        hooks->on_connect_timeout(hooks->ctx);
+      barrier_soft_exit(from_lobby, running, "connect_timeout",
+                        &desync_logged, &wait_logged);
       ice_fail_logged = 0;
       return 0;
     }
+  } else {
+    wait_logged = 0;
+    ice_fail_logged = 0;
+  }
 
-    if (connect_ms && !snes_netplay_is_running()) {
-      if (!wait_logged) {
-        fprintf(stderr,
-                "snes_netplay: waiting for peer transport=%s timeout=%ums\n",
-                snes_netplay_transport_name(), (unsigned)connect_ms);
-        wait_logged = 1;
-      }
-      if (snes_netplay_ice_failed() && !ice_fail_logged) {
-        fprintf(stderr,
-                "snes_netplay: ICE FAILED while waiting for peer — "
-                "STUN/TURN path unusable (check Coturn / firewall)\n");
-        ice_fail_logged = 1;
-      }
-      if (snes_netplay_connect_timed_out(connect_ms)) {
-        if (hooks->on_connect_timeout)
-          hooks->on_connect_timeout(hooks->ctx);
-        barrier_soft_exit(from_lobby, running, "connect_timeout",
-                          &desync_logged, &wait_logged);
-        ice_fail_logged = 0;
-        return 0;
-      }
-    } else {
-      wait_logged = 0;
-      ice_fail_logged = 0;
+  if (snes_netplay_input_desync(&dt, &lh, &rh)) {
+    if (!desync_logged) {
+      fprintf(stderr,
+              "snes_netplay: INPUT desync tick=%u local=%08x remote=%08x — "
+              "stalled\n",
+              (unsigned)dt, (unsigned)lh, (unsigned)rh);
+      desync_logged = 1;
     }
-
-    if (snes_netplay_input_desync(&dt, &lh, &rh)) {
-      if (!desync_logged) {
-        fprintf(stderr,
-                "snes_netplay: INPUT desync tick=%u local=%08x remote=%08x — "
-                "stalled\n",
-                (unsigned)dt, (unsigned)lh, (unsigned)rh);
-        desync_logged = 1;
-      }
-      SDL_Delay(16);
-      if (hooks->poll_events)
-        hooks->poll_events(hooks->ctx, &want_soft);
-      if (want_soft) {
-        soft_origin = (want_soft == 2) ? "sdl_quit" : "escape";
-        barrier_soft_exit(from_lobby, running, soft_origin, &desync_logged,
-                          &wait_logged);
-        return 0;
-      }
-      continue;
-    }
-    desync_logged = 0;
-
-    pad = hooks->capture_local_pad(hooks->ctx);
-    snes_netplay_stage_local(pad);
-
     if (hooks->poll_events)
       hooks->poll_events(hooks->ctx, &want_soft);
     if (want_soft) {
@@ -176,9 +162,43 @@ int snes_host_barrier_admit(int from_lobby, int *running,
                         &wait_logged);
       return 0;
     }
-
-    if (snes_netplay_poll_admit())
-      return 1;
-    SDL_Delay(1);
+    return 0; /* skip sim; host presents held frame */
   }
+  desync_logged = 0;
+
+  pad = hooks->capture_local_pad(hooks->ctx);
+  snes_netplay_stage_local(pad);
+
+  if (hooks->poll_events)
+    hooks->poll_events(hooks->ctx, &want_soft);
+  if (want_soft) {
+    soft_origin = (want_soft == 2) ? "sdl_quit" : "escape";
+    barrier_soft_exit(from_lobby, running, soft_origin, &desync_logged,
+                      &wait_logged);
+    return 0;
+  }
+
+  if (snes_netplay_poll_admit())
+    return 1;
+  return 0; /* input starvation / confirm stall — present held, retry next wall tick */
+}
+
+int snes_host_catchup_budget(void)
+{
+  int lead;
+  int delay;
+  int extra;
+
+  if (!snes_netplay_active())
+    return 0;
+  lead = snes_netplay_remote_lead();
+  delay = snes_netplay_input_delay();
+  if (delay < 0)
+    delay = 0;
+  extra = lead - delay;
+  if (extra < 0)
+    return 0;
+  if (extra > 8)
+    return 8;
+  return extra;
 }

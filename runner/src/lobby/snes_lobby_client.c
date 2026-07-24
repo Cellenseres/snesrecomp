@@ -50,6 +50,7 @@ const SnesLobbyMatchCaps *snes_lobby_match_caps(void)
 int  snes_lobby_set_match_caps(const SnesLobbyMatchCaps *c) { (void)c; return -1; }
 int  snes_lobby_member_count(void) { return 0; }
 int  snes_lobby_member_get(int index, SnesLobbyMember *out) { (void)index; (void)out; return 0; }
+int  snes_lobby_member_latency_ms(int slot) { (void)slot; return -1; }
 int  snes_lobby_member_is_host(const SnesLobbyMember *member)
 {
     (void)member;
@@ -161,12 +162,60 @@ typedef struct {
     SnesLobbyTurnCredentials turn;
     time_t turn_received_at;
     int turn_request_pending;
+    /* Waiting-room latency (ms) keyed by pad slot; -1 = unknown. */
+    int member_rtt_ms[SNES_LOBBY_MAX_MEMBERS];
+    uint64_t rtt_next_ping_ms;
 } LobbyClient;
+
+enum {
+    SNES_LOBBY_SIG_RTT_PING = 100,
+    SNES_LOBBY_SIG_RTT_PONG = 101,
+    SNES_LOBBY_SIG_RTT_REPORT = 102
+};
+
+static uint64_t lobby_mono_ms(void)
+{
+#if defined(CLOCK_MONOTONIC)
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
+        return (uint64_t)ts.tv_sec * 1000ull +
+               (uint64_t)ts.tv_nsec / 1000000ull;
+#endif
+    return (uint64_t)time(NULL) * 1000ull;
+}
+
+/* Defined later; used by waiting-room RTT signal handling. */
+int snes_lobby_send_signal(int type, int flag, const char *text);
 
 static LobbyClient g_lc = {
     .fd = -1,
     .filter_game_version = SNES_GAME_VERSION,
 };
+
+static void member_rtt_clear(void)
+{
+    int i;
+    for (i = 0; i < SNES_LOBBY_MAX_MEMBERS; ++i)
+        g_lc.member_rtt_ms[i] = -1;
+    g_lc.rtt_next_ping_ms = 0;
+}
+
+static int member_slot_for_player(const char *player_id)
+{
+    int i;
+    if (!player_id || !player_id[0])
+        return -1;
+    for (i = 0; i < g_lc.member_count; ++i) {
+        if (strcmp(g_lc.members[i].player_id, player_id) == 0)
+            return g_lc.members[i].slot;
+    }
+    return -1;
+}
+
+static int local_member_slot(void)
+{
+    return member_slot_for_player(g_lc.player_id);
+}
 
 static const char *effective_game_version(const char *override_ver)
 {
@@ -453,10 +502,11 @@ static void parse_match_caps_object(const char *obj, SnesLobbyMatchCaps *out)
     out->widescreen_hud = json_get_bool(obj, "widescreen_hud", 1);
     out->ignore_aspect = json_get_bool(obj, "ignore_aspect", 0);
     out->input_delay = json_get_int(obj, "input_delay", 2);
-    if (out->input_delay < 0) out->input_delay = 0;
-    if (out->input_delay > 16) out->input_delay = 16;
+    if (out->input_delay < 2) out->input_delay = 2;
+    if (out->input_delay > 20) out->input_delay = 20;
     out->ws_extra = json_get_int(obj, "ws_extra", 0);
     if (out->ws_extra < 0) out->ws_extra = 0;
+    out->force_turn = json_get_bool(obj, "force_turn", 0) ? 1 : 0;
     out->valid = 1;
 }
 
@@ -472,11 +522,13 @@ static int append_match_caps_json(char *dst, size_t dst_cap, const SnesLobbyMatc
     if (!dst || dst_cap < 8 || !caps || !caps->valid) return 0;
     return snprintf(dst, dst_cap,
                     ",\"match_caps\":{\"v\":1,\"widescreen\":%s,\"widescreen_hud\":%s,"
-                    "\"ignore_aspect\":%s,\"input_delay\":%d,\"ws_extra\":%d}",
+                    "\"ignore_aspect\":%s,\"input_delay\":%d,\"ws_extra\":%d,"
+                    "\"force_turn\":%s}",
                     caps->widescreen ? "true" : "false",
                     caps->widescreen_hud ? "true" : "false",
                     caps->ignore_aspect ? "true" : "false",
-                    caps->input_delay, caps->ws_extra);
+                    caps->input_delay, caps->ws_extra,
+                    caps->force_turn ? "true" : "false");
 }
 
 static void queue_send(const char *json)
@@ -800,6 +852,7 @@ static void handle_server_json(const char *json)
         g_lc.join.ok = 1;
         g_lc.launch_pending = 0;
         g_lc.all_ready = 0;
+        member_rtt_clear();
         json_get_str(json, "lobby_id", g_lc.join.lobby_id, sizeof(g_lc.join.lobby_id));
         g_lc.join.session_id = (uint32_t)json_get_int(json, "session_id", 1);
         g_lc.join.local_slot = json_get_int(json, "local_slot", 0);
@@ -837,6 +890,7 @@ static void handle_server_json(const char *json)
         g_lc.join.ok = 1;
         g_lc.launch_pending = 0;
         g_lc.all_ready = 0;
+        member_rtt_clear();
         json_get_str(json, "lobby_id", g_lc.join.lobby_id, sizeof(g_lc.join.lobby_id));
         g_lc.join.session_id = (uint32_t)json_get_int(json, "session_id", 1);
         g_lc.join.local_slot = json_get_int(json, "local_slot", 1);
@@ -901,11 +955,50 @@ static void handle_server_json(const char *json)
     }
     if (strcmp(op, "signal") == 0) {
         char text[2048];
+        char from[SNES_LOBBY_ID_LEN];
         int type = json_get_int(json, "type", 0);
         int flag = json_get_int(json, "flag", 0);
         text[0] = '\0';
+        from[0] = '\0';
         json_get_str(json, "text", text, sizeof(text));
+        json_get_str(json, "from_player_id", from, sizeof(from));
+        if (type == SNES_LOBBY_SIG_RTT_PING) {
+            /* Only the host answers latency probes. */
+            if (g_lc.is_host)
+                (void)snes_lobby_send_signal(SNES_LOBBY_SIG_RTT_PONG, 0, text);
+            return;
+        }
+        if (type == SNES_LOBBY_SIG_RTT_PONG) {
+            unsigned long long sent = 0;
+            uint64_t now = lobby_mono_ms();
+            int slot;
+            if (sscanf(text, "%llu", &sent) == 1 && (uint64_t)sent <= now) {
+                int ms = (int)(now - (uint64_t)sent);
+                if (ms < 0) ms = 0;
+                if (ms > 60000) ms = 60000;
+                slot = local_member_slot();
+                if (slot >= 0 && slot < SNES_LOBBY_MAX_MEMBERS)
+                    g_lc.member_rtt_ms[slot] = ms;
+                /* Tell the host (and peers) our measured RTT to host. */
+                {
+                    char report[32];
+                    snprintf(report, sizeof(report), "%d", ms);
+                    (void)snes_lobby_send_signal(SNES_LOBBY_SIG_RTT_REPORT, 0,
+                                                 report);
+                }
+            }
+            return;
+        }
+        if (type == SNES_LOBBY_SIG_RTT_REPORT) {
+            int slot = member_slot_for_player(from);
+            int ms = (int)strtol(text, NULL, 10);
+            if (slot >= 0 && slot < SNES_LOBBY_MAX_MEMBERS && ms >= 0 &&
+                ms <= 60000)
+                g_lc.member_rtt_ms[slot] = ms;
+            return;
+        }
         enqueue_signal(type, flag, text);
+        (void)flag;
         return;
     }
     if (strcmp(op, "error") == 0) {
@@ -927,6 +1020,7 @@ static void handle_server_json(const char *json)
         g_lc.launch_pending = 0;
         memset(&g_lc.join, 0, sizeof(g_lc.join));
         match_caps_clear(&g_lc.match_caps);
+        member_rtt_clear();
         return;
     }
 }
@@ -1044,6 +1138,7 @@ void snes_lobby_disconnect(void)
         memset(&g_lc, 0, sizeof(g_lc));
         g_lc.fd = -1;
         strncpy(g_lc.display_name, dname, sizeof(g_lc.display_name) - 1);
+        member_rtt_clear();
     }
 }
 
@@ -1150,6 +1245,16 @@ void snes_lobby_pump(void)
         drain_ws_pending();
         if (!snes_lobby_connected()) {
             break;
+        }
+    }
+    /* Guests: probe host RTT about once per second while seated. */
+    if (g_lc.in_lobby && !g_lc.is_host && !g_lc.launch_pending) {
+        uint64_t now = lobby_mono_ms();
+        if (now >= g_lc.rtt_next_ping_ms) {
+            char ts[32];
+            snprintf(ts, sizeof(ts), "%llu", (unsigned long long)now);
+            (void)snes_lobby_send_signal(SNES_LOBBY_SIG_RTT_PING, 0, ts);
+            g_lc.rtt_next_ping_ms = now + 1000ull;
         }
     }
 }
@@ -1378,6 +1483,21 @@ int snes_lobby_member_get(int index, SnesLobbyMember *out)
     }
     *out = g_lc.members[index];
     return 1;
+}
+
+int snes_lobby_member_latency_ms(int slot)
+{
+    if (slot < 0 || slot >= SNES_LOBBY_MAX_MEMBERS)
+        return -1;
+    if (g_lc.host_player_id[0]) {
+        int i;
+        for (i = 0; i < g_lc.member_count; ++i) {
+            if (g_lc.members[i].slot == slot &&
+                strcmp(g_lc.members[i].player_id, g_lc.host_player_id) == 0)
+                return -1; /* host row */
+        }
+    }
+    return g_lc.member_rtt_ms[slot];
 }
 
 int snes_lobby_member_is_host(const SnesLobbyMember *member)

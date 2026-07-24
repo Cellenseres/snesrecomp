@@ -119,6 +119,8 @@ int  snes_netplay_peer_disconnected(uint32_t timeout_ms)
 int  snes_netplay_poll_admit(void) { return 1; }
 void snes_netplay_apply_host_sync(void) {}
 void snes_netplay_finish_frame(void) {}
+int  snes_netplay_remote_lead(void) { return 0; }
+int  snes_netplay_input_delay(void) { return 2; }
 uint32_t snes_netplay_published_inputs(void) { return 0; }
 uint32_t snes_netplay_active_mask(void) { return 0; }
 
@@ -435,7 +437,8 @@ int snes_netplay_start(const SnesNetplayConfig *cfg)
     rnet_config_init_defaults(&rcfg);
     rcfg.slot_count = 2;
     rcfg.local_slot = (rnet_u8)(cfg->local_slot < 0 ? 0 : (cfg->local_slot > 1 ? 1 : cfg->local_slot));
-    rcfg.input_delay = (rnet_u8)(cfg->input_delay < 0 ? 0 : (cfg->input_delay > 16 ? 16 : cfg->input_delay));
+    rcfg.input_delay = (rnet_u8)(cfg->input_delay < 0 ? 0
+                                : (cfg->input_delay > 20 ? 20 : cfg->input_delay));
     rcfg.session_id = cfg->session_id ? cfg->session_id : 1u;
 
     /* Host resolves auto (-1) before start; accept only 0/1 here. */
@@ -565,7 +568,7 @@ int snes_netplay_start(const SnesNetplayConfig *cfg)
         }
 
         {
-            int force_turn = 0;
+            int force_turn = cfg->force_turn ? 1 : 0;
 #if defined(SNESRECOMP_NET_FORCE_TURN)
             force_turn = 1;
 #endif
@@ -583,9 +586,10 @@ int snes_netplay_start(const SnesNetplayConfig *cfg)
                 return -4;
             }
             if (force_turn) {
+                ice.force_relay = 1;
                 fprintf(stderr,
                         "snes_netplay: FORCE_TURN — ICE will use relay-only "
-                        "candidates (both peers must match)\n");
+                        "candidates (host match_caps / all peers)\n");
             }
         }
 
@@ -966,6 +970,26 @@ void snes_netplay_finish_frame(void)
     rnet_session_advance(g_np.session);
     g_np.needs_advance = 0;
     g_np.latched_for_tick = 0;
+}
+
+int snes_netplay_remote_lead(void)
+{
+    RNetSessionStats st;
+    if (!snes_netplay_active())
+        return 0;
+    memset(&st, 0, sizeof(st));
+    rnet_session_get_stats(g_np.session, &st);
+    return st.remote_lead;
+}
+
+int snes_netplay_input_delay(void)
+{
+    RNetSessionStats st;
+    if (!snes_netplay_active())
+        return 2;
+    memset(&st, 0, sizeof(st));
+    rnet_session_get_stats(g_np.session, &st);
+    return st.delay > 0 ? (int)st.delay : 2;
 }
 
 #endif /* SNESRECOMP_NET */
