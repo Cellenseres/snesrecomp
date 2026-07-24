@@ -27,8 +27,8 @@ int  snes_lobby_list_get(int index, SnesLobbyRow *out) { (void)index; (void)out;
 void snes_lobby_set_game_identity(const char *a, const char *b) { (void)a; (void)b; }
 const char *snes_lobby_game_version(void) { return SNES_GAME_VERSION; }
 int  snes_lobby_create(const char *a, const char *b, const char *c, const char *d,
-                       const char *e, const SnesLobbyMatchCaps *f)
-{ (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; return -1; }
+                       const char *e, const SnesLobbyMatchCaps *f, int max_slots)
+{ (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; (void)max_slots; return -1; }
 int  snes_lobby_join(const char *a, const char *b, const char *c)
 { (void)a; (void)b; (void)c; return -1; }
 int  snes_lobby_leave(void) { return -1; }
@@ -1320,7 +1320,8 @@ int snes_lobby_list_get(int index, SnesLobbyRow *out)
 
 int snes_lobby_create(const char *name, const char *game_name,
                      const char *game_version, const char *password,
-                     const char *host_bind, const SnesLobbyMatchCaps *match_caps)
+                     const char *host_bind, const SnesLobbyMatchCaps *match_caps,
+                     int max_slots)
 {
     char msg[1536];
     char caps_json[512];
@@ -1330,6 +1331,10 @@ int snes_lobby_create(const char *name, const char *game_name,
     if (!snes_lobby_connected()) {
         return -1;
     }
+    if (max_slots < 2)
+        max_slots = 2;
+    if (max_slots > 8)
+        max_slots = 8;
     gn = game_name && game_name[0] ? game_name
          : (g_lc.filter_game_name[0] ? g_lc.filter_game_name : "Game");
     gv = effective_game_version(game_version);
@@ -1345,9 +1350,9 @@ int snes_lobby_create(const char *name, const char *game_name,
     }
     n = snprintf(msg, sizeof(msg),
                  "{\"op\":\"create\",\"name\":\"%s\",\"game_name\":\"%s\",\"game_version\":\"%s\",\"password\":\"%s\","
-                 "\"max_slots\":2,\"host_bind\":\"%s\",\"display_name\":\"%s\"%s}",
+                 "\"max_slots\":%d,\"host_bind\":\"%s\",\"display_name\":\"%s\"%s}",
                  name && name[0] ? name : "Lobby", gn, gv,
-                 password ? password : "", g_lc.my_bind,
+                 password ? password : "", max_slots, g_lc.my_bind,
                  g_lc.display_name[0] ? g_lc.display_name : "Host", caps_json);
     if (n < 0 || (size_t)n >= sizeof(msg)) return -1;
     queue_send(msg);

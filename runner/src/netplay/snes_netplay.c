@@ -1039,16 +1039,29 @@ static void np_diag_escape(char *out, size_t out_len, const char *in)
     out[oi] = '\0';
 }
 
+static const char *np_diag_ice_path(const RNetSessionStats *st)
+{
+    if (!g_np.use_ice)
+        return "lan";
+    if (!st)
+        return "pending";
+    if (st->ice_state == RNET_ICE_STATE_FAILED)
+        return "failed";
+    if (st->ice_state == RNET_ICE_STATE_COMPLETED ||
+        st->ice_state == RNET_ICE_STATE_CONNECTED)
+        return "unknown"; /* rich path/addr fields not in current recomp-net tip */
+    return "pending";
+}
+
 static int np_diag_path_ready(const RNetSessionStats *st)
 {
     if (!g_np.use_ice)
         return 1;
+    if (!st)
+        return 0;
     if (st->ice_state == RNET_ICE_STATE_FAILED)
         return 1;
-    if (st->ice_path[0] && strcmp(st->ice_path, "unknown") != 0 &&
-        strcmp(st->ice_path, "none") != 0)
-        return 1;
-    /* ICE completed but juice did not expose candidates yet. */
+    /* ICE completed/connected is enough without selected-candidate path. */
     if (st->ice_state == RNET_ICE_STATE_COMPLETED ||
         st->ice_state == RNET_ICE_STATE_CONNECTED)
         return 1;
@@ -1063,17 +1076,15 @@ static void np_diag_write_summary(FILE *f, const RNetSessionStats *st, uint32_t 
     char peer_esc[80];
     char stun_esc[140];
     char turn_esc[140];
-    char local_esc[128];
-    char remote_esc[128];
-    const char *path = st && st->ice_path[0] ? st->ice_path : "pending";
+    const char *path = np_diag_ice_path(st);
     const char *ice_state =
         st ? rnet_ice_state_name(st->ice_state) : "idle";
     const char *nat =
-        (!g_np.use_ice)             ? "lan"
-        : (strcmp(path, "relay") == 0) ? "turn"
-        : (strcmp(path, "srflx") == 0 || strcmp(path, "prflx") == 0) ? "stun"
-        : (strcmp(path, "host") == 0)  ? "host"
-                                       : "pending";
+        (!g_np.use_ice) ? "lan"
+        : (st && (st->ice_state == RNET_ICE_STATE_COMPLETED ||
+                  st->ice_state == RNET_ICE_STATE_CONNECTED))
+              ? "unknown"
+              : "pending";
 
     np_diag_escape(server_esc, sizeof(server_esc), g_np.lobby_server);
     np_diag_escape(lobby_esc, sizeof(lobby_esc), g_np.lobby_id);
@@ -1081,10 +1092,6 @@ static void np_diag_write_summary(FILE *f, const RNetSessionStats *st, uint32_t 
     np_diag_escape(peer_esc, sizeof(peer_esc), g_np.peer_hostport);
     np_diag_escape(stun_esc, sizeof(stun_esc), g_np.ice_stun_host);
     np_diag_escape(turn_esc, sizeof(turn_esc), g_np.ice_turn_host);
-    np_diag_escape(local_esc, sizeof(local_esc),
-                   st ? st->ice_local_addr : "");
-    np_diag_escape(remote_esc, sizeof(remote_esc),
-                   st ? st->ice_remote_addr : "");
 
     fprintf(f,
             "{\"type\":\"summary\",\"t_ms\":%u,\"match\":\"%s\","
@@ -1094,24 +1101,22 @@ static void np_diag_write_summary(FILE *f, const RNetSessionStats *st, uint32_t 
             "\"turn_configured\":%d,\"stun_host\":\"%s\",\"stun_port\":%u,"
             "\"turn_host\":\"%s\",\"turn_port\":%u,\"ice_state\":\"%s\","
             "\"ice_path\":\"%s\",\"ice_nat\":\"%s\","
-            "\"ice_local\":\"%s\",\"ice_remote\":\"%s\"}\n",
+            "\"ice_local\":\"\",\"ice_remote\":\"\"}\n",
             (unsigned)now, g_np.match_mode[0] ? g_np.match_mode : "unknown",
             server_esc, lobby_esc, g_np.is_host, g_np.local_slot,
             (unsigned)g_np.session_id, g_np.input_delay,
             g_np.use_ice ? "ice" : "lan", bind_esc, peer_esc,
             g_np.ice_has_turn ? 1 : 0, stun_esc, g_np.ice_stun_port, turn_esc,
-            g_np.ice_turn_port, ice_state ? ice_state : "idle", path, nat,
-            local_esc, remote_esc);
+            g_np.ice_turn_port, ice_state ? ice_state : "idle", path, nat);
 }
 
 void snes_netplay_diag_tick(void)
 {
     RNetSessionStats st;
-    char local_esc[128];
-    char remote_esc[128];
     uint32_t now;
     const char *transport;
     const char *ice_state;
+    const char *path;
 
     if (!np_diag_enabled() || !snes_netplay_active() || !g_np.session)
         return;
@@ -1141,15 +1146,15 @@ void snes_netplay_diag_tick(void)
     }
 
     if (!g_diag_file || g_diag_file_session != g_np.diag_session) {
-        char path[64];
+        char pathbuf[64];
         if (g_diag_file) {
             fclose(g_diag_file);
             g_diag_file = NULL;
         }
         /* Single shared path; truncate on each new match so the summary
          * stays at the top (same-machine dual clients will overwrite). */
-        snprintf(path, sizeof(path), "saves/netplay/net_diag.jsonl");
-        g_diag_file = fopen(path, "wb");
+        snprintf(pathbuf, sizeof(pathbuf), "saves/netplay/net_diag.jsonl");
+        g_diag_file = fopen(pathbuf, "wb");
         if (!g_diag_file)
             return;
         setvbuf(g_diag_file, NULL, _IOLBF, 0);
@@ -1157,7 +1162,7 @@ void snes_netplay_diag_tick(void)
         g_diag_summary_written = 0;
         fprintf(stderr, "snes_netplay: diag writing %s "
                         "(SNES_NET_DIAG_HZ interval %ums)\n",
-                path, np_diag_interval_ms());
+                pathbuf, np_diag_interval_ms());
     }
 
     if (!g_diag_summary_written) {
@@ -1167,30 +1172,25 @@ void snes_netplay_diag_tick(void)
 
     transport = snes_netplay_transport_name();
     ice_state = rnet_ice_state_name(st.ice_state);
-    np_diag_escape(local_esc, sizeof(local_esc), st.ice_local_addr);
-    np_diag_escape(remote_esc, sizeof(remote_esc), st.ice_remote_addr);
+    path = np_diag_ice_path(&st);
 
+    /* Thin RNetSessionStats tip: stall/ICE path counters are unavailable. */
     fprintf(g_diag_file,
             "{\"t_ms\":%u,\"slot\":%d,\"transport\":\"%s\",\"ice_state\":\"%s\","
-            "\"ice_path\":\"%s\",\"turn\":%d,\"ice_local\":\"%s\",\"ice_remote\":\"%s\","
+            "\"ice_path\":\"%s\",\"turn\":%d,\"ice_local\":\"\",\"ice_remote\":\"\","
             "\"running\":%d,\"sim_tick\":%u,\"delay\":%u,\"stall\":\"%s\","
-            "\"stall_ms\":%u,\"stall_max_ms\":%u,\"stall_streaks\":%u,"
-            "\"consec_stalls\":%u,\"admit_ok\":%u,\"remote_lead\":%d,"
+            "\"stall_ms\":0,\"stall_max_ms\":0,\"stall_streaks\":0,"
+            "\"consec_stalls\":0,\"admit_ok\":0,\"remote_lead\":%d,"
             "\"remote_wire\":%u,\"peer_rx_age_ms\":%llu,\"peer_gone\":%d,"
-            "\"desync\":%d,\"desync_tick\":%u,\"state_busy\":%d,\"state_op\":%u,"
-            "\"pkts_rx\":%u,\"input_sends\":%u}\n",
+            "\"desync\":%d,\"desync_tick\":%u,\"state_busy\":0,\"state_op\":0,"
+            "\"pkts_rx\":0,\"input_sends\":0}\n",
             (unsigned)now, g_np.local_slot, transport ? transport : "none",
-            ice_state ? ice_state : "idle", st.ice_path, g_np.ice_has_turn ? 1 : 0,
-            local_esc, remote_esc, st.is_running, (unsigned)st.sim_tick,
-            (unsigned)st.delay, rnet_admit_stall_name(st.last_stall),
-            (unsigned)st.last_admit_wait_ms, (unsigned)st.max_admit_wait_ms,
-            (unsigned)st.stall_count, (unsigned)st.consecutive_stalls,
-            (unsigned)st.admit_ok_count, st.remote_lead,
+            ice_state ? ice_state : "idle", path, g_np.ice_has_turn ? 1 : 0,
+            st.is_running, (unsigned)st.sim_tick, (unsigned)st.delay,
+            st.input_desync ? "desync" : "ok", st.remote_lead,
             (unsigned)st.highest_remote_wire,
             (unsigned long long)st.last_peer_rx_age_ms, st.peer_gone,
-            st.input_desync, (unsigned)st.desync_tick, st.state_busy,
-            (unsigned)st.state_op, (unsigned)st.packets_rx,
-            (unsigned)st.input_bundle_sends);
+            st.input_desync, (unsigned)st.desync_tick);
 }
 
 int snes_netplay_poll_admit(void)
