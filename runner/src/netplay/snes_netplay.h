@@ -50,6 +50,8 @@ typedef struct SnesNetplayConfig {
     /* Host match_caps / UI: force ICE typ relay (TURN). Env SNES_NET_FORCE_TURN
      * still overrides when set. */
     int         force_turn;
+    /* 1 = lobby-server UDP input relay (match_caps.force_input_relay). */
+    int         force_input_relay;
 } SnesNetplayConfig;
 
 void snes_netplay_config_defaults(SnesNetplayConfig *cfg);
@@ -96,6 +98,12 @@ void snes_netplay_stage_local(uint16_t buttons);
 int  snes_netplay_needs_local_sample(void);
 int  snes_netplay_input_desync(uint32_t *tick, uint32_t *local_hash, uint32_t *remote_hash);
 int  snes_netplay_peer_disconnected(uint32_t timeout_ms);
+
+/*
+ * Ingress / lobby / INPUT retransmit without try_admit. Used by the host
+ * starvation latch while waiting for remote runway to refill.
+ */
+void snes_netplay_pump(void);
 
 /*
  * Pump + try_admit. On success, published pads are ready via

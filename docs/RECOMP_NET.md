@@ -83,7 +83,14 @@ for (;;) {
      * draw_ppu_frame), then wall-clock pace — do not spin without present.
      * On admit success: RtlRunFrame + finish_frame; if remote_lead exceeds
      * input_delay, burst up to snes_host_catchup_budget() extra sim ticks
-     * (re-stage local pad before each poll_admit), then one full present. */
+     * (re-stage local pad before each poll_admit), then one full present.
+     *
+     * `snes_host_barrier_admit` latches delay-sync starvation after sustained
+     * admit misses, keeps `snes_netplay_pump` (retransmit) while holding,
+     * clears when `remote_lead >= D` for a few frames, then boosts
+     * `snes_host_catchup_budget` for one wall frame. Env:
+     * `SNES_NET_STARVATION_ENTER_FRAMES`, `EXIT_FRAMES`, `EXIT_HR_LEAD`.
+     * Does not invent inputs. */
     if (!snes_host_barrier_admit(from_lobby, &running, &hooks)) {
         if (!running)
             break;
@@ -215,8 +222,12 @@ Rules that matter for SNES recomp hosts:
   widescreen for traditional split-screen local multiplayer. Lobby
   `match_caps` carry 71; the launcher hides the Widescreen toggle.
 - Lobby `match_caps` (host-authoritative): create/start carry
-  `{widescreen,widescreen_hud,ignore_aspect,input_delay,ws_extra}`; guests
-  apply on launch. See `recomp-net-server/docs/WS_LOBBY.md`.
+  `{widescreen,widescreen_hud,ignore_aspect,input_delay,ws_extra,force_turn,force_input_relay}`; guests
+  apply on launch and `fill_launch` fails closed online when caps are missing.
+  LAN/Direct IP carries `input_delay` via the file registry (`RNET_LAN_LOBBY_2`)
+  and Direct IP `START`/`CAPS` datagrams (`force_input_relay` stays 0 offline).
+  Before RUNNING, recomp-net guests adopt the host's HELLO delay (slot 0).
+  See `recomp-net-server/docs/WS_LOBBY.md`.
 - Metal Warriors soft-return rematch: `MwSessionReset()` clears the LLE resume
   latch (`s_lle_did_reset` / resume PC / `g_cpu`) before `SnesInit`. Without
   that, rematch resumes a stale WAI on a wiped chip (`nmiEn=0`, blank).

@@ -1,6 +1,7 @@
 #include "snes_host_app.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <SDL.h>
@@ -34,6 +35,7 @@ void snes_host_app_apply_launch(const RecompLauncherCNetplayLaunch *net,
   if (net->input_delay >= 0 && net->input_delay <= 20)
     out->net_cfg.input_delay = net->input_delay;
   out->net_cfg.force_turn = 0;
+  out->net_cfg.force_input_relay = net->force_input_relay ? 1 : 0;
   {
     const SnesLobbyMatchCaps *caps = snes_lobby_match_caps();
     if (caps && caps->valid) {
@@ -80,8 +82,60 @@ const char *snes_host_connect_timeout_message(int is_ice)
 }
 
 static void barrier_soft_exit(int from_lobby, int *running, const char *origin,
+                              int *desync_logged, int *wait_logged);
+
+#define SNES_STARVATION_ENTER_DEFAULT 4
+#define SNES_STARVATION_EXIT_DEFAULT 3
+#define SNES_STARVATION_EXIT_HR_LEAD_DEFAULT 0
+#define SNES_STARVATION_GRACE_TICKS 60
+#define SNES_STARVATION_RECOVERY_BURST 16
+#define SNES_CATCHUP_CAP 16
+
+static struct {
+  int latched;
+  int enter_run;
+  int exit_run;
+  int recovery_amount;
+  int pending_consume;
+  int latch_logged;
+  int just_cleared;
+} g_starv;
+
+static int starv_env_int(const char *name, int def)
+{
+  const char *v = getenv(name);
+  long n;
+  char *end;
+
+  if (!v || !v[0])
+    return def;
+  n = strtol(v, &end, 10);
+  if (end == v || *end != '\0' || n < 0 || n > 64)
+    return def;
+  return (int)n;
+}
+
+static void starv_reset(void)
+{
+  memset(&g_starv, 0, sizeof(g_starv));
+}
+
+static int starv_runway_ok(void)
+{
+  int lead = snes_netplay_remote_lead();
+  int delay = snes_netplay_input_delay();
+  int hr_lead = starv_env_int("SNES_NET_STARVATION_EXIT_HR_LEAD",
+                              SNES_STARVATION_EXIT_HR_LEAD_DEFAULT);
+
+  if (delay < 0)
+    delay = 0;
+  return lead >= delay + hr_lead;
+}
+
+static void barrier_soft_exit(int from_lobby, int *running, const char *origin,
                               int *desync_logged, int *wait_logged)
 {
+  starv_reset();
   snes_netplay_soft_exit_to_lobby(origin, from_lobby);
   snes_netplay_connect_wait_reset();
   if (desync_logged)
@@ -90,6 +144,40 @@ static void barrier_soft_exit(int from_lobby, int *running, const char *origin,
     *wait_logged = 0;
   if (running)
     *running = 0;
+}
+
+static int barrier_poll_admit(int enter_need)
+{
+  if (snes_netplay_poll_admit()) {
+    g_starv.enter_run = 0;
+    if (g_starv.just_cleared) {
+      g_starv.just_cleared = 0;
+      g_starv.recovery_amount = SNES_STARVATION_RECOVERY_BURST;
+      g_starv.pending_consume = 1;
+      fprintf(stderr,
+              "snes_netplay: delay_sync_starvation cleared sim=%u lead=%d "
+              "D=%d — recovery burst %d\n",
+              (unsigned)snes_netplay_sim_tick(), snes_netplay_remote_lead(),
+              snes_netplay_input_delay(), SNES_STARVATION_RECOVERY_BURST);
+    }
+    return 1;
+  }
+
+  g_starv.just_cleared = 0;
+  g_starv.enter_run++;
+  if (g_starv.enter_run >= enter_need) {
+    g_starv.latched = 1;
+    g_starv.enter_run = 0;
+    if (!g_starv.latch_logged) {
+      fprintf(stderr,
+              "snes_netplay: delay_sync_starvation latched sim=%u lead=%d D=%d "
+              "(enter=%d)\n",
+              (unsigned)snes_netplay_sim_tick(), snes_netplay_remote_lead(),
+              snes_netplay_input_delay(), enter_need);
+      g_starv.latch_logged = 1;
+    }
+  }
+  return 0;
 }
 
 int snes_host_barrier_admit(int from_lobby, int *running,
@@ -105,8 +193,10 @@ int snes_host_barrier_admit(int from_lobby, int *running,
   uint16_t pad;
   const char *soft_origin;
 
-  if (!snes_netplay_active())
+  if (!snes_netplay_active()) {
+    starv_reset();
     return 0;
+  }
   if (!hooks || !hooks->capture_local_pad)
     return 0;
 
@@ -178,8 +268,45 @@ int snes_host_barrier_admit(int from_lobby, int *running,
     return 0;
   }
 
-  if (snes_netplay_poll_admit())
-    return 1;
+  if (g_starv.pending_consume) {
+    g_starv.recovery_amount = 0;
+    g_starv.pending_consume = 0;
+  }
+
+  {
+    uint32_t sim = snes_netplay_sim_tick();
+    int enter_need = starv_env_int("SNES_NET_STARVATION_ENTER_FRAMES",
+                                   SNES_STARVATION_ENTER_DEFAULT);
+    int exit_need = starv_env_int("SNES_NET_STARVATION_EXIT_FRAMES",
+                                  SNES_STARVATION_EXIT_DEFAULT);
+
+    if (sim < SNES_STARVATION_GRACE_TICKS) {
+      if (snes_netplay_poll_admit())
+        return 1;
+      return 0;
+    }
+
+    if (g_starv.latched) {
+      snes_netplay_pump();
+      if (starv_runway_ok()) {
+        g_starv.exit_run++;
+        if (g_starv.exit_run >= exit_need) {
+          g_starv.latched = 0;
+          g_starv.exit_run = 0;
+          g_starv.latch_logged = 0;
+          g_starv.just_cleared = 1;
+        } else {
+          return 0;
+        }
+      } else {
+        g_starv.exit_run = 0;
+        return 0;
+      }
+    }
+
+    if (barrier_poll_admit(enter_need))
+      return 1;
+  }
   return 0; /* input starvation / confirm stall — present held, retry next wall tick */
 }
 
@@ -188,6 +315,7 @@ int snes_host_catchup_budget(void)
   int lead;
   int delay;
   int extra;
+  int budget;
 
   if (!snes_netplay_active())
     return 0;
@@ -197,8 +325,11 @@ int snes_host_catchup_budget(void)
     delay = 0;
   extra = lead - delay;
   if (extra < 0)
-    return 0;
-  if (extra > 8)
-    return 8;
-  return extra;
+    extra = 0;
+  budget = extra;
+  if (g_starv.recovery_amount > budget)
+    budget = g_starv.recovery_amount;
+  if (budget > SNES_CATCHUP_CAP)
+    budget = SNES_CATCHUP_CAP;
+  return budget;
 }

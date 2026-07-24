@@ -124,6 +124,7 @@ static SnesLobbyMatchCaps default_caps(const RecompLauncherCSettings *settings)
     g_opts.fill_match_caps(g_opts.caps_ctx, settings, &caps);
   caps.input_delay = clamp_input_delay(caps.input_delay);
   caps.force_turn = g_lobby_force_turn ? 1 : 0;
+  caps.force_input_relay = g_lobby_force_input_relay ? 1 : 0;
   return caps;
 }
 
@@ -170,6 +171,7 @@ static int create_lan(const char *name, const char *endpoint,
   snprintf(g_lan_room.password, sizeof(g_lan_room.password), "%s",
            password ? password : "");
   g_lan_room.host_slot = 0;
+  g_lan_room.input_delay = clamp_input_delay(g_lobby_input_delay);
   if (!publish_lan_room())
     return 0;
   /* UDP waiting-room listen on the game port for remote Join Direct. */
@@ -291,7 +293,9 @@ static void arm_lan_launch(const RNetLanLobby *state)
       g_hosting_lan ? state->host_slot : 1 - state->host_slot;
   g_lan_launch.input_player = 0;
   g_lan_launch.session_id = 1;
-  g_lan_launch.input_delay = clamp_input_delay(g_lobby_input_delay);
+  g_lan_launch.input_delay =
+      clamp_input_delay(state->input_delay >= 2 ? state->input_delay
+                                                : g_lobby_input_delay);
   if (g_hosting_lan) {
     colon = strrchr(state->endpoint, ':');
     port = colon ? colon + 1 : "7777";
@@ -802,6 +806,7 @@ static int cb_request_start(void *ctx, const RecompLauncherCSettings *settings)
     if (!g_lan_room.joiner_name[0])
       return -1;
     g_lan_room.started = 1;
+    g_lan_room.input_delay = clamp_input_delay(g_lobby_input_delay);
     (void)publish_lan_room();
     arm_lan_launch(&g_lan_room);
     return 0;
@@ -858,12 +863,16 @@ static void cb_clear_last_error(void *ctx)
 static int cb_input_delay_get(void *ctx)
 {
   const SnesLobbyMatchCaps *caps;
+  RNetLanLobby state;
   (void)ctx;
-  if (!g_hosting_lan && !g_joined_lan) {
-    caps = snes_lobby_match_caps();
-    if (caps && caps->valid)
-      return clamp_input_delay(caps->input_delay);
+  if (g_hosting_lan || g_joined_lan) {
+    if (use_lan_members(&state) && state.input_delay >= 2)
+      return clamp_input_delay(state.input_delay);
+    return clamp_input_delay(g_lobby_input_delay);
   }
+  caps = snes_lobby_match_caps();
+  if (caps && caps->valid)
+    return clamp_input_delay(caps->input_delay);
   return clamp_input_delay(g_lobby_input_delay);
 }
 
@@ -872,7 +881,15 @@ static int cb_input_delay_set(void *ctx, int delay_frames)
   SnesLobbyMatchCaps caps;
   (void)ctx;
   g_lobby_input_delay = clamp_input_delay(delay_frames);
-  if (g_hosting_lan || g_joined_lan)
+  if (g_hosting_lan) {
+    g_lan_room.input_delay = g_lobby_input_delay;
+    (void)publish_lan_room();
+    if (g_direct_host && g_lan_room.joiner_name[0])
+      (void)rnet_lan_direct_host_notify_caps(g_direct_host,
+                                             g_lobby_input_delay);
+    return 0;
+  }
+  if (g_joined_lan)
     return 0;
   if (!snes_lobby_is_host())
     return -1;
@@ -883,21 +900,28 @@ static int cb_input_delay_set(void *ctx, int delay_frames)
 
 static int cb_force_input_relay_get(void *ctx)
 {
+  const SnesLobbyMatchCaps *caps;
   (void)ctx;
   if (g_hosting_lan || g_joined_lan)
     return 0;
+  caps = snes_lobby_match_caps();
+  if (caps && caps->valid)
+    return caps->force_input_relay ? 1 : 0;
   return g_lobby_force_input_relay ? 1 : 0;
 }
 
 static int cb_force_input_relay_set(void *ctx, int force)
 {
+  SnesLobbyMatchCaps caps;
   (void)ctx;
   if (g_hosting_lan || g_joined_lan)
     return 0; /* LAN/Direct IP does not use server input relay */
   if (!snes_lobby_is_host())
     return -1;
   g_lobby_force_input_relay = force ? 1 : 0;
-  return 0;
+  caps = default_caps(NULL);
+  caps.force_input_relay = g_lobby_force_input_relay ? 1 : 0;
+  return snes_lobby_set_match_caps(&caps);
 }
 
 static int cb_lobby_max_slots(void *ctx)
@@ -932,13 +956,15 @@ static int cb_fill_launch(void *ctx, RecompLauncherCNetplayLaunch *out)
   if (!snes_lobby_try_fill_launch(&join))
     return 0;
   caps = snes_lobby_match_caps();
+  if (!caps || !caps->valid)
+    return 0;
   memset(out, 0, sizeof(*out));
   out->enabled = 1;
   out->local_slot = join.local_slot;
   out->input_player = 0;
   out->session_id = join.session_id;
-  out->input_delay = caps && caps->valid ? caps->input_delay : 2;
-  out->force_input_relay = g_lobby_force_input_relay ? 1 : 0;
+  out->input_delay = clamp_input_delay(caps->input_delay);
+  out->force_input_relay = caps->force_input_relay ? 1 : 0;
   out->max_slots = join.max_slots >= 2 ? clamp_lobby_max_slots(join.max_slots)
                                        : clamp_lobby_max_slots(g_lobby_max_slots);
   out->player_count = join.player_count > 0 ? join.player_count : out->max_slots;

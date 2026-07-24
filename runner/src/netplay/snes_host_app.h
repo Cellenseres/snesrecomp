@@ -66,7 +66,8 @@ int snes_host_barrier_admit(int from_lobby, int *running,
 
 /*
  * Extra sim ticks allowed this wall frame after a successful admit
- * (min(8, max(0, remote_lead - input_delay))).
+ * (max(0, remote_lead - input_delay), plus one-shot starvation recovery
+ * burst after delay_sync_starvation clears; capped at 16).
  */
 int snes_host_catchup_budget(void);
 

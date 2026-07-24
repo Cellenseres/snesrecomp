@@ -117,6 +117,7 @@ int  snes_netplay_peer_disconnected(uint32_t timeout_ms)
     return 0;
 }
 int  snes_netplay_poll_admit(void) { return 1; }
+void snes_netplay_pump(void) {}
 void snes_netplay_apply_host_sync(void) {}
 void snes_netplay_finish_frame(void) {}
 int  snes_netplay_remote_lead(void) { return 0; }
@@ -178,6 +179,7 @@ typedef struct {
     char         bind_hostport[64];
     char         peer_hostport[64];
     int          input_delay;
+    int          force_input_relay;
     uint32_t     session_id;
     int          is_host;
     unsigned     ice_stun_port;
@@ -659,6 +661,7 @@ int snes_netplay_start(const SnesNetplayConfig *cfg)
     g_np.host_load_applied = 0;
     g_np.host_sram_applied = 0;
     g_np.input_delay = (int)rcfg.input_delay;
+    g_np.force_input_relay = cfg->force_input_relay ? 1 : 0;
     g_np.session_id = rcfg.session_id;
     g_np.is_host = (g_np.local_slot == 0) ? 1 : 0;
     snprintf(g_np.bind_hostport, sizeof(g_np.bind_hostport), "%s",
@@ -707,10 +710,10 @@ int snes_netplay_start(const SnesNetplayConfig *cfg)
 
     fprintf(stderr,
             "snes_netplay: started transport=%s slot=%d input_player=%d session=%u "
-            "delay=%u bind=%s peer=%s\n",
+            "delay=%u force_input_relay=%d bind=%s peer=%s\n",
             use_ice ? "ice" : "lan", g_np.local_slot, g_np.input_player,
             (unsigned)rcfg.session_id, (unsigned)rcfg.input_delay,
-            cfg->bind_hostport,
+            g_np.force_input_relay, cfg->bind_hostport,
             /* Lobby peer rewrite is unused for ICE (candidates via WS). */
             use_ice ? "(ice)" : cfg->peer_hostport);
     return 0;
@@ -1097,6 +1100,7 @@ static void np_diag_write_summary(FILE *f, const RNetSessionStats *st, uint32_t 
             "{\"type\":\"summary\",\"t_ms\":%u,\"match\":\"%s\","
             "\"lobby_server\":\"%s\",\"lobby_id\":\"%s\",\"is_host\":%d,"
             "\"slot\":%d,\"session_id\":%u,\"input_delay\":%d,"
+            "\"force_input_relay\":%d,"
             "\"transport\":\"%s\",\"bind\":\"%s\",\"peer\":\"%s\","
             "\"turn_configured\":%d,\"stun_host\":\"%s\",\"stun_port\":%u,"
             "\"turn_host\":\"%s\",\"turn_port\":%u,\"ice_state\":\"%s\","
@@ -1104,7 +1108,7 @@ static void np_diag_write_summary(FILE *f, const RNetSessionStats *st, uint32_t 
             "\"ice_local\":\"\",\"ice_remote\":\"\"}\n",
             (unsigned)now, g_np.match_mode[0] ? g_np.match_mode : "unknown",
             server_esc, lobby_esc, g_np.is_host, g_np.local_slot,
-            (unsigned)g_np.session_id, g_np.input_delay,
+            (unsigned)g_np.session_id, g_np.input_delay, g_np.force_input_relay,
             g_np.use_ice ? "ice" : "lan", bind_esc, peer_esc,
             g_np.ice_has_turn ? 1 : 0, stun_esc, g_np.ice_stun_port, turn_esc,
             g_np.ice_turn_port, ice_state ? ice_state : "idle", path, nat);
@@ -1193,26 +1197,39 @@ void snes_netplay_diag_tick(void)
             st.input_desync, (unsigned)st.desync_tick);
 }
 
+static void np_pump_session(void)
+{
+#if defined(SNES_HAS_LOBBY_CLIENT)
+    if (g_np.use_ice || snes_lobby_connected())
+        snes_lobby_pump();
+#endif
+    drain_lobby_signals();
+    rnet_session_pump(g_np.session);
+    np_apply_ready_state();
+    if (rnet_session_is_running(g_np.session))
+        np_maybe_start_sram_sync();
+}
+
+void snes_netplay_pump(void)
+{
+    if (!snes_netplay_active())
+        return;
+    np_pump_session();
+    snes_netplay_diag_tick();
+}
+
 int snes_netplay_poll_admit(void)
 {
     rnet_u32 sim;
     int admitted = 0;
     if (!snes_netplay_active()) return 1;
 
-#if defined(SNES_HAS_LOBBY_CLIENT)
-    if (g_np.use_ice || snes_lobby_connected())
-        snes_lobby_pump();
-#endif
-    drain_lobby_signals();
-
-    rnet_session_pump(g_np.session);
-    np_apply_ready_state();
+    np_pump_session();
     if (!rnet_session_is_running(g_np.session)) {
         snes_netplay_diag_tick();
         return 0;
     }
 
-    np_maybe_start_sram_sync();
     /* Titles with no battery RAM skip the initial sync barrier. */
     if (!g_np.sram_sync_done && (!g_sram || g_sram_size <= 0))
         g_np.sram_sync_done = 1;
@@ -1227,7 +1244,6 @@ int snes_netplay_poll_admit(void)
     sim = rnet_session_sim_tick(g_np.session);
     if (rnet_session_try_admit(g_np.session, sim)) {
         g_np.needs_advance = 1;
-        /* Apply game-defined slot-0 state before RtlRunFrame. */
         snes_netplay_apply_host_sync();
         admitted = 1;
     }

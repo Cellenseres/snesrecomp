@@ -52,6 +52,7 @@ typedef struct SnesLobbyMatchCaps {
     int  input_delay;      /* recomp-net delay frames (2-20 typical; default 2) */
     int  ws_extra;         /* widescreen margin; 0 = game default / env force */
     int  force_turn;       /* 0/1 — host: ICE relay-only (TURN) for all peers */
+    int  force_input_relay; /* 0/1 — lobby-server UDP input relay */
 } SnesLobbyMatchCaps;
 
 typedef struct SnesLobbyJoinInfo {

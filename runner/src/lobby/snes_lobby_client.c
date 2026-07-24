@@ -509,6 +509,7 @@ static void parse_match_caps_object(const char *obj, SnesLobbyMatchCaps *out)
     out->ws_extra = json_get_int(obj, "ws_extra", 0);
     if (out->ws_extra < 0) out->ws_extra = 0;
     out->force_turn = json_get_bool(obj, "force_turn", 0) ? 1 : 0;
+    out->force_input_relay = json_get_bool(obj, "force_input_relay", 0) ? 1 : 0;
     out->valid = 1;
 }
 
@@ -525,12 +526,13 @@ static int append_match_caps_json(char *dst, size_t dst_cap, const SnesLobbyMatc
     return snprintf(dst, dst_cap,
                     ",\"match_caps\":{\"v\":1,\"widescreen\":%s,\"widescreen_hud\":%s,"
                     "\"ignore_aspect\":%s,\"input_delay\":%d,\"ws_extra\":%d,"
-                    "\"force_turn\":%s}",
+                    "\"force_turn\":%s,\"force_input_relay\":%s}",
                     caps->widescreen ? "true" : "false",
                     caps->widescreen_hud ? "true" : "false",
                     caps->ignore_aspect ? "true" : "false",
                     caps->input_delay, caps->ws_extra,
-                    caps->force_turn ? "true" : "false");
+                    caps->force_turn ? "true" : "false",
+                    caps->force_input_relay ? "true" : "false");
 }
 
 static void queue_send(const char *json)
@@ -570,13 +572,32 @@ static int endpoint_has_usable_port(const char *endpoint)
     return port != 0;
 }
 
+static int using_server_input_relay(const SnesLobbyJoinInfo *j)
+{
+    if (g_lc.match_caps.valid && g_lc.match_caps.force_input_relay)
+        return 1;
+    /* Server rewrote both endpoints to the same relay advertise address. */
+    if (j && j->host_endpoint[0] && j->guest_endpoint[0] &&
+        endpoint_has_usable_port(j->host_endpoint) &&
+        endpoint_has_usable_port(j->guest_endpoint) &&
+        strcmp(j->host_endpoint, j->guest_endpoint) == 0 &&
+        (!g_lc.my_bind[0] || strcmp(j->host_endpoint, g_lc.my_bind) != 0))
+        return 1;
+    return 0;
+}
+
 static void fill_peer_bind_from_join(void)
 {
     SnesLobbyJoinInfo *j = &g_lc.join;
     const char *port;
+    const int force_relay = using_server_input_relay(j);
     memset(j->bind_hostport, 0, sizeof(j->bind_hostport));
     memset(j->peer_hostport, 0, sizeof(j->peer_hostport));
-    if (g_lc.is_host) {
+    if (force_relay) {
+        /* Everyone dials the lobby-server UDP relay — ephemeral local bind. */
+        strncpy(j->bind_hostport, "0.0.0.0:0", sizeof(j->bind_hostport) - 1);
+        strncpy(j->peer_hostport, j->host_endpoint, sizeof(j->peer_hostport) - 1);
+    } else if (g_lc.is_host) {
         /* host_endpoint is the address advertised to peers. It may be the
          * router's public/NAT address and therefore cannot be bound on this
          * machine. Listen on every local interface using the advertised port. */
@@ -931,18 +952,33 @@ static void handle_server_json(const char *json)
         return;
     }
     if (strcmp(op, "launch") == 0) {
+        char relay_endpoint[SNES_LOBBY_ENDPOINT_LEN];
         json_get_str(json, "host_endpoint", g_lc.join.host_endpoint, sizeof(g_lc.join.host_endpoint));
         json_get_str(json, "guest_endpoint", g_lc.join.guest_endpoint, sizeof(g_lc.join.guest_endpoint));
+        relay_endpoint[0] = '\0';
+        json_get_str(json, "relay_endpoint", relay_endpoint, sizeof(relay_endpoint));
         g_lc.join.player_count = json_get_int(json, "player_count", g_lc.join.player_count);
         g_lc.join.max_slots = json_get_int(json, "max_slots", g_lc.join.max_slots);
         g_lc.join.session_id = (uint32_t)json_get_int(json, "session_id", (int)g_lc.join.session_id);
         ingest_match_caps_from_json(json);
+        if (relay_endpoint[0] && endpoint_has_usable_port(relay_endpoint)) {
+            strncpy(g_lc.join.host_endpoint, relay_endpoint,
+                    sizeof(g_lc.join.host_endpoint) - 1);
+            g_lc.join.host_endpoint[sizeof(g_lc.join.host_endpoint) - 1] = '\0';
+            strncpy(g_lc.join.guest_endpoint, relay_endpoint,
+                    sizeof(g_lc.join.guest_endpoint) - 1);
+            g_lc.join.guest_endpoint[sizeof(g_lc.join.guest_endpoint) - 1] = '\0';
+            if (!g_lc.match_caps.valid)
+                g_lc.match_caps.valid = 1;
+            g_lc.match_caps.force_input_relay = 1;
+        }
         fill_peer_bind_from_join();
         parse_slots_array(json);
         /* Guest must know the host. Host may leave peer empty to learn the
          * guest from the first UDP packet (LAN / legacy guest_bind :0). */
         if (!g_lc.join.host_endpoint[0] || !g_lc.join.bind_hostport[0] ||
-            (!g_lc.is_host && !g_lc.join.peer_hostport[0])) {
+            (!g_lc.is_host && !g_lc.join.peer_hostport[0] &&
+             !using_server_input_relay(&g_lc.join))) {
             strncpy(g_lc.join.last_error, "missing_endpoints",
                     sizeof(g_lc.join.last_error) - 1);
             g_lc.launch_pending = 0;
