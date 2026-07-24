@@ -1328,13 +1328,13 @@ int snes_lobby_create(const char *name, const char *game_name,
     const char *gn;
     const char *gv;
     int n;
+    int slots;
     if (!snes_lobby_connected()) {
         return -1;
     }
-    if (max_slots < 2)
-        max_slots = 2;
-    if (max_slots > 8)
-        max_slots = 8;
+    slots = max_slots;
+    if (slots < 2) slots = 2;
+    if (slots > SNES_LOBBY_MAX_MEMBERS) slots = SNES_LOBBY_MAX_MEMBERS;
     gn = game_name && game_name[0] ? game_name
          : (g_lc.filter_game_name[0] ? g_lc.filter_game_name : "Game");
     gv = effective_game_version(game_version);
@@ -1352,7 +1352,7 @@ int snes_lobby_create(const char *name, const char *game_name,
                  "{\"op\":\"create\",\"name\":\"%s\",\"game_name\":\"%s\",\"game_version\":\"%s\",\"password\":\"%s\","
                  "\"max_slots\":%d,\"host_bind\":\"%s\",\"display_name\":\"%s\"%s}",
                  name && name[0] ? name : "Lobby", gn, gv,
-                 password ? password : "", max_slots, g_lc.my_bind,
+                 password ? password : "", slots, g_lc.my_bind,
                  g_lc.display_name[0] ? g_lc.display_name : "Host", caps_json);
     if (n < 0 || (size_t)n >= sizeof(msg)) return -1;
     queue_send(msg);

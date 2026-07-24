@@ -103,7 +103,8 @@ int  snes_lobby_list_get(int index, SnesLobbyRow *out);
 int  snes_lobby_create(const char *name, const char *game_name,
                       const char *game_version, const char *password,
                       const char *host_bind,
-                      const SnesLobbyMatchCaps *match_caps, int max_slots);
+                      const SnesLobbyMatchCaps *match_caps,
+                      int max_slots);
 
 /* Join lobby. guest_bind may be NULL/empty/"host:0" — the client always
  * advertises a concrete UDP bind (prefers 7778..) so server-hosted launches

@@ -33,8 +33,7 @@ void snes_host_app_apply_launch(const RecompLauncherCNetplayLaunch *net,
   snes_netplay_apply_env(&out->net_cfg);
   if (net->input_delay >= 0 && net->input_delay <= 20)
     out->net_cfg.input_delay = net->input_delay;
-  /* Launcher ABI uses force_input_relay; SNES maps that slot to ICE TURN force. */
-  out->net_cfg.force_turn = net->force_input_relay ? 1 : 0;
+  out->net_cfg.force_turn = 0;
   {
     const SnesLobbyMatchCaps *caps = snes_lobby_match_caps();
     if (caps && caps->valid) {
