@@ -75,6 +75,8 @@ const char *snes_lobby_default_url(void);
 int  snes_lobby_connect(const char *ws_url); /* 0 ok */
 void snes_lobby_disconnect(void);
 int  snes_lobby_connected(void);
+/* Current WS URL when connected (else empty string). */
+const char *snes_lobby_url(void);
 
 void snes_lobby_set_display_name(const char *name);
 const char *snes_lobby_display_name(void);

@@ -16,6 +16,7 @@ const char *snes_lobby_default_url(void)
 int  snes_lobby_connect(const char *ws_url) { (void)ws_url; return -1; }
 void snes_lobby_disconnect(void) {}
 int  snes_lobby_connected(void) { return 0; }
+const char *snes_lobby_url(void) { return ""; }
 void snes_lobby_set_display_name(const char *name) { (void)name; }
 const char *snes_lobby_display_name(void) { return ""; }
 const char *snes_lobby_player_id(void) { return ""; }
@@ -127,6 +128,7 @@ typedef struct {
     char host[128];
     int port;
     char path[128];
+    char url[256]; /* full WS URL passed to connect */
     char rx_http[4096];
     size_t rx_http_len;
     /* Bytes that arrived with the HTTP 101 response after the header end. */
@@ -1057,9 +1059,13 @@ int snes_lobby_connect(const char *ws_url)
         }
     }
 #endif
-    if (parse_ws_url(ws_url ? ws_url : snes_lobby_default_url(), g_lc.host, sizeof(g_lc.host),
-                     &g_lc.port, g_lc.path, sizeof(g_lc.path)) != 0) {
-        return -1;
+    {
+        const char *use = ws_url && ws_url[0] ? ws_url : snes_lobby_default_url();
+        if (parse_ws_url(use, g_lc.host, sizeof(g_lc.host), &g_lc.port, g_lc.path,
+                         sizeof(g_lc.path)) != 0) {
+            return -1;
+        }
+        snprintf(g_lc.url, sizeof(g_lc.url), "%s", use);
     }
     snprintf(portstr, sizeof(portstr), "%d", g_lc.port);
     memset(&hints, 0, sizeof(hints));
@@ -1145,6 +1151,13 @@ void snes_lobby_disconnect(void)
 int snes_lobby_connected(void)
 {
     return g_lc.connected && g_lc.fd >= 0;
+}
+
+const char *snes_lobby_url(void)
+{
+    if (!snes_lobby_connected() || !g_lc.url[0])
+        return "";
+    return g_lc.url;
 }
 
 void snes_lobby_set_display_name(const char *name)
