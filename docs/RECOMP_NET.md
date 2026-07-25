@@ -81,16 +81,16 @@ for (;;) {
     /* Prefer snes_host_barrier_admit (single-shot) + pad/event hooks.
      * On admit failure: present the held framebuffer (no RtlRunFrame /
      * draw_ppu_frame), then wall-clock pace — do not spin without present.
-     * On admit success: RtlRunFrame + finish_frame; if remote_lead exceeds
-     * input_delay, burst up to snes_host_catchup_budget() extra sim ticks
-     * (re-stage local pad before each poll_admit), then one full present.
+     * On admit success: RtlRunFrame + finish_frame; optionally burst up to
+     * snes_host_catchup_budget() extra sim ticks (default 0 — resume 1:1 and
+     * rebuild remote_lead toward D), then one full present.
      *
      * `snes_host_barrier_admit` latches delay-sync starvation after sustained
      * admit misses, keeps `snes_netplay_pump` (retransmit) while holding,
-     * clears when `remote_lead >= D` for a few frames, then boosts
-     * `snes_host_catchup_budget` for one wall frame. Env:
-     * `SNES_NET_STARVATION_ENTER_FRAMES`, `EXIT_FRAMES`, `EXIT_HR_LEAD`.
-     * Does not invent inputs. */
+     * clears when `remote_lead >= D` for a few frames. Env:
+     * `SNES_NET_STARVATION_ENTER_FRAMES`, `EXIT_FRAMES`, `EXIT_HR_LEAD`,
+     * `SNES_NET_CATCHUP_CAP`, `SNES_NET_STARVATION_RECOVERY_BURST` (both
+     * default 0). Does not invent inputs. */
     if (!snes_host_barrier_admit(from_lobby, &running, &hooks)) {
         if (!running)
             break;
@@ -143,14 +143,25 @@ seat) stays on LAN.
    frames).
 
 ICE still ranks **host > srflx > relay** — TURN is configured up front so
-libjuice can fall back to relay when hole punch is unstable (cannot add TURN
-after gather starts). Logs include selected candidates/addresses when ICE
-connects, and a concrete local IPv4 bind when `rnet_ipv4_enumerate` finds one.
+libjuice can fall back to relay when hole punch is unstable. Logs include
+selected candidates/addresses when ICE connects, and a concrete local IPv4
+bind when `rnet_ipv4_enumerate` finds one.
+
+**Auto TURN fallback** (recomp-net; no game change): if TURN credentials are
+present and ICE was not already `force_relay`, the session restarts gather
+once with relay-only candidates when:
+- ICE state becomes `FAILED`, or
+- ICE stays non-completed for ~12s (`RNET_ICE_RELAY_FALLBACK_MS`), or
+- ICE completes on a non-relay path but no session packets arrive for ~6s
+  (`RNET_ICE_RELAY_DEAD_MS`).
+
+Peer ICE restart offers also rebuild the local agent and adopt `force_relay`
+when TURN is available. Opt out: `RNET_ICE_NO_RELAY_FALLBACK=1`.
 
 **Force TURN / relay-only ICE** (hosted server lobbies; host sets for all peers):
 
 - **UI:** waiting-room **Lobby Settings** (under Input Delay) →
-  **Force TURN/S UDP Relay** (off by default). Published in lobby
+  **Force TURN / UDP Relay** (off by default). Published in lobby
   `match_caps.force_turn` so every peer applies the same ICE relay policy on
   launch. Disabled for LAN/Direct IP.
 - **Env:** `SNES_NET_FORCE_TURN=1` still forces relay for this process
@@ -168,15 +179,24 @@ start when force-TURN is on, and filters candidates to `typ relay` at runtime
 
 ### Netplay diagnostics (JSONL)
 
-Set `SNES_NET_DIAG=1` to write `saves/netplay/net_diag_slot{N}.jsonl`
+Set `SNES_NET_DIAG=1` to write `saves/netplay/net_diag.jsonl`
 (rate: `SNES_NET_DIAG_HZ`, default 2; truncated each match). Line 1 is a
 `type:"summary"` object with match mode (`hosted_lobby` / `direct_ip`),
-lobby server URL, lobby id, input delay, TURN configured vs negotiated ICE
-NAT path (`ice_nat`: `host` / `stun` / `turn` / `lan`, from `ice_path`),
-and endpoints. Later lines are timed samples: ICE path, admit stall reason
-(`wait_remote_input`, `wait_confirm`, …), stall wait ms, remote ring lead,
-peer RX age, packet/input counters. Sampling runs inside
-`snes_netplay_poll_admit` (no game-side hook required).
+lobby server URL, lobby id, input delay, TURN configured vs nominated ICE
+NAT path (`ice_nat`: `host` / `stun` / `turn` / `lan`, from `ice_path`
+`host|srflx|prflx|relay`), and selected addresses (`ice_local` /
+`ice_remote`). Later lines are timed samples: ICE path, admit stall reason
+(`wait_remote_input`, `wait_confirm`, `not_running`, …), stall wait ms,
+`frames_finished` (admitted `RtlRunFrame` count), remote ring lead, peer RX
+age, packet/input counters. Sampling runs inside `snes_netplay_poll_admit`
+(no game-side hook required). Sample field `turn` is 1 only when the
+nominated path is `relay` (not merely “TURN credentials configured”).
+
+Input bundles must cover the full delay prefix on start (`delay+1` wire
+ticks including tick 0). `RNET_MAX_BUNDLE` is 21 (max delay 20 + 1);
+`send_input_bundle` also splits across multiple INPUT packets if the
+window exceeds one packet — never truncate the low end of the window
+(that deadlocks admit at `sim_tick==0` with `wait_remote_input`).
 
 Rules that matter for SNES recomp hosts:
 
@@ -393,7 +413,7 @@ another lobby copy:
 | Soft-return reopen | After match | `snes_host_app_begin_soft_return(&gi, 1)` then `recomp_launcher_run_window` |
 | Rematch `session_reboot` | Host loop | `snes_host_ensure_sdl()` + `snes_host_session_reset()` |
 | `RtlGameInfo.session_reset` | CPU infra / RTL | Clear sticky LLE / frame gates / rematch latches (`MwSessionReset`, `SmwSessionReset`) |
-| Pad sample + `RtlRunFrame` gate | Host loop | Prefer `snes_host_barrier_admit` (single-shot) + pad/event hooks — stall → held present; admit → sim + `snes_host_catchup_budget` burst — do not copy admit loops |
+| Pad sample + `RtlRunFrame` gate | Host loop | Prefer `snes_host_barrier_admit` (single-shot) + pad/event hooks — stall → held present; admit → sim (+ optional `snes_host_catchup_budget`, default 0) — do not copy admit loops |
 | Connect-timeout modal | Host hook | `on_connect_timeout` only (message/UI). Clock is engine-owned — never a game `static` timer |
 | Runtime error into waiting room | Optional | `snes_host_lobby_set_runtime_error` (SMW uses this) |
 | ROM keep vs reload | Host loop | Title policy (free/`kRom` rematch path, CRC/SHA checks) |

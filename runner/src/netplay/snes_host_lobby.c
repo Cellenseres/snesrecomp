@@ -924,6 +924,32 @@ static int cb_force_input_relay_set(void *ctx, int force)
   return snes_lobby_set_match_caps(&caps);
 }
 
+static int cb_force_turn_get(void *ctx)
+{
+  const SnesLobbyMatchCaps *caps;
+  (void)ctx;
+  if (g_hosting_lan || g_joined_lan)
+    return 0;
+  caps = snes_lobby_match_caps();
+  if (caps && caps->valid)
+    return caps->force_turn ? 1 : 0;
+  return g_lobby_force_turn ? 1 : 0;
+}
+
+static int cb_force_turn_set(void *ctx, int force)
+{
+  SnesLobbyMatchCaps caps;
+  (void)ctx;
+  if (g_hosting_lan || g_joined_lan)
+    return 0; /* LAN/Direct IP does not use ICE TURN */
+  if (!snes_lobby_is_host())
+    return -1;
+  g_lobby_force_turn = force ? 1 : 0;
+  caps = default_caps(NULL);
+  caps.force_turn = g_lobby_force_turn ? 1 : 0;
+  return snes_lobby_set_match_caps(&caps);
+}
+
 static int cb_lobby_max_slots(void *ctx)
 {
   const SnesLobbyJoinInfo *join;
@@ -1027,6 +1053,8 @@ static RecompLauncherCNetplayCallbacks g_callbacks = {
     cb_force_input_relay_get,
     cb_force_input_relay_set,
     cb_lobby_max_slots,
+    cb_force_turn_get,
+    cb_force_turn_set,
 };
 
 const RecompLauncherCNetplayCallbacks *snes_host_lobby_callbacks(void)

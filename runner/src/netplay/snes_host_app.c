@@ -88,8 +88,10 @@ static void barrier_soft_exit(int from_lobby, int *running, const char *origin,
 #define SNES_STARVATION_EXIT_DEFAULT 3
 #define SNES_STARVATION_EXIT_HR_LEAD_DEFAULT 0
 #define SNES_STARVATION_GRACE_TICKS 60
-#define SNES_STARVATION_RECOVERY_BURST 16
-#define SNES_CATCHUP_CAP 16
+/* Default 0: after starvation clears, resume ~1 sim/wall frame and let
+ * remote_lead rebuild toward D instead of a turbo recovery burst. */
+#define SNES_STARVATION_RECOVERY_BURST_DEFAULT 0
+#define SNES_CATCHUP_CAP_DEFAULT 0
 
 static struct {
   int latched;
@@ -151,14 +153,24 @@ static int barrier_poll_admit(int enter_need)
   if (snes_netplay_poll_admit()) {
     g_starv.enter_run = 0;
     if (g_starv.just_cleared) {
+      int burst = starv_env_int("SNES_NET_STARVATION_RECOVERY_BURST",
+                                SNES_STARVATION_RECOVERY_BURST_DEFAULT);
       g_starv.just_cleared = 0;
-      g_starv.recovery_amount = SNES_STARVATION_RECOVERY_BURST;
-      g_starv.pending_consume = 1;
-      fprintf(stderr,
-              "snes_netplay: delay_sync_starvation cleared sim=%u lead=%d "
-              "D=%d — recovery burst %d\n",
-              (unsigned)snes_netplay_sim_tick(), snes_netplay_remote_lead(),
-              snes_netplay_input_delay(), SNES_STARVATION_RECOVERY_BURST);
+      g_starv.recovery_amount = burst;
+      g_starv.pending_consume = burst > 0 ? 1 : 0;
+      if (burst > 0) {
+        fprintf(stderr,
+                "snes_netplay: delay_sync_starvation cleared sim=%u lead=%d "
+                "D=%d — recovery burst %d\n",
+                (unsigned)snes_netplay_sim_tick(), snes_netplay_remote_lead(),
+                snes_netplay_input_delay(), burst);
+      } else {
+        fprintf(stderr,
+                "snes_netplay: delay_sync_starvation cleared sim=%u lead=%d "
+                "D=%d — resume 1:1 (rebuild input buffer)\n",
+                (unsigned)snes_netplay_sim_tick(), snes_netplay_remote_lead(),
+                snes_netplay_input_delay());
+      }
     }
     return 1;
   }
@@ -316,20 +328,25 @@ int snes_host_catchup_budget(void)
   int delay;
   int extra;
   int budget;
+  int cap;
 
   if (!snes_netplay_active())
+    return 0;
+  cap = starv_env_int("SNES_NET_CATCHUP_CAP", SNES_CATCHUP_CAP_DEFAULT);
+  if (cap <= 0 && g_starv.recovery_amount <= 0)
     return 0;
   lead = snes_netplay_remote_lead();
   delay = snes_netplay_input_delay();
   if (delay < 0)
     delay = 0;
+  /* Only spend surplus above D; keep the delay runway intact. */
   extra = lead - delay;
   if (extra < 0)
     extra = 0;
   budget = extra;
   if (g_starv.recovery_amount > budget)
     budget = g_starv.recovery_amount;
-  if (budget > SNES_CATCHUP_CAP)
-    budget = SNES_CATCHUP_CAP;
+  if (budget > cap)
+    budget = cap;
   return budget;
 }

@@ -76,6 +76,8 @@ int  snes_netplay_local_slot(void);
 /* Resolved host device index (0/1) used for local capture. */
 int  snes_netplay_input_player(void);
 uint32_t snes_netplay_sim_tick(void);
+/* Admitted RtlRunFrame + finish_frame count for this session (0 if inactive). */
+uint32_t snes_netplay_frames_finished(void);
 
 int  snes_netplay_start(const SnesNetplayConfig *cfg);
 void snes_netplay_shutdown(void);
