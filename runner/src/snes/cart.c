@@ -7,6 +7,8 @@
 #include "cart.h"
 #include "snes.h"
 #include "superfx.h"
+#include "cx4.h"
+#include "../cpu_state.h"   /* g_cpu.master_cycles — the Cx4 sync timebase */
 
 static uint8_t cart_readLorom(Cart* cart, uint8_t bank, uint16_t adr);
 static void cart_writeLorom(Cart* cart, uint8_t bank, uint16_t adr, uint8_t val);
@@ -26,6 +28,7 @@ Cart* cart_init(Snes* snes) {
 
 void cart_free(Cart* cart) {
   superfx_destroy(cart->superfx);
+  cx4_destroy(cart->cx4);
   free(cart->rom);
   free(cart->ram);
   free(cart);
@@ -34,15 +37,22 @@ void cart_free(Cart* cart) {
 void cart_reset(Cart* cart) {
   //if(cart->ramSize > 0 && cart->ram != NULL) memset(cart->ram, 0, cart->ramSize); // for now
   if (cart->superfx) superfx_reset(cart->superfx);
+  if (cart->cx4) cx4_reset(cart->cx4);
 }
 
 void cart_saveload(Cart *cart, SaveLoadInfo *sli) {
   sli->func(sli, cart->ram, cart->ramSize);
+  /* Cx4 games have no battery RAM, so the block above streams nothing; the
+   * coprocessor's own 8 KB of working RAM is the guest-visible state that a
+   * mid-game state must carry. */
+  if (cart->cx4) cx4_saveload(cart->cx4, sli);
 }
 
 void cart_load(Cart* cart, int type, uint8_t* rom, int romSize, int ramSize) {
   superfx_destroy(cart->superfx);
   cart->superfx = NULL;
+  cx4_destroy(cart->cx4);
+  cart->cx4 = NULL;
   cart->type = type;
   if(cart->rom != NULL) free(cart->rom);
   if(cart->ram != NULL) free(cart->ram);
@@ -59,10 +69,19 @@ void cart_load(Cart* cart, int type, uint8_t* rom, int romSize, int ramSize) {
   if (type == CART_SUPERFX)
     cart->superfx = superfx_create(cart->rom, cart->romSize,
                                    cart->ram, cart->ramSize);
+  if (type == CART_CX4) {
+    cart->cx4 = cx4_create(cart->rom, cart->romSize, cart->ram, cart->ramSize);
+    /* The HG51B S169's internal reciprocal table is not in the game ROM. This
+     * reports loudly on failure rather than computing on zeros. */
+    (void)cx4_load_firmware(cart->cx4, NULL);
+  }
 }
 
 void cart_sync_coprocessors(Cart *cart, uint64_t master_clock) {
   if (cart && cart->superfx) superfx_sync(cart->superfx, master_clock);
+  /* Instruction-level Cx4: its results appear over time, so it must be caught
+   * up to the CPU's clock before anything observes its state. */
+  if (cart && cart->cx4) cx4_sync(cart->cx4, master_clock);
 }
 
 uint8_t *cart_getRomPtr(Cart *cart, uint8_t bank, uint16_t adr) {
@@ -84,6 +103,15 @@ uint8_t *cart_getRomPtr(Cart *cart, uint8_t bank, uint16_t adr) {
       off = ((uint32_t)(canonical & 0x3f) << 16) | adr;
       break;
     }
+    case CART_CX4: {
+      /* Cx4 carts are LoROM. The $6000-$7FFF window in banks $00-$3F/$80-$BF
+       * belongs to the coprocessor, not the ROM — return NULL so callers route
+       * it through cart_read/cart_write. */
+      uint8_t canonical = bank & 0x7f;
+      if (adr < 0x8000 && canonical < 0x40) return NULL;
+      off = ((uint32_t)canonical << 15) | (adr & 0x7fff);
+      break;
+    }
     default:
       return NULL;
   }
@@ -97,6 +125,18 @@ uint8_t cart_read(Cart* cart, uint8_t bank, uint16_t adr) {
       return 0;
     case CART_LOROM: return cart_readLorom(cart, bank, adr);
     case CART_HIROM: return cart_readHirom(cart, bank, adr);
+    case CART_CX4:
+      /* Catch the DSP up before observing it: unlike a command-level model,
+       * an instruction-level Cx4 produces results as its clock advances. */
+      cart_sync_coprocessors(cart, g_cpu.master_cycles);
+      if (cart_is_cx4_window(cart, bank, adr))
+        return cx4_read(cart->cx4, adr);
+      /* While the DSP owns the bus, a CPU read of the vector area returns Cx4
+       * IO instead of ROM — that is how the coprocessor overrides the vectors. */
+      if (cx4_owns_bus(cart->cx4) && (bank & 0x7f) == 0x00 &&
+          adr >= 0xffc0)
+        return cx4_read_vector_override(cart->cx4, adr);
+      return cart_readLorom(cart, bank, adr);
     case CART_SUPERFX:
       if ((bank < 0x40 || (bank >= 0x80 && bank < 0xc0)) &&
           adr >= 0x3000 && adr <= 0x32ff)
@@ -123,6 +163,13 @@ void cart_write(Cart* cart, uint8_t bank, uint16_t adr, uint8_t val) {
     case 0: break;
     case CART_LOROM: cart_writeLorom(cart, bank, adr, val); break;
     case CART_HIROM: cart_writeHirom(cart, bank, adr, val); break;
+    case CART_CX4:
+      cart_sync_coprocessors(cart, g_cpu.master_cycles);
+      if (cart_is_cx4_window(cart, bank, adr))
+        cx4_write(cart->cx4, adr, val);
+      else
+        cart_writeLorom(cart, bank, adr, val);
+      break;
     case CART_SUPERFX:
       if ((bank < 0x40 || (bank >= 0x80 && bank < 0xc0)) &&
           adr >= 0x3000 && adr <= 0x32ff)

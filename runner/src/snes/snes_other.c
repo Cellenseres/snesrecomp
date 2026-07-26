@@ -73,9 +73,23 @@ bool snes_loadRom(Snes* snes, const uint8_t* data, int length) {
   // check if we can load it
   if (headers[used].coprocessor == 1)
     headers[used].cartType = CART_SUPERFX;
-  if(headers[used].cartType > CART_SUPERFX) {
+  /* Coprocessor id $F means "see the $FFBF sub-type byte"; $10 there is
+   * Capcom's Cx4 (Mega Man X2 / X3 — the only two Cx4 titles). The other $F
+   * sub-types (SPC7110, ST010/011/018) are still unsupported. */
+  if (headers[used].coprocessor == 0xf && headers[used].exCoprocessor == 0x10)
+    headers[used].cartType = CART_CX4;
+  if(headers[used].cartType > CART_CX4) {
     printf("Failed to load rom: unsupported type (%d)\n", headers[used].cartType);
     return false;
+  }
+  if (headers[used].coprocessor == 0xf && headers[used].exCoprocessor != 0x10) {
+    /* SPC7110 / ST010 / ST011 / ST018 are not modelled. Load as plain LoROM
+     * so the failure surfaces through the off-rails ring (which names the
+     * unbacked window) rather than as a bare refusal — but say so plainly, a
+     * silent mismap is the worst outcome. */
+    printf("Warning! Unmodelled custom coprocessor ($FFBF sub-type %02x) — "
+           "its register window is unbacked; expect off-rails reads.\n",
+           headers[used].exCoprocessor);
   }
   // expand to a power of 2
   int newLength = 0x8000;
@@ -96,12 +110,23 @@ bool snes_loadRom(Snes* snes, const uint8_t* data, int length) {
     test *= 2;
   }
   // load it
+  /* SRAM size. The header stores it as 0x400 << n, so n == 0 is ambiguous
+   * between "1 KB" and "none"; hardware treats 0 as none. Cx4 carts declare
+   * chipset ROM+COPRO with ramSize byte 0 and carry no battery at all — do not
+   * hand them a phantom 1 KB SRAM mapped over banks $70-$7D. */
+  int cart_ram_size;
+  if (headers[used].cartType == CART_SUPERFX)
+    cart_ram_size = headers[used].ramSize > 1024 ? headers[used].ramSize
+                                                 : 64 * 1024;
+  else if (headers[used].cartType == CART_CX4)
+    cart_ram_size = 0;
+  else
+    cart_ram_size = headers[used].chips > 0 ? headers[used].ramSize : 0;
+
   cart_load(
     snes->cart, headers[used].cartType,
     newData, newLength,
-    headers[used].cartType == CART_SUPERFX
-      ? (headers[used].ramSize > 1024 ? headers[used].ramSize : 64 * 1024)
-      : (headers[used].chips > 0 ? headers[used].ramSize : 0)
+    cart_ram_size
   );
   
   free(newData);

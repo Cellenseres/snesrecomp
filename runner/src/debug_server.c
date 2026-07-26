@@ -50,6 +50,7 @@ extern int snes_frame_counter;
 #include "snes/saveload.h"
 #include "snes/cart.h"
 #include "snes/superfx.h"
+#include "snes/cx4.h"
 #include "snes/interp_bridge.h"
 #include "cpu_state.h"
 #include "cpu_trace.h"
@@ -4391,6 +4392,61 @@ static void cmd_get_interrupt_state(const char *args) {
              s->hPos, s->vPos, s->hTimer, s->vTimer, s->autoJoyTimer);
 }
 
+/* cx4_state [n] — instruction-level Cx4 (HG51B S169) status plus the always-on
+ * ring of DSP program starts. Fields that matter when something looks wrong:
+ *   firmware    0 => cx4.rom missing; every RDROM result is zeros
+ *   rdrom_hits  >0 with firmware 0 => the missing blob is actively corrupting
+ *   locked      1 => the DSP wedged its bus (same-space DMA); needs a reset
+ *   insns       total DSP instructions retired — 0 means it never ran at all */
+static void cmd_cx4_state(const char *args) {
+    if (!g_snes || !g_snes->cart || !g_snes->cart->cx4) {
+        send_fmt("{\"error\":\"cx4 not available\"}");
+        return;
+    }
+    Cx4 *c = g_snes->cart->cx4;
+    unsigned n = 32;
+    if (args && args[0]) sscanf(args, "%u", &n);
+    if (n > kCx4RunRingEntries) n = kCx4RunRingEntries;
+
+    static Cx4RunEvent ev[kCx4RunRingEntries];
+    const uint32_t got = cx4_run_ring_copy(c, ev, n);
+    if (s_client_sock == SOCKET_INVALID) return;
+
+    /* Stream it: the reply is one newline-terminated line, so it cannot be
+     * assembled with repeated send_fmt (each of those emits its own line). */
+    uint32_t rd_lo = 0, rd_hi = 0;
+    cx4_rdrom_index_range(c, &rd_lo, &rd_hi);
+    char buf[4096];
+    int pos = snprintf(buf, sizeof(buf),
+                       "{\"runs\":%u,\"insns\":%llu,\"rdrom_hits\":%u,"
+                       "\"firmware\":%d,\"locked\":%d,\"irq\":%d,"
+                       /* Per-256-entry sub-table: 0=reciprocal 1=sqrt 2,3=trig.
+                        * A block with 0 hits is one the game never reads. */
+                       "\"rdrom_block\":[%u,%u,%u,%u],"
+                       "\"rdrom_distinct\":%u,\"rdrom_idx_lo\":%u,"
+                       "\"rdrom_idx_hi\":%u,"
+                       "\"returned\":%u,\"ring\":[",
+                       cx4_run_ring_count(c),
+                       (unsigned long long)cx4_instructions_executed(c),
+                       cx4_rdrom_hits(c), cx4_firmware_loaded(c),
+                       cx4_locked(c), cx4_irq_pending(c),
+                       cx4_rdrom_block_hits(c, 0), cx4_rdrom_block_hits(c, 1),
+                       cx4_rdrom_block_hits(c, 2), cx4_rdrom_block_hits(c, 3),
+                       cx4_rdrom_distinct(c), rd_lo, rd_hi, got);
+    send(s_client_sock, buf, pos, 0);
+    for (uint32_t i = 0; i < got; ) {
+        pos = 0;
+        for (; i < got && pos < 3800; i++)
+            pos += snprintf(buf + pos, sizeof(buf) - pos,
+                            "%s{\"seq\":%u,\"pb\":\"0x%04x\",\"pc\":\"0x%02x\","
+                            "\"base\":\"0x%06x\"}",
+                            i ? "," : "", ev[i].seq, ev[i].pb, ev[i].pc,
+                            ev[i].base);
+        send(s_client_sock, buf, pos, 0);
+    }
+    send(s_client_sock, "]}\n", 3, 0);
+}
+
 static void cmd_get_superfx_state(const char *args) {
     if (!g_snes || !g_snes->cart || !g_snes->cart->superfx) {
         send_fmt("{\"error\":\"superfx not available\"}");
@@ -7192,6 +7248,7 @@ static const CmdEntry s_commands[] = {
     {"post_mortem_dump", cmd_post_mortem_dump},
     {"get_v2_cpu",    cmd_get_v2_cpu},
     {"get_superfx_state", cmd_get_superfx_state},
+    {"cx4_state",      cmd_cx4_state},
     {"trace_dump",     cmd_trace_dump},
     {"trace_dbpb",     cmd_trace_dbpb},
     {"trace_clear",    cmd_trace_clear},

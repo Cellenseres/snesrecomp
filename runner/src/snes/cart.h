@@ -10,6 +10,7 @@
 
 typedef struct Cart Cart;
 typedef struct SuperFx SuperFx;
+typedef struct Cx4 Cx4;
 
 #include "snes.h"
 
@@ -22,9 +23,20 @@ struct Cart {
   uint8_t* ram;
   uint32_t ramSize;
   SuperFx* superfx;
+  Cx4* cx4;
 };
 
-enum { CART_LOROM = 1, CART_HIROM = 2, CART_SUPERFX = 3 };
+enum { CART_LOROM = 1, CART_HIROM = 2, CART_SUPERFX = 3, CART_CX4 = 4 };
+
+/* True when (bank, adr) lands in the Capcom Cx4's CPU-visible window:
+ * banks $00-$3F / $80-$BF, address $6000-$7FFF. Callers on the fast bus
+ * paths (cpu_state.c) use this to route to cart_read/cart_write instead of
+ * falling through to a ROM pointer. */
+static inline bool cart_is_cx4_window(const Cart* cart, uint8_t bank,
+                                     uint16_t adr) {
+  return cart && cart->type == CART_CX4 && adr >= 0x6000 && adr < 0x8000 &&
+         (bank < 0x40 || (bank >= 0x80 && bank < 0xc0));
+}
 
 void cart_sync_coprocessors(Cart *cart, uint64_t master_clock);
 
