@@ -30,6 +30,7 @@ TEST_MODULES = [
     'test_smwdisx_compare',
     'test_sync_funcs_h',
     'test_snes_cycles',
+    'test_cx4_datarom',
 ]
 
 

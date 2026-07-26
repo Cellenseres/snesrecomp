@@ -27,6 +27,86 @@ the whole-program fixed point and production integration.
 - Original branch: `feat/superfx-gsu/recompiler-rs`
 - License declared by the upstream crate: MIT
 
+## ares — Capcom Cx4 / Hitachi HG51B S169 coprocessor
+
+`runner/src/snes/cx4.{c,h}` is an instruction-level emulation of the Hitachi
+HG51B S169 DSP that Capcom packaged as the Cx4 (used only by Mega Man X2 and
+Mega Man X3). It is ported from **ares**, which is **ISC-licensed** —
+permissive, notice-only, no field-of-use restriction.
+
+- Upstream: https://github.com/ares-emulator/ares
+- Files of origin: `ares/component/processor/hg51b/*` (core: registers,
+  instruction decode, instruction semantics, cache/DMA/bus control) and
+  `ares/sfc/coprocessor/hitachidsp/memory.cpp` (SNES-side address decode and
+  IO register map)
+- License: ISC (see below)
+
+This is the faithful LLE floor: the DSP fetches and executes the game's own Cx4
+program out of cartridge ROM. Any future host-side Cx4 shortcut must be a
+**gated optimization layered on top of it**, authored from this core's observed
+behavior — never a substitute for it.
+
+### Derivation / modifications
+
+- C++ → C11. ares is written against nall's bit-precise integer types
+  (`n1`/`n5`/`n8`/`n15`/`n24`/`n48`) where every assignment silently truncates
+  to the declared width. That masking is load-bearing arithmetic — the
+  accumulator is 24 bits, the program counter is 8 bits and *wraps* to advance
+  the instruction cache page, the multiplier is 48 bits. C has no such types, so
+  every width is enforced by an explicit named mask (`M24`, `M15`, …) and the
+  porting hazard is documented at the top of `cx4.c`.
+- ares' 65536-entry `std::function` dispatch table (built at construction) is
+  replaced by a two-level `switch` on the opcode's top 6 bits, sub-switching on
+  the top 8 where the encoding requires it. Same mapping, expressed directly.
+- Arithmetic shift right and sign-extension are written out explicitly rather
+  than relying on implementation-defined signed `>>`.
+- `ROR` by 0 or 24 is special-cased; the reference only survives that shift
+  width by relying on 32-bit truncation.
+- ares runs the DSP as a scheduler `Thread` synchronized against the CPU. Here
+  it is a pull model: `cx4_sync(master_clock)` converts elapsed SNES master
+  cycles into 20 MHz Cx4 cycles (carrying the remainder so the ratio does not
+  drift) and runs the core until the budget is spent, wired into the engine's
+  existing `cart_sync_coprocessors` seam. An idle fast path collapses the
+  budget when the core is halted with nothing pending — exactly equivalent,
+  minus millions of no-op calls.
+- Added observability in keeping with this project's ring-buffer policy: an
+  always-on ring of DSP program starts, a retired-instruction count, an
+  `RDROM` hit counter, and a loud one-shot diagnostic when `RDROM` executes
+  without firmware loaded. Exposed as the debug-server `cx4_state` command.
+- The `disassembler.cpp` / `debugger.cpp` components were not ported.
+
+### Firmware (NOT included, and not ours to ship)
+
+The HG51B S169 carries a 1024-entry × 24-bit internal data ROM — a
+reciprocal/division table — which is **not** part of the game ROM. `cx4.rom`,
+3072 bytes. It is Capcom/Hitachi data; this project does not redistribute it,
+and `.gitignore` refuses it. `cx4_load_firmware()` searches
+`$SNESRECOMP_CX4_ROM`, `./cx4.rom`, `./firmware/cx4.rom`, and the game ROM's
+directory, and reports loudly rather than silently computing on zeros.
+
+Measured on Mega Man X2's boot self-test: the Cx4 program reads **all 1024**
+data-ROM entries. The firmware is genuinely required, not optional.
+
+### ISC License
+
+```
+ares
+
+Copyright (c) 2004-2025 ares team, Near et al
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+```
+
 ## LakeSnes — 65816 CPU core
 
 `runner/src/snes/interp816.{c,h}`, the 65816 interpreter backing the

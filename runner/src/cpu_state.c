@@ -32,6 +32,7 @@
 #include "cpu_trace.h"
 #include "snes/snes.h"
 #include "snes/cart.h"
+#include "snes/cx4.h"
 
 extern Snes *g_snes;
 
@@ -328,6 +329,11 @@ uint8 cpu_read8(CpuState *cpu, uint8 bank, uint16 addr) {
     if (is_hw_reg(bank, addr)) { cpu_pace_cycles(addr); cpu_hw_log(addr, 1, 0); return ReadReg(addr); }
     if (g_snes && g_snes->cart && g_snes->cart->type == CART_SUPERFX)
         return cart_read(g_snes->cart, bank, addr);
+    /* Cx4 coprocessor window ($00-$3F/$80-$BF:$6000-$7FFF). is_hw_reg stops at
+     * $6000 and there is no SRAM here, so without this the read would fall
+     * through to RomPtr and trip the off-rails detector. */
+    if (g_snes && cart_is_cx4_window(g_snes->cart, bank, addr))
+        return cart_read(g_snes->cart, bank, addr);
     int sram = cpu_sram_offset(bank, addr);
     if (sram >= 0) return g_sram[sram];
     /* ROM read. RomPtr requires the global g_rom pointer to be live. */
@@ -352,6 +358,16 @@ uint16 cpu_read16(CpuState *cpu, uint8 bank, uint16 addr) {
     if (g_snes && g_snes->cart && g_snes->cart->type == CART_SUPERFX)
         return (uint16)cart_read(g_snes->cart, bank, addr) |
                ((uint16)cart_read(g_snes->cart, bank, (uint16)(addr + 1)) << 8);
+    /* Cx4 window. Compose from two byte reads; if the high byte leaves the
+     * window (word read at $7FFF) route it through cpu_read8 so the boundary
+     * uses the same logic as everything else. */
+    if (g_snes && cart_is_cx4_window(g_snes->cart, bank, addr)) {
+        uint16 hi_addr = (uint16)(addr + 1);
+        uint8 hi = cart_is_cx4_window(g_snes->cart, bank, hi_addr)
+            ? cart_read(g_snes->cart, bank, hi_addr)
+            : cpu_read8(cpu, bank, hi_addr);
+        return (uint16)cart_read(g_snes->cart, bank, addr) | ((uint16)hi << 8);
+    }
     int sram_lo = cpu_sram_offset(bank, addr);
     if (sram_lo >= 0) {
         /* Compose word from two byte fetches. If the high byte crosses
@@ -425,6 +441,12 @@ void cpu_write8(CpuState *cpu, uint8 bank, uint16 addr, uint8 v) {
     if (g_snes && g_snes->cart && g_snes->cart->type == CART_SUPERFX) {
         cart_write(g_snes->cart, bank, addr, v); return;
     }
+    /* Cx4 coprocessor window. Must run BEFORE the drop-through below, or the
+     * command register write that triggers every Cx4 operation is silently
+     * discarded and the game spins on the status register forever. */
+    if (g_snes && cart_is_cx4_window(g_snes->cart, bank, addr)) {
+        cart_write(g_snes->cart, bank, addr, v); return;
+    }
     int sram = cpu_sram_offset(bank, addr);
     if (sram >= 0) { g_sram[sram] = v; return; }
     /* ROM / unmapped write: drop. */
@@ -491,6 +513,18 @@ void cpu_write16(CpuState *cpu, uint8 bank, uint16 addr, uint16 v) {
     if (g_snes && g_snes->cart && g_snes->cart->type == CART_SUPERFX) {
         cart_write(g_snes->cart, bank, addr, (uint8)v);
         cart_write(g_snes->cart, bank, (uint16)(addr + 1), (uint8)(v >> 8));
+        return;
+    }
+    /* Cx4 window. Low byte then high byte, matching the guest's bus order —
+     * both games set up a 16-bit operand then poke the command register with a
+     * separate 8-bit store, so ordering here is observable. */
+    if (g_snes && cart_is_cx4_window(g_snes->cart, bank, addr)) {
+        cart_write(g_snes->cart, bank, addr, (uint8)v);
+        uint16 hi_addr = (uint16)(addr + 1);
+        if (cart_is_cx4_window(g_snes->cart, bank, hi_addr))
+            cart_write(g_snes->cart, bank, hi_addr, (uint8)(v >> 8));
+        else
+            cpu_write8(cpu, bank, hi_addr, (uint8)(v >> 8));
         return;
     }
     int sram_lo = cpu_sram_offset(bank, addr);

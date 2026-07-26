@@ -52,6 +52,26 @@ set(SNESRECOMP_RUNNER_SOURCES
     ${SNESRECOMP_RUNNER_ROOT}/src/snes/interp_bridge.c
 )
 
+# ── Capcom Cx4 coprocessor (Mega Man X2 / X3 only) ────────────────────────
+# cx4.c is an instruction-level Hitachi HG51B S169 core ported from ares
+# (ISC licence — permissive, notice-only). It is the faithful LLE floor; any
+# future host-side Cx4 shortcut must be a gated optimization layered ON TOP of
+# it, authored from this core's observed behavior.
+#
+# The cx4_unavailable.c fallback exists so a checkout missing cx4.c still
+# builds: the non-Cx4 games stay byte-identical and X2/X3 fail loudly.
+if(EXISTS ${SNESRECOMP_RUNNER_ROOT}/src/snes/cx4.c)
+    list(APPEND SNESRECOMP_RUNNER_SOURCES
+        ${SNESRECOMP_RUNNER_ROOT}/src/snes/cx4.c)
+    message(STATUS "Cx4: instruction-level HG51B S169 core (ares, ISC)")
+else()
+    list(APPEND SNESRECOMP_RUNNER_SOURCES
+        ${SNESRECOMP_RUNNER_ROOT}/src/snes/cx4_unavailable.c)
+    message(STATUS
+        "Cx4: cx4.c absent — building the not-present stub. "
+        "Non-Cx4 games unaffected; Mega Man X2/X3 will not boot.")
+endif()
+
 # The TCP debug server + emulator-oracle command handlers are a developer-only
 # feature. debug_server.h provides static-inline no-op stubs when SNESRECOMP_TRACE
 # is 0 (the default), so debug_server.c must only be compiled when tracing is on —

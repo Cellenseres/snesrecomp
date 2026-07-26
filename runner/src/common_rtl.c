@@ -16,6 +16,7 @@
 #include "snes/snes.h"
 #include "snes/apu.h"
 #include "snes/cart.h"
+#include "snes/cx4.h"
 #include "snes/msu1.h"
 #include "snes/ws_shadow.h"
 #include "cpu_state.h"
@@ -679,6 +680,18 @@ uint8 *RomPtr(uint32_t addr) {
   uint8_t bank = (uint8_t)(addr >> 16);
   uint16_t lo = (uint16_t)addr;
   extern Snes *g_snes;
+  /* Cx4 working RAM reached through a ROM-shaped pointer. The reachable
+   * caller is SimpleHdma_GetPtr (below), which resolves HDMA table pointers
+   * through RomPtr -- and Mega Man X2/X3 stage graphics data in Cx4 RAM, so an
+   * HDMA table there is plausible. NOT reachable from cpu_read8: that
+   * intercepts the Cx4 window itself before its RomPtr fallthrough. Serve it
+   * from the coprocessor buffer; cx4_ram_ptr returns NULL for the $7F40-$7F5E
+   * MMIO registers, which must go through cart_read and so fall through to the
+   * off-rails report below. */
+  if (g_snes && cart_is_cx4_window(g_snes->cart, bank, lo)) {
+    uint8_t *cx4p = cx4_ram_ptr(g_snes->cart->cx4, lo);
+    if (cx4p) return cx4p;
+  }
   uint8_t *mapped = g_snes && g_snes->cart
       ? cart_getRomPtr(g_snes->cart, bank, lo) : NULL;
   if (bank == 0x7e || bank == 0x7f || !mapped) {

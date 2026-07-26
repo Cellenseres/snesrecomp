@@ -9,6 +9,7 @@
 #include "interp816.h"
 #include "snes.h"   /* Snes, apuCatchupCycles, snes_catchupApu */
 #include "superfx.h"
+#include "cx4.h"
 #include "debug_server.h"
 #include "cosim.h"  /* cosim_insn — instruction-granular lockstep (no-op unless SNES_COSIM) */
 #include "common_cpu_infra.h"  /* cpu_take_tailcall_return_context — swallow a stale
@@ -668,7 +669,12 @@ static int _interp_run_core(CpuState *cpu, uint32_t entry_pc24,
         if (auto_quiescent && steps && !in.i && g_snes &&
             (g_snes->inIrq ||
              (g_snes->cart && g_snes->cart->superfx &&
-              g_snes->cart->superfx->irq_pending))) {
+              g_snes->cart->superfx->irq_pending) ||
+             /* The Cx4 asserts the CPU IRQ line when its program halts with
+              * interrupts enabled ($7F51 bit 0 clear). Same shape as the GSU
+              * line above; omitting it would starve the handler. */
+             (g_snes->cart && g_snes->cart->cx4 &&
+              cx4_irq_pending(g_snes->cart->cx4)))) {
             s_lle_resume_pc24=pc_before;
             sync_interp_to_cpu(&in,cpu);
             bridge_apu_flush(cpu);
