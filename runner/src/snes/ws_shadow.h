@@ -89,6 +89,14 @@ void WsShadowPrefillTile(int layer, uint32_t worldTileX, uint32_t worldTileY,
 void WsShadowForceTile(int layer, uint32_t worldTileX, uint32_t worldTileY,
                        uint16_t entry);
 
+/* ForceTile yields to world cells the game itself wrote (via
+ * WsShadowOnVramWrite) within the last `frames` frames (0 = off, max 250).
+ * Required by games that draw moving objects INTO the BG tilemap
+ * (platforms, elevators): widened object windows make the game draw them
+ * in the margins, and an exact margin refill would erase them at the
+ * native boundary on the very next frame. */
+void WsShadowSetRespectGameWrites(int layer, int frames);
+
 /* retainHistory layers only: force a west-of-view tile at a viewport-row Y
  * key (not world Y). Same ownership model as live capture: every present
  * overwrites. Games call this with strip memory west of the DMA base so the

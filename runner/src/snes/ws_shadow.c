@@ -39,6 +39,11 @@ typedef struct WsShadowLayer {
   int captureCols;
   int westKeep; /* 0 => kWsWestKeep default */
   int eastKeep; /* 0 => legacy behaviour: east-of-view history is pruned */
+  /* ForceTile yields to cells the game itself wrote within this many
+   * frames (0 = off). Games that draw moving objects into the BG tilemap
+   * (platforms, elevators) need their dynamic writes to win over an exact
+   * margin refill, or the object is erased outside the native window. */
+  int respectGameWrites;
   bool rejectEastEcho;
   uint16_t retainMapBase;
   bool haveRetainMapBase;
@@ -221,7 +226,15 @@ void WsShadowOnVramWrite(uint16_t wordAdr, uint16_t value) {
     else
       chunk = layer->dir < 0 ? k0 - 1 : k0 + 1;
     uint32_t tx = chunk * 32 + (uint32_t)(col & 31);
-    SetEntry(layer, tx, WorldRowForMapRow(layer, row), value);
+    uint32_t ty = WorldRowForMapRow(layer, row);
+    SetEntry(layer, tx, ty, value);
+    /* Frame-stamp the game's own write so a respectGameWrites margin
+     * refill yields to it (dynamic BG objects: platforms, elevators). */
+    if (layer->respectGameWrites && layer->cooldown && InBounds(tx, ty)) {
+      extern int snes_frame_counter;
+      layer->cooldown[ty * kWsShadowXTiles + tx] =
+          (uint8_t)(snes_frame_counter & 0xFF);
+    }
   }
 }
 
@@ -297,6 +310,16 @@ void WsShadowPrefillTile(int layerIndex, uint32_t worldTileX,
   }
 }
 
+void WsShadowSetRespectGameWrites(int layerIndex, int frames) {
+  if (layerIndex < 0 || layerIndex >= kLayers)
+    return;
+  if (frames < 0)
+    frames = 0;
+  if (frames > 250) /* u8 frame stamps; keep aliasing window sane */
+    frames = 250;
+  s_layers[layerIndex].respectGameWrites = frames;
+}
+
 void WsShadowForceTile(int layerIndex, uint32_t worldTileX,
                        uint32_t worldTileY, uint16_t entry) {
   if (layerIndex < 0 || layerIndex >= kLayers)
@@ -304,8 +327,25 @@ void WsShadowForceTile(int layerIndex, uint32_t worldTileX,
   WsShadowLayer *layer = &s_layers[layerIndex];
   if (layer->retainHistory)
     return;
-  if (layer->entries && (layer->active || layer->registered))
-    SetEntry(layer, worldTileX, worldTileY, entry);
+  if (!layer->entries || !(layer->active || layer->registered))
+    return;
+  /* Yield to a recent game write (dynamic BG object drawn in the margin
+   * through widened object windows). Stamp 0 doubles as "never written";
+   * the 1-in-256 frame whose low byte is 0 merely skips one stamp. u8
+   * stamps alias every 256 frames, so an ancient write can read fresh
+   * for up to `respect` frames — it then serves the game's own captured
+   * entry (real content, one-wrap old) rather than anything invented. */
+  if (layer->respectGameWrites && layer->cooldown &&
+      InBounds(worldTileX, worldTileY)) {
+    uint8_t stamp = layer->cooldown[worldTileY * kWsShadowXTiles + worldTileX];
+    if (stamp) {
+      extern int snes_frame_counter;
+      uint8_t age = (uint8_t)((snes_frame_counter & 0xFF) - stamp);
+      if (age <= (uint8_t)layer->respectGameWrites)
+        return;
+    }
+  }
+  SetEntry(layer, worldTileX, worldTileY, entry);
 }
 
 void WsShadowForceWestViewportTile(int layerIndex, uint32_t worldTileX,
