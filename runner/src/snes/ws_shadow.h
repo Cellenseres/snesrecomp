@@ -65,6 +65,14 @@ void WsShadowSetWestKeep(int layer, int tiles);
  * pixel-identical to no-history at all. */
 void WsShadowSetEastKeep(int layer, int tiles);
 
+/* Always-on margin lookup accounting, split by side. Cumulative since process
+ * start; never armed. Without this, "the gutter looks unchanged" cannot be
+ * told apart from "history was never consulted" or "consulted and missed". */
+typedef struct WsShadowMarginStat {
+  uint64_t westHit, westMiss, eastHit, eastMiss;
+} WsShadowMarginStat;
+void WsShadowGetMarginStats(int layer, WsShadowMarginStat *out);
+
 /* When set, capture columns east of the 256px view that match any live
  * view column are cleared instead of stored — kills VRAM-wrap / period
  * phantoms (e.g. a second door) in the right widescreen gutter. */

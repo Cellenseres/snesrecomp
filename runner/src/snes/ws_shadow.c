@@ -66,6 +66,20 @@ typedef struct WsShadowLayer {
 
 static WsShadowLayer s_layers[kLayers];
 
+/* Always-on margin lookup accounting (see WsShadowTile). Never armed. */
+static WsShadowMarginStat s_marginStats[kLayers];
+
+void WsShadowGetMarginStats(int layerIndex, WsShadowMarginStat *out) {
+  if (!out)
+    return;
+  if (layerIndex < 0 || layerIndex >= kLayers) {
+    WsShadowMarginStat zero = {0, 0, 0, 0};
+    *out = zero;
+    return;
+  }
+  *out = s_marginStats[layerIndex];
+}
+
 static int32_t WorldFromWrapped(uint32_t anchor, uint32_t coord) {
   int32_t delta = (int32_t)((coord - anchor) & 0x3ff);
   if (delta >= 512)
@@ -338,9 +352,67 @@ void WsShadowInvalidateTile(int layerIndex, uint32_t worldTileX,
   ClearEntry(&s_layers[layerIndex], worldTileX, worldTileY);
 }
 
+/* Fill still-missing margin cells by repeating the nearest captured viewport
+ * edge column. Was a no-op stub despite being documented, which silently
+ * defeated every caller relying on it for the LEADING gutter.
+ *
+ * This is the only source available for a leading edge: its world content has
+ * never been displayed, so history has nothing, and a 256px streamer with no
+ * readable CPU-side map (Mega Man X2) has nothing to prefill from either.
+ * Repeating the edge column is an approximation, but a bounded one -- and the
+ * alternative is the renderer's plain map wrap, which shows a DIFFERENT
+ * SECTION of the level.
+ *
+ * Only fills cells that are missing, so real history and real captures always
+ * win. Call after WsShadowFrame.
+ *
+ * Row keying matches capture exactly: retainHistory layers key by VIEWPORT row
+ * (0..rows-1), everything else by world row (ty0 + row). Getting this wrong
+ * writes cells the serve path never reads. */
 void WsShadowExtendEdges(int layerIndex, int marginPixels) {
-  (void)layerIndex;
-  (void)marginPixels;
+  if (layerIndex < 0 || layerIndex >= kLayers || marginPixels <= 0)
+    return;
+  WsShadowLayer *layer = &s_layers[layerIndex];
+  if (!layer->active || !layer->entries || !layer->haveLastOrigin)
+    return;
+
+  const unsigned sh = layer->tileShift ? layer->tileShift : 3;
+  const uint32_t tx0 = layer->lastTx0;
+  const int view_cols = 256 >> sh;
+  const int rows = (sh == 4) ? 16 : 29;
+  /* +1 so a fine-scroll partial tile at the outer edge is still covered. */
+  const int margin_tiles = (int)(((uint32_t)marginPixels + (1u << sh) - 1u) >> sh) + 1;
+  if (margin_tiles <= 0)
+    return;
+
+  const uint32_t east_col = tx0 + (uint32_t)view_cols - 1u;
+
+  for (int row = 0; row < rows && row < kWsLiveMaxRows; row++) {
+    const uint32_t ty =
+        layer->retainHistory ? (uint32_t)row : (layer->lastTy0 + (uint32_t)row);
+
+    uint16_t edge, tmp;
+
+    if (GetEntry(layer, tx0, ty, &edge)) {
+      for (int i = 1; i <= margin_tiles; i++) {
+        if (tx0 < (uint32_t)i)
+          break;
+        const uint32_t tx = tx0 - (uint32_t)i;
+        if (!GetEntry(layer, tx, ty, &tmp))
+          SetEntry(layer, tx, ty, edge);
+      }
+    }
+
+    if (GetEntry(layer, east_col, ty, &edge)) {
+      for (int i = 1; i <= margin_tiles; i++) {
+        const uint32_t tx = east_col + (uint32_t)i;
+        if (tx >= kWsShadowXTiles)
+          break;
+        if (!GetEntry(layer, tx, ty, &tmp))
+          SetEntry(layer, tx, ty, edge);
+      }
+    }
+  }
 }
 
 void WsShadowExtendSolidEdges(int layerIndex, int extraPx) {
@@ -1144,8 +1216,19 @@ uint16_t WsShadowTile(int layerIndex, int screenX, uint32_t wrappedY,
   }
   if (layer->entries && worldX >= 0 && worldY >= 0) {
     uint16_t entry;
-    if (GetEntry(layer, (uint32_t)worldX >> shift,
-                 (uint32_t)worldY >> shift, &entry))
+    const bool hit = GetEntry(layer, (uint32_t)worldX >> shift,
+                              (uint32_t)worldY >> shift, &entry);
+    /* Always-on margin hit/miss accounting, split by side. Cheap counters, no
+     * arming: without them "the gutter looks the same" is indistinguishable
+     * from "history was never consulted" from "history was consulted and
+     * missed". */
+    WsShadowMarginStat *st = &s_marginStats[layerIndex];
+    if (screenX < 0) {
+      if (hit) st->westHit++; else st->westMiss++;
+    } else {
+      if (hit) st->eastHit++; else st->eastMiss++;
+    }
+    if (hit)
       return entry;
   }
 
