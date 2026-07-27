@@ -58,6 +58,18 @@ func Upload 8079
         os.unlink(path)
 
 
+def test_force_lle_absolute_boundary_parses():
+    path = _write("""\
+bank = 00
+force_lle 038DA0
+""")
+    try:
+        cfg = load_bank_cfg(path)
+        assert cfg.force_lle == {0x038DA0}
+    finally:
+        os.unlink(path)
+
+
 def test_func_with_end_directive_parses_end():
     path = _write("""\
 bank = 00

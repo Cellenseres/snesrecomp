@@ -107,6 +107,8 @@ pub struct BankCfg {
     pub includes: Vec<String>,
     pub entries: Vec<BankEntry>,
     pub names: Vec<NameDecl>,
+    /// Exact 24-bit executable function boundaries which must remain LLE.
+    pub force_lle: BTreeSet<u32>,
     pub exclude_ranges: Vec<(u32, u32)>,
     pub data_regions: Vec<(u32, u32, u32)>, // (bank, start, end)
     pub reloc_regions: Vec<RelocRegion>,
@@ -306,6 +308,18 @@ pub fn parse_bank_cfg(text: &str, path: &str) -> Result<BankCfg, String> {
                 ));
             }
             cfg.hle_func.insert(pc16, c_name.to_string());
+            continue;
+        }
+        // force_lle <pc24>
+        if head == "force_lle" {
+            if tokens.len() != 2 {
+                return Err(format!("{path}: force_lle needs <pc24>, got: {stripped:?}"));
+            }
+            let pc24 =
+                parse_hex(tokens[1]).map_err(|e| format!("{path}: force_lle {e}"))? & 0xFFFFFF;
+            if !cfg.force_lle.insert(pc24) {
+                return Err(format!("{path}: force_lle duplicate boundary ${pc24:06X}"));
+            }
             continue;
         }
         // force_variant_at <site_pc24> <m> <x>
@@ -1023,5 +1037,12 @@ mod tests {
             "t"
         )
         .is_err());
+    }
+
+    #[test]
+    fn force_lle_parses_absolute_boundary_and_rejects_duplicates() {
+        let cfg = parse_bank_cfg("bank = 00\nforce_lle 038DA0\n", "t").unwrap();
+        assert_eq!(cfg.force_lle, BTreeSet::from([0x038DA0]));
+        assert!(parse_bank_cfg("bank = 00\nforce_lle 038DA0\nforce_lle 038DA0\n", "t").is_err());
     }
 }

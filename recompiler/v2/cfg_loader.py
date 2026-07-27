@@ -25,6 +25,9 @@ v2 KEEPS:
 - `name <hex_addr> <name>` — friendly-naming for cross-bank labels.
   v2 emits these as `void NAME(CpuState *cpu);` forward declarations
   in funcs.h (Phase 6e/f). For now we just retain them.
+- `force_lle <pc24>` — keep an exact architectural function boundary on
+  the interpreter tier even when profile promotion or static reachability
+  would otherwise materialise it as native code.
 - `exclude_range <start> <end>` — data region carved out of decode.
 - `data_region <bank> <start> <end>` — same idea, cross-bank.
 
@@ -77,6 +80,11 @@ class BankCfg:
     includes: List[str] = field(default_factory=list)
     entries: List[BankEntry] = field(default_factory=list)
     names: List[NameDecl] = field(default_factory=list)
+    # Exact 24-bit function boundaries which must stay interpreter-only.
+    # Unlike exclude_range, these are executable ROM routines; they merely
+    # rely on behavior (for example return-stack rewriting) that the native
+    # callable ABI cannot represent.
+    force_lle: set = field(default_factory=set)
     exclude_ranges: List[Tuple[int, int]] = field(default_factory=list)
     data_regions: List[Tuple[int, int, int]] = field(default_factory=list)  # (bank, start, end)
     # exit_mx_at directives: list of (bank, addr16, m, x) — annotates the
@@ -358,6 +366,25 @@ def load_bank_cfg(path: str) -> BankCfg:
                         f"{path}: hle_func c_function_name must be a valid "
                         f"C identifier, got: {c_name!r}")
                 cfg.hle_func[pc16] = c_name
+                continue
+
+            # force_lle <pc24> — retain this executable function boundary on
+            # the interpreter tier. The address is deliberately absolute so
+            # a directive can live in a minimal bank00.cfg while naming any
+            # ROM bank discovered from a profile manifest.
+            if head == 'force_lle':
+                if len(tokens) != 2:
+                    raise ValueError(
+                        f"{path}: force_lle needs <pc24>, got: {stripped!r}")
+                try:
+                    pc24 = _parse_hex(tokens[1]) & 0xFFFFFF
+                except ValueError as e:
+                    raise ValueError(
+                        f"{path}: force_lle bad pc24 {tokens[1]!r}: {e}")
+                if pc24 in cfg.force_lle:
+                    raise ValueError(
+                        f"{path}: force_lle duplicate boundary ${pc24:06X}")
+                cfg.force_lle.add(pc24)
                 continue
 
             # force_variant_at <site_pc24> <m> <x> — pin the variant

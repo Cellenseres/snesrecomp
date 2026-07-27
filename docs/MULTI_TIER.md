@@ -176,6 +176,22 @@ two things are non-negotiable (vs the dev-tool framing where they'd be optional)
    (§8, §10.5) — the loop must not launder a runtime mis-execution into a
    trusted static translation.
 
+Some executable boundaries are intentionally not promotable. A routine that
+rewrites its caller's guest return frame, consumes inline return data, or makes
+another non-local return can be valid 65816 code while violating the native
+callable ABI. Declare such an exact architectural boundary with:
+
+```
+force_lle <pc24>
+```
+
+The address is an absolute 24-bit PC and may be placed in any `bank*.cfg`.
+Both LoROM execution mirrors are treated as the same boundary. The analyzers
+remove profile/config roots at that PC and resolve static calls to it as exact
+LLE edges; callers may remain AOT. This is distinct from `exclude_range`,
+which says bytes are data or otherwise non-executable, and from `hle_func`,
+which replaces the guest routine with a host implementation.
+
 ---
 
 ## 4. The interpreter — LakeSnes (MIT)

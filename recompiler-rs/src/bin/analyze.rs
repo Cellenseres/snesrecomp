@@ -109,6 +109,7 @@ struct Inputs {
     cfg_index: HashMap<u32, usize>,
     data_regions: Vec<(u32, u32, u32)>,
     exclude_ranges: HashMap<u32, Vec<(u32, u32)>>,
+    force_lle: BTreeSet<u32>,
     indirect_dispatch: HashMap<u32, IndirectDispatchSite>,
     hle_dispatch: HashMap<u32, String>,
     inline_skip: HashMap<u32, i32>,
@@ -232,6 +233,7 @@ fn load_inputs(cfg_dir: &Path, rom: &mut Vec<u8>, all_cfg_roots: bool) -> Result
     let mut cfg_index = HashMap::new();
     let mut data_regions = Vec::new();
     let mut exclude_ranges = HashMap::new();
+    let mut force_lle = BTreeSet::new();
     let mut indirect_dispatch = HashMap::new();
     let mut hle_dispatch = HashMap::new();
     let mut inline_skip = HashMap::new();
@@ -247,6 +249,13 @@ fn load_inputs(cfg_dir: &Path, rom: &mut Vec<u8>, all_cfg_roots: bool) -> Result
             exclude_ranges
                 .entry(mirror)
                 .or_insert_with(|| cfg.exclude_ranges.clone());
+        }
+        for &pc24 in &cfg.force_lle {
+            let pc24 = pc24 & 0xFFFFFF;
+            force_lle.insert(pc24);
+            if let Some(mirror) = mirror_pc24(pc24) {
+                force_lle.insert(mirror);
+            }
         }
         for &(region_bank, start, end) in &cfg.data_regions {
             data_regions.push((region_bank & 0xFF, start & 0xFFFF, end & 0xFFFF));
@@ -375,6 +384,7 @@ fn load_inputs(cfg_dir: &Path, rom: &mut Vec<u8>, all_cfg_roots: bool) -> Result
         cfg_index,
         data_regions,
         exclude_ranges,
+        force_lle,
         indirect_dispatch,
         hle_dispatch,
         inline_skip,
@@ -385,6 +395,9 @@ fn load_inputs(cfg_dir: &Path, rom: &mut Vec<u8>, all_cfg_roots: bool) -> Result
 }
 
 fn target_is_code(key: VariantKey, inputs: &Inputs, rom: &[u8]) -> bool {
+    if inputs.force_lle.contains(&key.pc24) {
+        return false;
+    }
     let bank = (key.pc24 >> 16) & 0xFF;
     let pc = key.pc24 & 0xFFFF;
     if pc < 0x8000 || (0x40..0x80).contains(&bank) {
@@ -1540,6 +1553,9 @@ fn main() {
             .roots
             .insert(parse_root(&value).expect("parse --root"));
     }
+    inputs
+        .roots
+        .retain(|key| !inputs.force_lle.contains(&key.pc24));
     let (nodes, exact, sets, helpers, inline_args) =
         analyze(&inputs, &rom, max_insns, max_nodes).expect("native analysis");
     let manifest = manifest_json(&inputs, &nodes, &exact, &sets, &helpers, &inline_args);

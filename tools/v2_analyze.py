@@ -476,6 +476,7 @@ def build_manifest(rom: bytes, parsed, *, max_insns: int, max_nodes: int,
     cfg_by_bank = {}
     all_data_regions = []
     all_exclude_ranges = {}
+    force_lle = set()
     for bank, _path, cfg in parsed:
         cfg_by_bank[bank] = cfg
         sibling_entries[bank] = {
@@ -489,6 +490,12 @@ def build_manifest(rom: bytes, parsed, *, max_insns: int, max_nodes: int,
         mirror = _lorom_mirror_bank(bank)
         if mirror is not None:
             all_exclude_ranges.setdefault(mirror, tuple(cfg.exclude_ranges))
+        for pc24 in getattr(cfg, "force_lle", ()):
+            pc24 &= 0xFFFFFF
+            force_lle.add(pc24)
+            mirror_pc24 = _lorom_mirror_pc24(pc24)
+            if mirror_pc24 is not None:
+                force_lle.add(mirror_pc24)
         for entry in cfg.entries:
             key = VariantKey(
                 (bank << 16) | (entry.start & 0xFFFF),
@@ -502,6 +509,7 @@ def build_manifest(rom: bytes, parsed, *, max_insns: int, max_nodes: int,
     # entry widths (auto_vectors only seeds their cfg-canonical variant).
     roots.extend(_architectural_roots(rom))
     roots.extend(additional_roots)
+    roots = [key for key in roots if key.pc24 not in force_lle]
 
     data_regions = tuple(all_data_regions)
     dispatch_map = _indirect_dispatch_map(parsed)
@@ -534,6 +542,8 @@ def build_manifest(rom: bytes, parsed, *, max_insns: int, max_nodes: int,
     inline_arg_probes = set()
 
     def target_is_code(key: VariantKey) -> bool:
+        if key.pc24 in force_lle:
+            return False
         bank = (key.pc24 >> 16) & 0xFF
         pc = key.pc24 & 0xFFFF
         if not is_rom_address(bank, pc):
