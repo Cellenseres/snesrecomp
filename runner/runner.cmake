@@ -89,6 +89,31 @@ if(SNESRECOMP_ENABLE_TRACE)
     endif()
 endif()
 
+# Schema-driven mod packages and trusted static plugins. This is deliberately
+# opt-in: ordinary games do not compile the loader, expose a Mods navigation
+# item, create a mods directory, or change any runtime behavior. A game that
+# opts in owns its recomp-ui pin, package catalog, and statically linked plugin
+# implementations.
+option(SNESRECOMP_ENABLE_MODS
+    "Build the SNES mod package loader and trusted-plugin runtime"
+    OFF)
+if(SNESRECOMP_ENABLE_MODS)
+    list(APPEND SNESRECOMP_RUNNER_SOURCES
+        ${SNESRECOMP_RUNNER_ROOT}/src/mod_runtime.cpp
+    )
+    set(CMAKE_CXX_STANDARD 17)
+    set(CMAKE_CXX_STANDARD_REQUIRED ON)
+    add_compile_definitions(SNESRECOMP_ENABLE_MODS=1)
+    # recomp-ui still requires a non-null provider at runtime. This enables
+    # only the UI half of that double gate for the explicitly opting-in game.
+    set(RECOMP_UI_ENABLE_MODS ON CACHE BOOL
+        "Enable recomp-ui Mods view for this SNES mod-enabled game" FORCE)
+    message(STATUS
+        "SNES mods: package loader + trusted static plugins enabled")
+else()
+    add_compile_definitions(SNESRECOMP_ENABLE_MODS=0)
+endif()
+
 set(SNESRECOMP_RUNNER_LIBRARIES)
 if(SNESRECOMP_ENABLE_TRACE AND WIN32)
     list(APPEND SNESRECOMP_RUNNER_LIBRARIES ws2_32)
