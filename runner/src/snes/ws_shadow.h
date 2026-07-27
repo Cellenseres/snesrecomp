@@ -54,6 +54,17 @@ void WsShadowSetCaptureCols(int layer, int totalCols);
  * leave the wide viewport instead of lingering for a full native buffer. */
 void WsShadowSetWestKeep(int layer, int tiles);
 
+/* Mirror of WestKeep for the EAST side. Defaults to 0, which reproduces the
+ * original behaviour exactly (all history east of the live strip is pruned
+ * every frame) so no existing game changes.
+ *
+ * Set this for a game that scrolls LEFT: east is then the TRAILING edge, and
+ * with the default prune its history is discarded before the trailing gutter
+ * can ever be served from it. Measured on Mega Man X2 — walking right, the
+ * west gutter was served from history; walking left, the east gutter was
+ * pixel-identical to no-history at all. */
+void WsShadowSetEastKeep(int layer, int tiles);
+
 /* When set, capture columns east of the 256px view that match any live
  * view column are cleared instead of stored — kills VRAM-wrap / period
  * phantoms (e.g. a second door) in the right widescreen gutter. */

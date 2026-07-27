@@ -38,6 +38,7 @@ typedef struct WsShadowLayer {
   bool retainHistory;
   int captureCols;
   int westKeep; /* 0 => kWsWestKeep default */
+  int eastKeep; /* 0 => legacy behaviour: east-of-view history is pruned */
   bool rejectEastEcho;
   uint16_t retainMapBase;
   bool haveRetainMapBase;
@@ -245,8 +246,27 @@ void WsShadowSetRejectEastEcho(int layerIndex, bool reject) {
   s_layers[layerIndex].rejectEastEcho = reject;
 }
 
+void WsShadowSetEastKeep(int layerIndex, int tiles) {
+  if (layerIndex < 0 || layerIndex >= kLayers)
+    return;
+  if (tiles < 0)
+    tiles = 0;
+  if (tiles > kWsLiveMaxCols)
+    tiles = kWsLiveMaxCols;
+  s_layers[layerIndex].eastKeep = tiles;
+}
+
 static int WestKeep(const WsShadowLayer *layer) {
   return layer->westKeep > 0 ? layer->westKeep : kWsWestKeep;
+}
+
+/* 0 by default, which reproduces the original prune exactly: everything east
+ * of the live strip is dropped each frame. That is correct only for a game
+ * scrolling right, where east is the LEADING edge and has no history worth
+ * keeping. A game scrolling LEFT has its trailing edge in the east, and
+ * dropping it means the trailing gutter can never be served from history. */
+static int EastKeep(const WsShadowLayer *layer) {
+  return layer->eastKeep > 0 ? layer->eastKeep : 0;
 }
 
 void WsShadowPrefillTile(int layerIndex, uint32_t worldTileX,
@@ -1045,14 +1065,17 @@ void WsShadowFrame(const struct Ppu *ppu) {
       }
       layer->havePrevLive = true;
 
+      const int east_keep = EastKeep(layer);
       const int64_t wx0 = (int64_t)tx0, wx1 = (int64_t)tx0 + cols;
       const int64_t prune_lo = wx0 - west_keep - 16;
-      const int64_t prune_hi = wx1 + 8;
+      /* east_keep == 0 must reproduce the original bound (wx1 + 8) EXACTLY,
+       * or every existing game starts clearing more east history than before. */
+      const int64_t prune_hi = wx1 + east_keep + 8;
       const int64_t row_hi = (int64_t)rows + 4;
       for (int64_t tx = prune_lo; tx < prune_hi; tx++) {
         if (tx < 0 || tx >= kWsShadowXTiles)
           continue;
-        if (tx >= wx0 - west_keep && tx < wx1)
+        if (tx >= wx0 - west_keep && tx < wx1 + east_keep)
           continue;
         for (int64_t ty = 0; ty < row_hi && ty < kWsShadowYTiles; ty++)
           ClearEntry(layer, (uint32_t)tx, (uint32_t)ty);
