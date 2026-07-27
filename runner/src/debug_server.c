@@ -51,6 +51,7 @@ extern int snes_frame_counter;
 #include "snes/cart.h"
 #include "snes/superfx.h"
 #include "snes/cx4.h"
+#include "snes/ws_shadow.h"
 #include "snes/interp_bridge.h"
 #include "cpu_state.h"
 #include "cpu_trace.h"
@@ -2496,6 +2497,34 @@ static void cmd_vwring_get(const char *args) {
             "%s{\"f\":%d,\"a\":\"0x%04x\",\"v\":\"0x%02x\",\"fn\":\"%s\"}",
             i ? "," : "", e->frame, e->adr_byte, e->val,
             e->func ? e->func : "(none)");
+    }
+    pos += snprintf(buf + pos, sizeof(buf) - pos, "]}");
+    send_line(buf);
+}
+
+/* ws_shadow_stats — always-on widescreen margin observability, per layer:
+ * activity, the latched world/scroll keys, and the cumulative margin
+ * lookup hit/miss counters split by side (west = left gutter). Counters
+ * accumulate from process start and are never armed; without them "the
+ * gutter looks unchanged" cannot be told apart from "the margin source
+ * was never consulted" or "consulted and missed". */
+static void cmd_ws_shadow_stats(const char *args) {
+    (void)args;
+    char buf[1024];
+    int pos = snprintf(buf, sizeof(buf), "{\"layers\":[");
+    for (int l = 0; l < 2; l++) {
+        WsShadowMarginStat st;
+        WsShadowGetMarginStats(l, &st);
+        pos += snprintf(buf + pos, sizeof(buf) - pos,
+            "%s{\"layer\":%d,\"active\":%s,"
+            "\"worldX\":%u,\"worldY\":%u,\"scrollX\":%u,\"scrollY\":%u,"
+            "\"westHit\":%llu,\"westMiss\":%llu,"
+            "\"eastHit\":%llu,\"eastMiss\":%llu}",
+            l ? "," : "", l, WsShadowLayerActive(l) ? "true" : "false",
+            (unsigned)WsShadowWorldX(l), (unsigned)WsShadowWorldY(l),
+            (unsigned)WsShadowScrollX(l), (unsigned)WsShadowScrollY(l),
+            (unsigned long long)st.westHit, (unsigned long long)st.westMiss,
+            (unsigned long long)st.eastHit, (unsigned long long)st.eastMiss);
     }
     pos += snprintf(buf + pos, sizeof(buf) - pos, "]}");
     send_line(buf);
@@ -7341,6 +7370,7 @@ static const CmdEntry s_commands[] = {
     {"get_reg_trace", cmd_get_reg_trace},
     {"trace_vram",    cmd_trace_vram},
     {"vwring_get",    cmd_vwring_get},
+    {"ws_shadow_stats", cmd_ws_shadow_stats},
     {"trace_vram_reset", cmd_trace_vram_reset},
     {"get_vram_trace", cmd_get_vram_trace},
     {"get_oracle_vram_trace", cmd_get_oracle_vram_trace},
