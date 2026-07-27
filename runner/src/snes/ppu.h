@@ -185,12 +185,13 @@ struct Ppu {
   // times 2 for even and odd frame
 
   uint8_t extraLeftCur, extraRightCur, extraLeftRight, extraBottomCur;
-  // Widescreen HUD split (see PpuSetWidescreenHudSplit). 0 height = off.
+  // Widescreen BG3 HUD split (see PpuSetWidescreenHudSplit). 0 height = off.
   uint8_t wsHudSplitHeight, wsHudLeftEnd, wsHudRightStart;
   // Widescreen HUD OAM anchor (see PpuSetWsHudOamShiftRange): an OAM slot
   // range near either native screen edge can move outward with the live
-  // margins. 0 slots = off (authentic).
-  uint8_t wsHudOamFirstSlot, wsHudOamSlots;
+  // margins. Its vertical band can be decoupled from the BG3 split for games
+  // whose HUD is sprite-only while BG3 carries dialogue. 0 slots/height = off.
+  uint8_t wsHudOamFirstSlot, wsHudOamSlots, wsHudOamHeight;
   // Widescreen BG3 widen (see PpuSetWidescreenBg3Widen). Scanlines >= this let
   // BG3 (layer 2) extend into the side margins like BG1/BG2 instead of staying
   // clamped to the authentic 256-wide region. 0 = off (BG3 clamped everywhere,
@@ -455,6 +456,12 @@ void PpuSetWidescreenHudSplit(Ppu *ppu, uint8_t height, uint8_t left_end,
 // world margin remain black unless BG3 supplied an actual HUD pixel. A BG3
 // hardware window is ignored only inside the configured HUD scanline band.
 void PpuSetWidescreenHudAlwaysVisible(Ppu *ppu, bool enabled);
+
+// Configure the vertical band and native left/right anchor thresholds used by
+// the OAM HUD shifter without enabling the BG3 HUD split. Existing callers of
+// PpuSetWidescreenHudSplit keep the coupled behavior until this overrides it.
+void PpuSetWsHudOamBand(Ppu *ppu, uint8_t height, uint8_t left_end,
+                        uint8_t right_start);
 
 // Shift edge-hugging HUD sprites in OAM slots [0, nslots) outward with the
 // live widescreen margins. Presentation-only; 0 disables the anchor.

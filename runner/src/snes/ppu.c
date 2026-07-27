@@ -200,9 +200,9 @@ void PpuSetWidescreenHudSplit(Ppu *ppu, uint8_t height, uint8_t left_end,
   // PpuDrawBackground_2bpp (strictly ascending edges); disable otherwise.
   if (left_end == 0 || left_end >= right_start) height = 0;
   // Bit 7 is host policy for PpuSetWidescreenHudAlwaysVisible. HUD bands are
-  // at most 127 lines, so keep the option in this existing host-only byte and
-  // avoid changing Ppu's layout/savestate ABI.
+  // at most 127 lines, so keep the option in this existing host-only byte.
   ppu->wsHudSplitHeight = (ppu->wsHudSplitHeight & 0x80) | (height & 0x7f);
+  ppu->wsHudOamHeight = height & 0x7f;
   ppu->wsHudLeftEnd = left_end;
   ppu->wsHudRightStart = right_start;
 }
@@ -210,6 +210,14 @@ void PpuSetWidescreenHudSplit(Ppu *ppu, uint8_t height, uint8_t left_end,
 void PpuSetWidescreenHudAlwaysVisible(Ppu *ppu, bool enabled) {
   ppu->wsHudSplitHeight = (ppu->wsHudSplitHeight & 0x7f) |
                           (enabled ? 0x80 : 0);
+}
+
+void PpuSetWsHudOamBand(Ppu *ppu, uint8_t height, uint8_t left_end,
+                        uint8_t right_start) {
+  if (left_end == 0 || left_end >= right_start) height = 0;
+  ppu->wsHudOamHeight = height & 0x7f;
+  ppu->wsHudLeftEnd = left_end;
+  ppu->wsHudRightStart = right_start;
 }
 
 void PpuSetWsHudOamShift(Ppu *ppu, uint8_t nslots) {
@@ -1756,8 +1764,8 @@ static NOINLINE void PpuDrawWholeLine(Ppu *ppu, uint y) {
 static int PpuAdjustWidescreenHudOamX(Ppu *ppu, uint8_t index, uint8_t y,
                                       int x) {
   uint8_t slot = index >> 1;
-  bool hud_y = ppu->wsHudSplitHeight &&
-      (y >= 224 || y < ppu->wsHudSplitHeight);
+  bool hud_y = ppu->wsHudOamHeight &&
+      (y >= 224 || y < ppu->wsHudOamHeight);
   if (hud_y && ppu->wsHudOamSlots &&
       slot >= ppu->wsHudOamFirstSlot &&
       slot < ppu->wsHudOamFirstSlot + ppu->wsHudOamSlots) {
