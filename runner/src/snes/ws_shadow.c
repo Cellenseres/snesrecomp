@@ -370,49 +370,27 @@ void WsShadowInvalidateTile(int layerIndex, uint32_t worldTileX,
  * (0..rows-1), everything else by world row (ty0 + row). Getting this wrong
  * writes cells the serve path never reads. */
 void WsShadowExtendEdges(int layerIndex, int marginPixels) {
-  if (layerIndex < 0 || layerIndex >= kLayers || marginPixels <= 0)
-    return;
-  WsShadowLayer *layer = &s_layers[layerIndex];
-  if (!layer->active || !layer->entries || !layer->haveLastOrigin)
-    return;
-
-  const unsigned sh = layer->tileShift ? layer->tileShift : 3;
-  const uint32_t tx0 = layer->lastTx0;
-  const int view_cols = 256 >> sh;
-  const int rows = (sh == 4) ? 16 : 29;
-  /* +1 so a fine-scroll partial tile at the outer edge is still covered. */
-  const int margin_tiles = (int)(((uint32_t)marginPixels + (1u << sh) - 1u) >> sh) + 1;
-  if (margin_tiles <= 0)
-    return;
-
-  const uint32_t east_col = tx0 + (uint32_t)view_cols - 1u;
-
-  for (int row = 0; row < rows && row < kWsLiveMaxRows; row++) {
-    const uint32_t ty =
-        layer->retainHistory ? (uint32_t)row : (layer->lastTy0 + (uint32_t)row);
-
-    uint16_t edge, tmp;
-
-    if (GetEntry(layer, tx0, ty, &edge)) {
-      for (int i = 1; i <= margin_tiles; i++) {
-        if (tx0 < (uint32_t)i)
-          break;
-        const uint32_t tx = tx0 - (uint32_t)i;
-        if (!GetEntry(layer, tx, ty, &tmp))
-          SetEntry(layer, tx, ty, edge);
-      }
-    }
-
-    if (GetEntry(layer, east_col, ty, &edge)) {
-      for (int i = 1; i <= margin_tiles; i++) {
-        const uint32_t tx = east_col + (uint32_t)i;
-        if (tx >= kWsShadowXTiles)
-          break;
-        if (!GetEntry(layer, tx, ty, &tmp))
-          SetEntry(layer, tx, ty, edge);
-      }
-    }
-  }
+  (void)layerIndex;
+  (void)marginPixels;
+  /* REVERTED TO A NO-OP 2026-07-26 after owner review.
+   *
+   * A working implementation existed briefly (repeat the nearest captured
+   * viewport-edge column outward into the gutter). It did what it said and
+   * drove margin lookup misses from ~90% to 0 -- and it looked DEFINITIVELY
+   * WORSE than the stale margin it replaced. Repeating one column produces
+   * obvious vertical smearing: long white pipe runs and structural edges
+   * stretch into hard vertical streaks across the whole gutter, which reads
+   * as a rendering fault rather than as scenery.
+   *
+   * The lesson for whoever picks this up: "no lookup misses" is not the
+   * success metric. A wrong-but-plausible margin beats a smeared one, and a
+   * naive edge repeat is not plausible on architectural content with strong
+   * horizontal structure. Something that reconstructs actual level geometry
+   * (or that hides the gutter) is needed instead.
+   *
+   * Kept as a stub so the engine's rendering behaviour matches the tagged
+   * ws-baseline-prehistory exactly. The implementation is recoverable from
+   * engine commit 03b1588 if a future attempt wants it as a starting point. */
 }
 
 void WsShadowExtendSolidEdges(int layerIndex, int extraPx) {
