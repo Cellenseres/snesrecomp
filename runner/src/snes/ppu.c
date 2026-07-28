@@ -2228,7 +2228,3 @@ void ppu_write(Ppu* ppu, uint8_t adr, uint8_t val) {
       break;
   }
 }
-
-int PpuGetCurrentRenderScale(Ppu *ppu, uint32_t render_flags) {
-  return 1;
-}

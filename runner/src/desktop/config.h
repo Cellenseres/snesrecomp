@@ -50,7 +50,6 @@ typedef struct Config {
   uint8 audio_channels;
   uint16 audio_samples;
   bool autosave;
-  bool extend_y;
   bool no_sprite_limits;
   // Render genuine extra PPU columns to match the current display aspect.
   // This is host presentation state, not emulated game state.
