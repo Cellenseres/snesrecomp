@@ -92,11 +92,7 @@ typedef struct PpuOverlayCapture {
 
 enum {
   kPpuRenderFlags_NewRenderer = 1,
-  // Render mode7 upsampled by 4x4
-  kPpuRenderFlags_4x4Mode7 = 2,
-  // Use 240 height instead of 224
-  kPpuRenderFlags_Height240 = 4,
-  // Disable sprite render limits
+  // Preserve the established bit value for config/save compatibility.
   kPpuRenderFlags_NoSpriteLimits = 8,
 };
 
@@ -523,7 +519,5 @@ void PpuSetWidescreenLayerStretchBand(Ppu *ppu, uint8_t layer, uint8_t y0,
 // Applies to non-mosaic 4bpp/2bpp paths. Re-apply per frame.
 void PpuSetWidescreenLayerMarginGap(Ppu *ppu, uint8_t layer, uint8_t left_px,
                                     uint8_t right_px);
-
-int PpuGetCurrentRenderScale(Ppu *ppu, uint32_t render_flags);
 
 #endif

@@ -5,7 +5,13 @@ $wt = (Resolve-Path "$PSScriptRoot\..\..").Path
 $gcc = "C:\msys64\mingw64\bin\gcc.exe"
 
 Write-Host "=== regen single-opcode functions ==="
-python "$wt\tests\cpu_diff\gen_ops.py"
+$pyLauncher = Get-Command py -ErrorAction SilentlyContinue
+if ($pyLauncher) {
+    & $pyLauncher.Source -3 "$wt\tests\cpu_diff\gen_ops.py"
+} else {
+    & python "$wt\tests\cpu_diff\gen_ops.py"
+}
+if ($LASTEXITCODE -ne 0) { throw "opcode generation failed" }
 
 New-Item -ItemType Directory -Force "$wt\build" | Out-Null
 Write-Host "=== build ==="

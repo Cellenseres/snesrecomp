@@ -87,6 +87,9 @@ set(SNESRECOMP_RUNNER_SOURCES
     ${SNESRECOMP_RUNNER_ROOT}/src/framedump.c
     ${SNESRECOMP_RUNNER_ROOT}/src/host_paths.c
     ${SNESRECOMP_RUNNER_ROOT}/src/launcher.c
+    ${SNESRECOMP_RUNNER_ROOT}/src/launcher_cache.c
+    ${SNESRECOMP_RUNNER_ROOT}/src/launcher_picker.c
+    ${SNESRECOMP_RUNNER_ROOT}/src/rom_image_verify.c
     ${SNESRECOMP_RUNNER_ROOT}/src/crc32.c
     ${SNESRECOMP_RUNNER_ROOT}/src/sha256.c
     ${SNESRECOMP_RUNNER_ROOT}/src/keybinds.c
@@ -222,6 +225,32 @@ endfunction()
 function(snesrecomp_target_mmx_config target)
     target_sources(${target} PRIVATE
         ${SNESRECOMP_RUNNER_ROOT}/src/desktop/mmx_config.c)
+    target_include_directories(${target} PRIVATE
+        ${SNESRECOMP_RUNNER_ROOT}/src/desktop)
+endfunction()
+
+# Shared crash/exit report serializer. Games with interpreter fallback coverage
+# can opt into the additional standalone Tier-2 manifest.
+function(snesrecomp_target_post_mortem target)
+    set(options TIER2)
+    cmake_parse_arguments(PM "${options}" "" "" ${ARGN})
+    target_sources(${target} PRIVATE
+        ${SNESRECOMP_RUNNER_ROOT}/src/desktop/post_mortem.c)
+    target_include_directories(${target} PRIVATE
+        ${SNESRECOMP_RUNNER_ROOT}/src/desktop)
+    if(PM_TIER2)
+        target_compile_definitions(${target} PRIVATE
+            SNESRECOMP_POST_MORTEM_TIER2=1)
+    endif()
+    if(WIN32)
+        target_link_libraries(${target} PRIVATE dbghelp)
+    endif()
+endfunction()
+
+# Win32 Fiber API compatibility for non-Windows cooperative schedulers.
+function(snesrecomp_target_fiber_compat target)
+    target_sources(${target} PRIVATE
+        ${SNESRECOMP_RUNNER_ROOT}/src/desktop/fiber_compat.c)
     target_include_directories(${target} PRIVATE
         ${SNESRECOMP_RUNNER_ROOT}/src/desktop)
 endfunction()

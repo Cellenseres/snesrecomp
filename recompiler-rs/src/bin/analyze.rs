@@ -1288,8 +1288,10 @@ fn analyze(
             nodes.insert(key, summary);
         }
 
-        for (key, modes) in solve_exit_equation_sccs(&round_equations, &active_exact, &active_sets)
-        {
+        let recursive_solutions =
+            solve_exit_equation_sccs(&round_equations, &active_exact, &active_sets);
+        let mut recursive_solution_keys = HashSet::new();
+        for (key, modes) in recursive_solutions {
             let fact_key = (key.pc24, key.m, key.x);
             if inputs.declared_exit_modes.contains_key(&fact_key)
                 || unstable_exact.contains(&fact_key)
@@ -1297,6 +1299,7 @@ fn analyze(
             {
                 continue;
             }
+            recursive_solution_keys.insert(fact_key);
             if modes.len() == 1 {
                 round_exact
                     .entry(fact_key)
@@ -1378,6 +1381,7 @@ fn analyze(
         for (node_key, node) in &nodes {
             let fact_key = (node_key.pc24, node_key.m, node_key.x);
             if !inputs.declared_exit_modes.contains_key(&fact_key)
+                && !recursive_solution_keys.contains(&fact_key)
                 && node
                     .reasons
                     .iter()

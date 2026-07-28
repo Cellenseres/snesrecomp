@@ -276,6 +276,55 @@ def test_recursive_unknown_exit_component_converges_to_lle():
                for node in manifest.nodes.values())
 
 
+def test_recursive_preservation_proof_survives_truncated_round():
+    # Each routine has a concrete local return and a mutually recursive path.
+    # The first strict decode stops at the unknown call, while the preservation
+    # probe exposes the post-call RTS. The closed SCC proves both exits M1X1;
+    # that proof must survive the same round's stale truncated-node summary.
+    rom = make_lorom_bank0({
+        0x8000: bytes([
+            0xA5, 0x00,             # LDA $00
+            0xF0, 0x04,             # BEQ local RTS
+            0x20, 0x00, 0x90,       # JSR $9000
+            0x60,                   # post-call RTS
+            0x60,                   # local RTS
+        ]),
+        0x9000: bytes([
+            0xA5, 0x00,             # LDA $00
+            0xF0, 0x04,             # BEQ local RTS
+            0x20, 0x00, 0x80,       # JSR $8000
+            0x60,                   # post-call RTS
+            0x60,                   # local RTS
+        ]),
+    })
+    with tempfile.TemporaryDirectory() as directory:
+        root = pathlib.Path(directory)
+        cfg_dir = root / "cfg"
+        cfg_dir.mkdir()
+        rom_path = root / "fixture.sfc"
+        rom_path.write_bytes(rom)
+        (cfg_dir / "bank00.cfg").write_text(
+            "bank = 00\n"
+            "func RecursiveA 8000 end:8009 entry_mx:1,1\n"
+            "func RecursiveB 9000 end:9009 entry_mx:1,1\n",
+            encoding="utf-8")
+        expected, _helpers, _inline = build_manifest(
+            rom, _load_cfgs(cfg_dir), max_insns=128, max_nodes=128,
+            all_cfg_roots=True)
+        if native_analyzer_path().is_file():
+            actual, _helpers, _inline, _output = build_manifest_native(
+                rom_path=rom_path, cfg_dir=cfg_dir, all_cfg_roots=True)
+        else:
+            actual = expected
+
+    for pc24 in (0x008000, 0x009000):
+        key = VariantKey(pc24, 1, 1)
+        assert expected.exit_modes[key] == (1, 1)
+        assert expected.nodes[key].disposition == NodeDisposition.AOT_ELIGIBLE
+        assert actual.exit_modes[key] == (1, 1)
+        assert actual.nodes[key].disposition == NodeDisposition.AOT_ELIGIBLE
+
+
 def test_lorom_mirror_uses_declared_function_boundaries():
     rom = make_lorom_bank0({
         0x8000: bytes([0x5C, 0x00, 0x81, 0x80]),  # JML $80:8100
