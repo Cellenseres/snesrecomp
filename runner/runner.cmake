@@ -160,6 +160,24 @@ function(snesrecomp_target_mmx_config target)
         ${SNESRECOMP_RUNNER_ROOT}/src/desktop)
 endfunction()
 
+# Shared crash/exit report serializer. Games with interpreter fallback coverage
+# can opt into the additional standalone Tier-2 manifest.
+function(snesrecomp_target_post_mortem target)
+    set(options TIER2)
+    cmake_parse_arguments(PM "${options}" "" "" ${ARGN})
+    target_sources(${target} PRIVATE
+        ${SNESRECOMP_RUNNER_ROOT}/src/desktop/post_mortem.c)
+    target_include_directories(${target} PRIVATE
+        ${SNESRECOMP_RUNNER_ROOT}/src/desktop)
+    if(PM_TIER2)
+        target_compile_definitions(${target} PRIVATE
+            SNESRECOMP_POST_MORTEM_TIER2=1)
+    endif()
+    if(WIN32)
+        target_link_libraries(${target} PRIVATE dbghelp)
+    endif()
+endfunction()
+
 # Optional delay-sync netcode (lib/recomp-net submodule). See docs/RECOMP_NET.md.
 # Does nothing unless SNESRECOMP_ENABLE_NET=ON or the game calls
 # snesrecomp_enable_recomp_net(<target>).
