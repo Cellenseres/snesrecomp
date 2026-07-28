@@ -194,18 +194,6 @@ static inline void wlog_note(uint8 bank, uint16 addr, uint16 v, int width) {
             bank, addr, width * 2, (unsigned)(v & (width == 1 ? 0xFF : 0xFFFF)), width);
 }
 
-/* Map a 24-bit logical address onto a g_ram offset. Returns -1 for
- * addresses that are NOT WRAM — the caller routes those to the HW-reg
- * helpers (WriteReg/ReadReg) or to ROM. */
-static int cpu_ram_offset(uint8 bank, uint16 addr) {
-    if (bank == 0x7E) return (int)addr;
-    if (bank == 0x7F) return 0x10000 + (int)addr;
-    if (addr < 0x2000 && (bank <= 0x3F || (bank >= 0x80 && bank <= 0xBF))) {
-        return (int)addr;
-    }
-    return -1;
-}
-
 /* True when (bank, addr) addresses an SNES hardware register that should
  * be routed through the framework's WriteReg/ReadReg dispatch. The HW
  * register window is $2000-$5FFF in low banks ($00-$3F, $80-$BF). */
@@ -324,7 +312,7 @@ static void cpu_hw_log(uint16 addr, int is_read, uint16 val) {
 }
 
 uint8 cpu_read8(CpuState *cpu, uint8 bank, uint16 addr) {
-    int off = cpu_ram_offset(bank, addr);
+    int off = cpu_wram_offset(bank, addr);
     if (off >= 0) return cpu->ram[off];
     if (is_hw_reg(bank, addr)) { cpu_pace_cycles(addr); cpu_hw_log(addr, 1, 0); return ReadReg(addr); }
     if (g_snes && g_snes->cart && g_snes->cart->type == CART_SUPERFX)
@@ -341,14 +329,14 @@ uint8 cpu_read8(CpuState *cpu, uint8 bank, uint16 addr) {
 }
 
 uint16 cpu_read16(CpuState *cpu, uint8 bank, uint16 addr) {
-    int off = cpu_ram_offset(bank, addr);
+    int off = cpu_wram_offset(bank, addr);
     if (off >= 0) {
         /* A 16-bit guest access wraps its high-byte address within the same
          * bank. The corresponding host WRAM offsets are not necessarily
          * contiguous: $7F:FFFF -> $7F:0000 maps $1FFFF -> $10000, while
          * $00:1FFF -> $00:2000 crosses from WRAM into an I/O register. */
         uint16 hi_addr = (uint16)(addr + 1);
-        int hi_off = cpu_ram_offset(bank, hi_addr);
+        int hi_off = cpu_wram_offset(bank, hi_addr);
         uint8 hi = (hi_off >= 0)
             ? cpu->ram[hi_off]
             : cpu_read8(cpu, bank, hi_addr);
@@ -388,7 +376,7 @@ uint16 cpu_read16(CpuState *cpu, uint8 bank, uint16 addr) {
 void cpu_write8(CpuState *cpu, uint8 bank, uint16 addr, uint8 v) {
     if (g_wlog_active) wlog_note(bank, addr, v, 1);
     wlog_addr_note(bank, addr, v, 1);
-    int off = cpu_ram_offset(bank, addr);
+    int off = cpu_wram_offset(bank, addr);
     if (off >= 0) {
         uint8 old = cpu->ram[off];
         cpu->ram[off] = v;
@@ -455,10 +443,10 @@ void cpu_write8(CpuState *cpu, uint8 bank, uint16 addr, uint8 v) {
 void cpu_write16(CpuState *cpu, uint8 bank, uint16 addr, uint16 v) {
     if (g_wlog_active) wlog_note(bank, addr, v, 2);
     wlog_addr_note(bank, addr, v, 2);
-    int off = cpu_ram_offset(bank, addr);
+    int off = cpu_wram_offset(bank, addr);
     if (off >= 0) {
         uint16 hi_addr = (uint16)(addr + 1);
-        int hi_off = cpu_ram_offset(bank, hi_addr);
+        int hi_off = cpu_wram_offset(bank, hi_addr);
         if (hi_off != off + 1) {
             /* Same boundary class as cpu_read16 above. Route each byte
              * through the authoritative byte bus so WRAM wrap and WRAM->I/O

@@ -34,6 +34,19 @@ typedef void (*CpuStageWindowStoreHook)(uint32_t ram_off, uint32_t pc24);
 extern uint32_t g_interp816_cur_pc;
 void cpu_set_stage_window_store_hook(CpuStageWindowStoreHook hook);
 
+/* Canonical flat g_ram offset for full WRAM and its low-bank mirrors.
+ * Returns -1 when the address is not WRAM. Keep every runtime observer on
+ * this helper so tracing and memory access cannot disagree about aliases. */
+static inline int32_t cpu_wram_offset(uint8 bank, uint16 addr) {
+    if (bank == 0x7E) return (int32_t)addr;
+    if (bank == 0x7F) return 0x10000 + (int32_t)addr;
+    if (addr < 0x2000 &&
+        (bank <= 0x3F || (bank >= 0x80 && bank <= 0xBF))) {
+        return (int32_t)addr;
+    }
+    return -1;
+}
+
 /* ── Register / flag state ─────────────────────────────────────────────── */
 
 typedef struct CpuState {

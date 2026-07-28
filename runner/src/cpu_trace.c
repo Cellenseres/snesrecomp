@@ -896,11 +896,6 @@ extern uint64_t          g_main_cpu_cycles_estimate;
 extern volatile uint64_t g_block_counter;
 extern uint8_t     g_ram[];
 
-/* Forward decl — definition below in this TU. The arm function needs it
- * to canonicalize (bank, addr) → ram_off at arm time so the fire path
- * can compare a single integer instead of replaying mirror logic. */
-static int32_t wram_offset(uint8_t bank, uint16_t addr);
-
 void cpu_trace_arm_scoped_tripwire(uint8_t bank, uint16_t addr_lo,
                                    uint16_t addr_hi, const char *scope_substr) {
     cpu_trace_arm_scoped_tripwire_v(bank, addr_lo, addr_hi, scope_substr, 0);
@@ -920,8 +915,8 @@ void cpu_trace_arm_scoped_tripwire_v(uint8_t bank, uint16_t addr_lo,
     g_scoped_tripwire.addr_hi = addr_hi;
     /* Pre-compute canonical ram_off range using the same mapping cpu_write*
      * uses, so writes through DB-mirror banks (e.g. $00:0100) fire too. */
-    g_scoped_tripwire.ram_off_lo = wram_offset(bank, addr_lo);
-    g_scoped_tripwire.ram_off_hi = wram_offset(bank, addr_hi);
+    g_scoped_tripwire.ram_off_lo = cpu_wram_offset(bank, addr_lo);
+    g_scoped_tripwire.ram_off_hi = cpu_wram_offset(bank, addr_hi);
     if (g_scoped_tripwire.ram_off_lo < 0 || g_scoped_tripwire.ram_off_hi < 0) {
         /* Bad range — disarm to avoid surprise misses. */
         g_scoped_tripwire.armed = 0;
@@ -975,7 +970,7 @@ static int scoped_tripwire_maybe_fire(CpuState *cpu, uint8_t bank,
      * silently missed writes routed through DB-mirror banks ($00:0100,
      * $80:0100, ...), which is the dominant SMW pattern for low-DP
      * stores. */
-    int32_t off = wram_offset(bank, addr);
+    int32_t off = cpu_wram_offset(bank, addr);
     if (off < 0) return 0;
     if (off < t->ram_off_lo || off > t->ram_off_hi) return 0;
     /* Optional value-match: only fire when the byte that lands at the
@@ -1950,21 +1945,9 @@ void cpu_trace_set_func_watch(const char *name) {
 WramWatch g_wram_watches[CPU_WRAM_WATCH_MAX];
 uint8_t   g_wram_watch_any = 0;
 
-/* Compute the g_ram offset for a (bank, addr) pair. Mirrors the logic
- * in cpu_state.c::cpu_ram_offset; duplicated here so we can resolve a
- * watch's offset at arming time without including cpu_state internals. */
-static int32_t wram_offset(uint8_t bank, uint16_t addr) {
-    if (bank == 0x7E) return (int32_t)addr;
-    if (bank == 0x7F) return 0x10000 + (int32_t)addr;
-    if (addr < 0x2000 && (bank <= 0x3F || (bank >= 0x80 && bank <= 0xBF))) {
-        return (int32_t)addr;
-    }
-    return -1;
-}
-
 void cpu_trace_set_wram_watch(uint8_t bank, uint16_t addr, int width,
                               int match_value, uint8_t value, int enabled) {
-    int32_t off = wram_offset(bank, addr);
+    int32_t off = cpu_wram_offset(bank, addr);
     if (off < 0) {
         fprintf(stderr, "[cpu_trace] WRAM-watch IGNORED: $%02X:%04X is not WRAM\n",
                 bank, addr);

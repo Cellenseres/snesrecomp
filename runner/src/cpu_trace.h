@@ -517,7 +517,7 @@ typedef struct ScopedTripwire {
     /* Canonical ram_off range: any write whose ram_off lands in this
      * inclusive range fires the tripwire, regardless of which mirror
      * bank the gen code wrote through. SMW commonly writes to low DP
-     * via DB=$00 ($00:0100), which `cpu_ram_offset` maps to the same
+     * via DB=$00 ($00:0100), which `cpu_wram_offset` maps to the same
      * g_ram offset as $7E:0100. Bank-strict matching missed those. */
     int32_t  ram_off_lo;
     int32_t  ram_off_hi;
