@@ -516,9 +516,9 @@ static void insn_rdrom(Cx4 *c, uint32_t index) {
   if (!c->firmware_ok && c->rdrom_warned < 1) {
     c->rdrom_warned++;
     fprintf(stderr,
-        "[cx4] RDROM executed but the HG51B S169 data ROM is MISSING — every\n"
-        "[cx4] result derived from it will be wrong (reading zeros). Supply\n"
-        "[cx4] cx4.rom (3072 bytes); see cx4_load_firmware in cx4.h.\n");
+        "[cx4] RDROM executed before the HG51B S169 data ROM was initialized —\n"
+        "[cx4] every result derived from it will be wrong (reading zeros).\n"
+        "[cx4] Call cx4_load_firmware() during cartridge initialization.\n");
   }
   c->r.rom = c->dataROM[index & M10] & M24;
 }
@@ -976,8 +976,8 @@ void cx4_reset(Cx4 *c) {
   c->budget = 0;
   c->frac = 0;
   c->last_master = 0;
-  /* dataROM (firmware) and the observability rings deliberately survive reset:
-   * firmware is not guest state, and a probe after a soft reset still wants the
+  /* dataROM and the observability rings deliberately survive reset: the data
+   * ROM is not guest state, and a probe after a soft reset still wants the
    * boot-time run history. */
 }
 
@@ -1201,7 +1201,7 @@ int cx4_load_firmware(Cx4 *c, const char *rom_path) {
 
 void cx4_saveload(Cx4 *c, struct SaveLoadInfo *sli) {
   if (!c || !sli) return;
-  /* Guest-visible device state only. Firmware is static; the rings are host
+  /* Guest-visible device state only. The data ROM is static; the rings are host
    * observability and are deliberately not snapshotted. */
   sli->func(sli, c->programRAM, sizeof(c->programRAM));
   sli->func(sli, c->dataRAM, sizeof(c->dataRAM));

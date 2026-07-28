@@ -95,8 +95,8 @@ int cx4_firmware_loaded(const Cx4 *cx4);
 /* ── observability ────────────────────────────────────────────────────────
  * Always-on ring of DSP program starts ($7F4F writes that un-halt the core),
  * recorded from device creation so probes read history rather than arming a
- * trace. `rdrom_hits` counts RDROM executions — if that is non-zero while
- * firmware is missing, the missing blob is actively corrupting results. */
+ * trace. `rdrom_hits` counts real RDROM executions, making data-ROM coverage
+ * visible to tests and debug probes. */
 typedef struct Cx4RunEvent {
   uint32_t seq;
   uint16_t pb;        /* entry program bank */
