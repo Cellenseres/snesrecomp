@@ -212,8 +212,16 @@ struct Ppu {
   // Optional scanline bands: scale a native-width layer across the full
   // widescreen budget. Used for full-screen liquid/effect planes.
   uint8_t wsStretchY0[4], wsStretchY1[4];
+  // Optional scanline bands: anchor a layer's left/right chunks to the
+  // expanded viewport edges while retaining its middle chunk at native x.
+  uint8_t wsAnchorY0[4], wsAnchorY1[4];
+  uint8_t wsAnchorLeftEnd[4], wsAnchorRightStart[4];
   // Skip offscreen staging columns before sampling a layer's side margins.
   uint8_t wsMarginGapL[4], wsMarginGapR[4];
+  // Treat [left_px, 256-right_px) as a layer's authentic visible viewport
+  // when a host line enhancer supplies the expanded scene. This lets the
+  // layer's normally hidden/blank native edge columns reveal lower layers.
+  uint8_t wsViewportInsetL[4], wsViewportInsetR[4];
   // Strict decode of the ambiguous 9-bit OAM X band [256, 256+extraRightCur).
   // A raw value there is either a genuine right-margin sprite (widescreen
   // host emitted it on purpose) or a sprite the game parked off-screen-left
@@ -454,8 +462,9 @@ void PpuSetWidescreenHudSplit(Ppu *ppu, uint8_t height, uint8_t left_end,
 void PpuSetWidescreenHudAlwaysVisible(Ppu *ppu, bool enabled);
 
 // Configure the vertical band and native left/right anchor thresholds used by
-// the OAM HUD shifter without enabling the BG3 HUD split. Existing callers of
-// PpuSetWidescreenHudSplit keep the coupled behavior until this overrides it.
+// the OAM HUD shifter without enabling the BG3 HUD split. Height may cover the
+// full 224-line picture. Existing callers of PpuSetWidescreenHudSplit keep the
+// coupled behavior until this overrides it.
 void PpuSetWsHudOamBand(Ppu *ppu, uint8_t height, uint8_t left_end,
                         uint8_t right_start);
 
@@ -514,10 +523,24 @@ void PpuSetWidescreenLayerRepeatBand(Ppu *ppu, uint8_t layer, uint8_t y0,
 void PpuSetWidescreenLayerStretchBand(Ppu *ppu, uint8_t layer, uint8_t y0,
                                       uint8_t y1);
 
+// On scanlines [y0,y1), anchor [0,left_end) and [right_start,256) of
+// BG(layer+1) to the expanded viewport edges while keeping the middle
+// centered. Intended for HUDs embedded in a 4bpp background layer.
+void PpuSetWidescreenLayerAnchorBand(Ppu *ppu, uint8_t layer, uint8_t y0,
+                                     uint8_t y1, uint8_t left_end,
+                                     uint8_t right_start);
+
 // Skip left_px/right_px offscreen tilemap pixels before sampling the margins
 // of BG(layer+1). This hides UI staging columns that hardware never displays.
 // Applies to non-mosaic 4bpp/2bpp paths. Re-apply per frame.
 void PpuSetWidescreenLayerMarginGap(Ppu *ppu, uint8_t layer, uint8_t left_px,
                                     uint8_t right_px);
+
+// Treat [left_px, 256-right_px) as BG(layer+1)'s authentic visible viewport
+// while a widescreen line enhancer is active. Pixels in the native edge
+// insets remain transparent so the enhancer or lower layers can replace
+// framebuffer padding that was hidden on the original display.
+void PpuSetWidescreenLayerViewportInset(Ppu *ppu, uint8_t layer,
+                                        uint8_t left_px, uint8_t right_px);
 
 #endif
