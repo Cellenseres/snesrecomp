@@ -91,6 +91,20 @@ RecompReturn cpu_dispatch_pc_from(CpuState *c, uint32 pc, uint16 mr, uint32 src)
 RecompReturn cpu_dispatch_pc(CpuState *c, uint32 pc, uint16 mr) {
     (void)c; (void)pc; (void)mr; return RECOMP_RETURN_NORMAL;
 }
+int cpu_dispatch_has_entry(CpuState *c, uint32 pc) {
+    (void)c; (void)pc; return 0;
+}
+RecompReturn interp_tier_dispatch_popped_return(
+        CpuState *c, uint32 pc, uint32 site, uint16 miss_restore_s) {
+    (void)c; (void)pc; (void)site; (void)miss_restore_s;
+    return RECOMP_RETURN_NORMAL;
+}
+RecompReturn interp_tier_dispatch_rewritten_return(
+        CpuState *c, uint32 pc, uint32 site) {
+    (void)c; (void)pc; (void)site;
+    return RECOMP_RETURN_NORMAL;
+}
+int interp_bridge_has_direct_paired_bounce(void) { return 0; }
 int interp816_opcode_hook(uint32_t addr) { (void)addr; return 0; }
 
 /* ── deterministic RNG (no Date/rand: reproducible) ── */
