@@ -717,22 +717,6 @@ uint8 *RomPtr(uint32_t addr) {
   return mapped ? mapped : (uint8 *)&g_rom[0];
 }
 
-// MVN/MVP block-move pointer: resolve (bank, addr) through the cartridge map.
-// Banks $00-$3F and $80-$BF mirror WRAM at $0000-$1FFF; $7E/$7F are WRAM.
-// Everything else is ROM (same mapping as RomPtr). Returns a non-const pointer
-// because MVN dst writes through this; callers must only dst into WRAM banks.
-uint8 *MvnPtr(uint8_t bank, uint16_t addr) {
-  if (bank == 0x7E) return g_ram + addr;
-  if (bank == 0x7F) return g_ram + 0x10000 + addr;
-  if ((bank < 0x40 || (bank >= 0x80 && bank < 0xC0)) && addr < 0x2000)
-    return g_ram + addr;
-  uint8_t *mapped = g_snes && g_snes->cart
-      ? cart_getRomPtr(g_snes->cart, bank, addr) : NULL;
-  if (mapped) return mapped;
-  cpu_trace_offrails("MvnPtr-invalid", ((uint32_t)bank << 16) | addr);
-  return (uint8 *)&g_rom[0];
-}
-
 // Replay a DMA transfer into g_ppu after the emulator executed it into g_snes->ppu.
 
 static int _writereg_ppu_count = 0;

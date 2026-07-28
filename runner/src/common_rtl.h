@@ -97,7 +97,6 @@ static inline LongPtr MAKE_LONG(uint16 lo, uint8 bank) {
 }
 
 uint8 *RomPtr(uint32_t addr);
-uint8 *MvnPtr(uint8_t bank, uint16_t addr);
 
 static inline uint8 *RomPtr_RAM(uint16_t addr) { assert(addr < 0x2000); return g_ram + addr; }
 static inline const uint8 *RomPtr_00(uint16_t addr) { return RomPtr(0x000000 | addr); }
