@@ -45,9 +45,14 @@ jobs:
           cargo clippy --locked --release --all-targets -- -D warnings
       - name: Build and test native analyzer
         run: python tools/build_native_analyzer.py --test
-      - name: Run v2 compatibility tests
+      - name: Run Python compatibility tests
         if: runner.os == 'Linux'
-        run: python tests/v2/run_tests.py
+        run: |
+          python tests/run_tests.py
+          python tests/v2/run_tests.py
+      - name: Run C runtime tests
+        if: runner.os == 'Linux'
+        run: bash tests/run_c_tests.sh
       - name: Package binary
         shell: pwsh
         run: |
