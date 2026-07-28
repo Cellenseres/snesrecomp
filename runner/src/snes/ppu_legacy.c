@@ -1,29 +1,26 @@
 #include "ppu_legacy.h"
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
-#include <stddef.h>
 
 #include "snes.h"
 #include "snes_regs.h"
 
-static void ppu_handlePixel(Ppu *ppu, int x, int y);
-static int ppu_getPixel(Ppu *ppu, int x, int y, bool sub, int *r, int *g, int *b);
-static uint16_t ppu_getOffsetValue(Ppu *ppu, int col, int row);
-static int ppu_getPixelForBgLayer(Ppu *ppu, int x, int y, int layer, bool priority);
-static void ppu_handleOPT(Ppu *ppu, int layer, int *lx, int *ly);
-static void ppu_calculateMode7Starts(Ppu *ppu, int y);
-static int ppu_getPixelForMode7(Ppu *ppu, int x, int layer, bool priority);
-static bool ppu_getWindowState(Ppu *ppu, int layer, int x);
+static void ppu_render_pixel(Ppu *ppu, int x, int y);
+static int ppu_resolve_pixel(Ppu *ppu, int x, int y, bool sub,
+                             int *r, int *g, int *b);
+static uint16_t ppu_read_offset(Ppu *ppu, int col, int row);
+static int ppu_sample_bg(Ppu *ppu, int x, int y, int layer, bool priority);
+static void ppu_apply_offset_per_tile(Ppu *ppu, int layer, int *lx, int *ly);
+static void ppu_prepare_mode7(Ppu *ppu, int y);
+static int ppu_sample_mode7(Ppu *ppu, int x, int layer, bool priority);
+static bool ppu_window_contains(Ppu *ppu, int layer, int x);
 
 // array for layer definitions per mode:
 //   0-7: mode 0-7; 8: mode 1 + l3prio; 9: mode 7 + extbg
 
 //   0-3; layers 1-4; 4: sprites; 5: nonexistent
-static const int layersPerMode[10][12] = {
+static const int layers_per_mode[10][12] = {
   {4, 0, 1, 4, 0, 1, 4, 2, 3, 4, 2, 3},
   {4, 0, 1, 4, 0, 1, 4, 2, 4, 2, 5, 5},
   {4, 0, 4, 1, 4, 0, 4, 1, 5, 5, 5, 5},
@@ -36,7 +33,7 @@ static const int layersPerMode[10][12] = {
   {4, 4, 1, 4, 0, 4, 1, 5, 5, 5, 5, 5}
 };
 
-static const int prioritysPerMode[10][12] = {
+static const int priorities_per_mode[10][12] = {
   {3, 1, 1, 2, 0, 0, 1, 1, 1, 0, 0, 0},
   {3, 1, 1, 2, 0, 0, 1, 1, 0, 0, 5, 5},
   {3, 1, 2, 1, 1, 0, 0, 0, 5, 5, 5, 5},
@@ -49,11 +46,11 @@ static const int prioritysPerMode[10][12] = {
   {3, 2, 1, 1, 0, 0, 0, 5, 5, 5, 5, 5}
 };
 
-static const int layerCountPerMode[10] = {
+static const int layer_count_per_mode[10] = {
   12, 10, 8, 8, 8, 8, 6, 5, 10, 7
 };
 
-static const int bitDepthsPerMode[10][4] = {
+static const int bit_depths_per_mode[10][4] = {
   {2, 2, 2, 2},
   {4, 4, 2, 5},
   {4, 4, 5, 5},
@@ -69,19 +66,19 @@ static const int bitDepthsPerMode[10][4] = {
 void ppu_draw_whole_line_legacy(Ppu *ppu, int line) {
   // actual line
   if (PPU_mode(ppu) == 7)
-    ppu_calculateMode7Starts(ppu, line);
+    ppu_prepare_mode7(ppu, line);
   for (int x = 0; x < 256; x++) {
-    ppu_handlePixel(ppu, x, line);
+    ppu_render_pixel(ppu, x, line);
   }
 }
 
-static void ppu_handlePixel(Ppu *ppu, int x, int y) {
+static void ppu_render_pixel(Ppu *ppu, int x, int y) {
   int r = 0, r2 = 0;
   int g = 0, g2 = 0;
   int b = 0, b2 = 0;
   if (!PPU_forcedBlank(ppu)) {
-    int mainLayer = ppu_getPixel(ppu, x, y, false, &r, &g, &b);
-    bool colorWindowState = ppu_getWindowState(ppu, 5, x);
+    int mainLayer = ppu_resolve_pixel(ppu, x, y, false, &r, &g, &b);
+    bool colorWindowState = ppu_window_contains(ppu, 5, x);
     if (
       PPU_clipMode(ppu) == 3 ||
       (PPU_clipMode(ppu) == 2 && colorWindowState) ||
@@ -98,7 +95,7 @@ static void ppu_handlePixel(Ppu *ppu, int x, int y) {
       (PPU_preventMathMode(ppu) == 1 && !colorWindowState)
       );
     if ((mathEnabled && PPU_addSubscreen(ppu)) || PPU_pseudoHires(ppu) || PPU_mode(ppu) == 5 || PPU_mode(ppu) == 6) {
-      secondLayer = ppu_getPixel(ppu, x, y, true, &r2, &g2, &b2);
+      secondLayer = ppu_resolve_pixel(ppu, x, y, true, &r2, &g2, &b2);
     }
     // TODO: subscreen pixels can be clipped to black as well
     // TODO: math for subscreen pixels (add/sub sub to main)
@@ -136,18 +133,19 @@ static void ppu_handlePixel(Ppu *ppu, int x, int y) {
   pixelBuffer[3] = 0;
 }
 
-static int ppu_getPixel(Ppu *ppu, int x, int y, bool sub, int *r, int *g, int *b) {
+static int ppu_resolve_pixel(Ppu *ppu, int x, int y, bool sub,
+                             int *r, int *g, int *b) {
   // figure out which color is on this location on main- or subscreen, sets it in r, g, b
   // returns which layer it is: 0-3 for bg layer, 4 or 6 for sprites (depending on palette), 5 for backdrop
   int actMode = PPU_mode(ppu) == 1 && PPU_bg3priority(ppu) ? 8 : PPU_mode(ppu);
   actMode = PPU_mode(ppu) == 7 && PPU_m7extBg(ppu) ? 9 : actMode;
   int layer = 5;
   int pixel = 0;
-  for (int i = 0; i < layerCountPerMode[actMode]; i++) {
-    int curLayer = layersPerMode[actMode][i];
-    int curPriority = prioritysPerMode[actMode][i];
+  for (int i = 0; i < layer_count_per_mode[actMode]; i++) {
+    int curLayer = layers_per_mode[actMode][i];
+    int curPriority = priorities_per_mode[actMode][i];
     bool layerActive = IS_SCREEN_ENABLED(ppu, sub, curLayer) && (
-      !IS_SCREEN_WINDOWED(ppu, sub, curLayer) || !ppu_getWindowState(ppu, curLayer, x)
+      !IS_SCREEN_WINDOWED(ppu, sub, curLayer) || !ppu_window_contains(ppu, curLayer, x)
       );
     if (layerActive) {
       if (curLayer < 4) {
@@ -159,7 +157,7 @@ static int ppu_getPixel(Ppu *ppu, int x, int y, bool sub, int *r, int *g, int *b
           ly -= (ly - ppu->mosaicStartLine) % PPU_mosaicSize(ppu);
         }
         if (PPU_mode(ppu) == 7) {
-          pixel = ppu_getPixelForMode7(ppu, lx, curLayer, curPriority);
+          pixel = ppu_sample_mode7(ppu, lx, curLayer, curPriority);
         } else {
           lx += ppu->hScroll[curLayer];
           if (PPU_mode(ppu) == 5 || PPU_mode(ppu) == 6) {
@@ -172,9 +170,9 @@ static int ppu_getPixel(Ppu *ppu, int x, int y, bool sub, int *r, int *g, int *b
           }
           ly += ppu->vScroll[curLayer];
           if (PPU_mode(ppu) == 2 || PPU_mode(ppu) == 4 || PPU_mode(ppu) == 6) {
-            ppu_handleOPT(ppu, curLayer, &lx, &ly);
+            ppu_apply_offset_per_tile(ppu, curLayer, &lx, &ly);
           }
-          pixel = ppu_getPixelForBgLayer(
+          pixel = ppu_sample_bg(
             ppu, lx & 0x3ff, ly & 0x3ff,
             curLayer, curPriority
           );
@@ -191,7 +189,8 @@ static int ppu_getPixel(Ppu *ppu, int x, int y, bool sub, int *r, int *g, int *b
       break;
     }
   }
-  if (PPU_directColor(ppu) && layer < 4 && bitDepthsPerMode[actMode][layer] == 8) {
+  if (PPU_directColor(ppu) && layer < 4 &&
+      bit_depths_per_mode[actMode][layer] == 8) {
     *r = ((pixel & 0x7) << 2) | ((pixel & 0x100) >> 7);
     *g = ((pixel & 0x38) >> 1) | ((pixel & 0x200) >> 8);
     *b = ((pixel & 0xc0) >> 3) | ((pixel & 0x400) >> 8);
@@ -205,7 +204,7 @@ static int ppu_getPixel(Ppu *ppu, int x, int y, bool sub, int *r, int *g, int *b
   return layer;
 }
 
-static void ppu_handleOPT(Ppu *ppu, int layer, int *lx, int *ly) {
+static void ppu_apply_offset_per_tile(Ppu *ppu, int layer, int *lx, int *ly) {
   int x = *lx;
   int y = *ly;
   int column = 0;
@@ -217,7 +216,7 @@ static void ppu_handleOPT(Ppu *ppu, int layer, int *lx, int *ly) {
   if (column > 0) {
     // fetch offset values from layer 3 tilemap
     int valid = layer == 0 ? 0x2000 : 0x4000;
-    uint16_t hOffset = ppu_getOffsetValue(ppu, column - 1, 0);
+    uint16_t hOffset = ppu_read_offset(ppu, column - 1, 0);
     uint16_t vOffset = 0;
     if (PPU_mode(ppu) == 4) {
       if (hOffset & 0x8000) {
@@ -225,7 +224,7 @@ static void ppu_handleOPT(Ppu *ppu, int layer, int *lx, int *ly) {
         hOffset = 0;
       }
     } else {
-      vOffset = ppu_getOffsetValue(ppu, column - 1, 1);
+      vOffset = ppu_read_offset(ppu, column - 1, 1);
     }
     if (PPU_mode(ppu) == 6) {
       // TODO: not sure if correct
@@ -238,7 +237,7 @@ static void ppu_handleOPT(Ppu *ppu, int layer, int *lx, int *ly) {
   }
 }
 
-static uint16_t ppu_getOffsetValue(Ppu *ppu, int col, int row) {
+static uint16_t ppu_read_offset(Ppu *ppu, int col, int row) {
   int x = col * 8 + ppu->hScroll[2];
   int y = row * 8 + ppu->vScroll[2];
   int tileBits = PPU_bigTiles(ppu, 2) ? 4 : 3;
@@ -249,7 +248,7 @@ static uint16_t ppu_getOffsetValue(Ppu *ppu, int col, int row) {
   return ppu->vram[tilemapAdr & 0x7fff];
 }
 
-static int ppu_getPixelForBgLayer(Ppu *ppu, int x, int y, int layer, bool priority) {
+static int ppu_sample_bg(Ppu *ppu, int x, int y, int layer, bool priority) {
   // figure out address of tilemap word and read it
   bool wideTiles = PPU_bigTiles(ppu, layer) || PPU_mode(ppu) == 5 || PPU_mode(ppu) == 6;
   int tileBitsX = wideTiles ? 4 : 3;
@@ -276,7 +275,7 @@ static int ppu_getPixelForBgLayer(Ppu *ppu, int x, int y, int layer, bool priori
     if (((bool)(y & 8)) ^ ((bool)(tile & 0x8000))) tileNum += 0x10;
   }
   // read tiledata, ajust palette for mode 0
-  int bitDepth = bitDepthsPerMode[PPU_mode(ppu)][layer];
+  int bitDepth = bit_depths_per_mode[PPU_mode(ppu)][layer];
   if (PPU_mode(ppu) == 0) paletteNum += 8 * layer;
   // plane 1 (always)
   int paletteSize = 4;
@@ -304,7 +303,7 @@ static int ppu_getPixelForBgLayer(Ppu *ppu, int x, int y, int layer, bool priori
   return pixel == 0 ? 0 : paletteSize * paletteNum + pixel;
 }
 
-static void ppu_calculateMode7Starts(Ppu *ppu, int y) {
+static void ppu_prepare_mode7(Ppu *ppu, int y) {
   // expand 13-bit values to signed values
   int hScroll = ((int16_t)(ppu->m7matrix[6] << 3)) >> 3;
   int vScroll = ((int16_t)(ppu->m7matrix[7] << 3)) >> 3;
@@ -333,7 +332,7 @@ static void ppu_calculateMode7Starts(Ppu *ppu, int y) {
     );
 }
 
-static int ppu_getPixelForMode7(Ppu *ppu, int x, int layer, bool priority) {
+static int ppu_sample_mode7(Ppu *ppu, int x, int layer, bool priority) {
   uint8_t rx = PPU_m7xFlip(ppu) ? 255 - x : x;
   int xPos = (ppu->m7startX + ppu->m7matrix[0] * rx) >> 8;
   int yPos = (ppu->m7startY + ppu->m7matrix[2] * rx) >> 8;
@@ -350,7 +349,7 @@ static int ppu_getPixelForMode7(Ppu *ppu, int x, int layer, bool priority) {
   return pixel;
 }
 
-static bool ppu_getWindowState(Ppu *ppu, int layer, int x) {
+static bool ppu_window_contains(Ppu *ppu, int layer, int x) {
   uint32 winflags = GET_WINDOW_FLAGS(ppu, layer);
 
   if (!(winflags & kWindow1Enabled) && !(winflags & kWindow2Enabled)) {
