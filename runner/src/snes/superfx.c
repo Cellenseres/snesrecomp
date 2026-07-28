@@ -35,7 +35,7 @@ static void wr(SuperFx *f, unsigned n, uint32_t v) {
 static uint16_t sr(SuperFx *f) { return rv(f, f->sreg); }
 static void wd(SuperFx *f, uint32_t v) { wr(f, f->dreg, v); }
 static unsigned alt(SuperFx *f) { return (f->sfr >> 8) & 3; }
-static unsigned scmr_md(SuperFx *f) { return f->scmr & 3; }
+static unsigned scmr_md(const SuperFx *f) { return f->scmr & 3; }
 static unsigned scmr_ht(SuperFx *f) {
   return ((f->scmr >> 5) & 1) * 2 + ((f->scmr >> 2) & 1);
 }
@@ -222,44 +222,41 @@ static void plot_native(SuperFx *f, uint8_t x, uint8_t y, uint8_t c) {
   }
 }
 
-static void plot(SuperFx *f, uint16_t x, uint8_t y) {
+static void plot(SuperFx *f, uint8_t x, uint8_t y) {
   if (plot_transparent(f)) return;
-
-  if (f->ws_replay_mode) {
-    if (x < f->ws_width && y < f->ws_height) {
-      const size_t offset = (size_t)y * f->ws_width + x;
-      /* Preserve the native framebuffer's dither phase. The wider replay's
-       * x=extra is the original viewport's x=0. */
-      const uint8_t pixel =
-          plot_color(f, (uint16_t)(x - f->ws_extra), y);
-      f->ws_pixels[offset] = pixel;
-      /* The PPU treats color index zero as transparent even when the GSU's
-       * POR setting allowed PLOT to use zero to erase an older framebuffer
-       * pixel. Mirror the completed planar framebuffer, not merely the fact
-       * that a PLOT instruction touched this coordinate. */
-      f->ws_valid[offset] = pixel != 0;
-    }
-    return;
-  }
-
-  plot_native(f, (uint8_t)x, y, plot_color(f, x, y));
+  plot_native(f, x, y, plot_color(f, x, y));
 }
-static uint8_t rpix(SuperFx *f, uint16_t x, uint8_t y) {
-  if (f->ws_replay_mode)
-    return x < f->ws_width && y < f->ws_height
-               ? f->ws_pixels[(size_t)y * f->ws_width + x]
-               : 0;
 
+static void enhanced_plot(SuperFx *f, uint16_t x, uint8_t y) {
+  if (plot_transparent(f)) return;
+  if (x < f->ws_width && y < f->ws_height) {
+    const size_t offset = (size_t)y * f->ws_width + x;
+    /* Preserve the native framebuffer's dither phase. The wider replay's
+     * x=extra is the original viewport's x=0. */
+    const uint8_t pixel = plot_color(f, (uint16_t)(x - f->ws_extra), y);
+    f->ws_pixels[offset] = pixel;
+    /* The PPU treats color index zero as transparent even when the GSU's POR
+     * setting allowed PLOT to erase an older framebuffer pixel. */
+    f->ws_valid[offset] = pixel != 0;
+  }
+}
+
+static uint8_t rpix(SuperFx *f, uint8_t x, uint8_t y) {
   flush_pixel(f, &f->pixel[1]); flush_pixel(f, &f->pixel[0]);
-  uint32_t a = pixel_address(f, (uint8_t)x, y);
-  uint8_t d = 0;
-  x = (x & 7) ^ 7;
+  uint32_t a = pixel_address(f, x, y);
+  uint8_t d = 0; x = (x & 7) ^ 7;
   for (unsigned n = 0; n < bpp(f); n++) {
     uint32_t by = ((n >> 1) << 4) + (n & 1);
     step_clocks(f, f->clsr ? 5 : 6);
     d |= ((gsu_read(f, a + by) >> x) & 1) << n;
   }
   return d;
+}
+
+static uint8_t enhanced_rpix(SuperFx *f, uint16_t x, uint8_t y) {
+  return x < f->ws_width && y < f->ws_height
+             ? f->ws_pixels[(size_t)y * f->ws_width + x]
+             : 0;
 }
 
 static void set_sz(SuperFx *f, uint16_t v) {
@@ -271,7 +268,9 @@ static void instruction(SuperFx *f, uint8_t op) {
   if (op == 0x00) {
     if (f->ws_render_active) {
       f->ws_render_active = false;
-      f->ws_replay_pending = true;
+      if (f->enhancement_mode ==
+          kSuperFxEnhancement_WidescreenLinearProjection)
+        f->ws_replay_pending = true;
     }
     if (!(f->cfgr & 0x80)) { f->sfr |= SFR_IRQ; f->irq_pending = true; }
     f->sfr &= (uint16_t)~SFR_G; f->pipeline = 1; reset_prefix(f); return;
@@ -300,7 +299,28 @@ static void instruction(SuperFx *f, uint8_t op) {
   if (op == 0x3e) { f->sfr=(f->sfr&~SFR_B)|SFR_ALT2; return; }
   if (op == 0x3f) { f->sfr=(f->sfr&~SFR_B)|SFR_ALT1|SFR_ALT2; return; }
   if (op >= 0x40 && op <= 0x4b) { f->ramaddr=rv(f,n); uint16_t v=read_ram_buffer(f,f->ramaddr); if(!(f->sfr&SFR_ALT1)) v|=(uint16_t)read_ram_buffer(f,f->ramaddr^1)<<8; wd(f,v); reset_prefix(f); return; }
-  if (op == 0x4c) { if(!(f->sfr&SFR_ALT1)){ plot(f,rv(f,1),(uint8_t)rv(f,2)); wr(f,1,rv(f,1)+1); } else { wd(f,rpix(f,rv(f,1),(uint8_t)rv(f,2))); set_sz(f,rv(f,f->dreg)); } reset_prefix(f); return; }
+  if (op == 0x4c) {
+    const bool enhanced_replay =
+        f->ws_replay_mode &&
+        f->enhancement_mode ==
+            kSuperFxEnhancement_WidescreenLinearProjection;
+    if (!(f->sfr & SFR_ALT1)) {
+      if (enhanced_replay)
+        enhanced_plot(f, rv(f, 1), (uint8_t)rv(f, 2));
+      else
+        plot(f, (uint8_t)rv(f, 1), (uint8_t)rv(f, 2));
+      wr(f, 1, rv(f, 1) + 1);
+    } else {
+      const uint8_t pixel =
+          enhanced_replay
+              ? enhanced_rpix(f, rv(f, 1), (uint8_t)rv(f, 2))
+              : rpix(f, (uint8_t)rv(f, 1), (uint8_t)rv(f, 2));
+      wd(f, pixel);
+      set_sz(f, rv(f, f->dreg));
+    }
+    reset_prefix(f);
+    return;
+  }
   if (op == 0x4d) { wd(f,(sr(f)>>8)|(sr(f)<<8)); set_sz(f,rv(f,f->dreg)); reset_prefix(f); return; }
   if (op == 0x4e) { if(!(f->sfr&SFR_ALT1)) f->colr=color(f,(uint8_t)sr(f)); else f->por=(uint8_t)sr(f)&0x1f; reset_prefix(f); return; }
   if (op == 0x4f) { wd(f,~sr(f)); set_sz(f,rv(f,f->dreg)); reset_prefix(f); return; }
@@ -346,6 +366,9 @@ static void run_one(SuperFx *f) {
 }
 
 static bool render_widescreen_frame(SuperFx *f) {
+  if (f->enhancement_mode !=
+      kSuperFxEnhancement_WidescreenLinearProjection)
+    return false;
   SuperFx clone;
   uint8_t *work_ram = (uint8_t *)malloc(f->ram_size);
   if (!work_ram) return false;
@@ -449,12 +472,14 @@ void superfx_reset(SuperFx *f) {
   uint8_t *ws_present_pixels=f->ws_present_pixels;
   uint8_t *ws_present_valid=f->ws_present_valid;
   void *ws_task_state=f->ws_task_state; uint8_t *ws_task_ram=f->ws_task_ram;
+  SuperFxEnhancementMode enhancement_mode=f->enhancement_mode;
   uint8_t ws_extra=f->ws_extra;
   memset(f,0,sizeof(*f)); f->rom=rom;f->rom_size=rs;f->rom_mask=rs-1;f->ram=ram;f->ram_size=rm;f->ram_mask=rm-1;
   f->ws_pixels=ws_pixels;f->ws_valid=ws_valid;f->ws_task_state=ws_task_state;
   f->ws_present_pixels=ws_present_pixels;
   f->ws_present_valid=ws_present_valid;
   f->ws_task_ram=ws_task_ram;f->ws_extra=ws_extra;
+  f->enhancement_mode=enhancement_mode;
   f->vcr=4; f->pipeline=1; f->pixel[0].offset=f->pixel[1].offset=UINT16_MAX;
 }
 void superfx_sync(SuperFx *f, uint64_t master) {
@@ -489,7 +514,9 @@ void superfx_cpu_write_io(SuperFx *f, uint16_t a, uint8_t v) {
     f->sfr|=SFR_G;
     /* Snapshot the configured rendering task so presentation-only side
      * passes can replay it after the authoritative native pass. */
-    if(f->ws_extra && f->pbr==f->ws_task_pbr &&
+    if(f->enhancement_mode ==
+           kSuperFxEnhancement_WidescreenLinearProjection &&
+       f->ws_extra && f->pbr==f->ws_task_pbr &&
        rv(f,15)==f->ws_task_address && f->ws_pixels &&
        f->ws_task_state && f->ws_task_ram){
       f->ws_saved_center_x=f->ram[f->ws_center_ram]|
@@ -525,10 +552,40 @@ uint8_t superfx_cpu_read_rom(SuperFx *f,uint32_t a,uint8_t open){
 uint8_t superfx_cpu_read_ram(SuperFx *f,uint32_t a,uint8_t open){return ((f->sfr&SFR_G)&&scmr_ran(f))?open:f->ram[a&f->ram_mask];}
 void superfx_cpu_write_ram(SuperFx *f,uint32_t a,uint8_t v){f->ram[a&f->ram_mask]=v;}
 
+void superfx_set_enhancement_mode(SuperFx *f,
+                                  SuperFxEnhancementMode mode) {
+  if (!f) return;
+  if (mode != kSuperFxEnhancement_None &&
+      mode != kSuperFxEnhancement_WidescreenLinearProjection)
+    mode = kSuperFxEnhancement_None;
+  if (f->enhancement_mode == mode)
+    return;
+
+  f->enhancement_mode = mode;
+  f->ws_extra = 0;
+  f->ws_width = 0;
+  f->ws_height = 0;
+  f->ws_render_active = false;
+  f->ws_replay_pending = false;
+  f->ws_replay_mode = false;
+  f->ws_frame_ready = false;
+  f->ws_pending_ready = false;
+  f->ws_replay_zero_word_count = 0;
+}
+
+SuperFxEnhancementMode superfx_get_enhancement_mode(const SuperFx *f) {
+  return f ? f->enhancement_mode : kSuperFxEnhancement_None;
+}
+
 void superfx_set_widescreen(SuperFx *f, uint8_t extra, uint8_t task_pbr,
                             uint16_t task_address, uint16_t center_x_ram,
                             uint16_t max_x_ram, uint8_t height) {
   if (!f) return;
+  if (f->enhancement_mode !=
+      kSuperFxEnhancement_WidescreenLinearProjection) {
+    f->ws_extra = 0;
+    return;
+  }
   if (extra > kSuperFxWsMaxExtra) extra = kSuperFxWsMaxExtra;
   /* The architectural framebuffer persists until the game replaces it, so
    * its presentation-only wide replay must persist as well. Clearing this
@@ -537,6 +594,11 @@ void superfx_set_widescreen(SuperFx *f, uint8_t extra, uint8_t task_pbr,
   if (!extra || extra != f->ws_extra) {
     f->ws_frame_ready = false;
     f->ws_pending_ready = false;
+  }
+  if (!extra) {
+    f->ws_render_active = false;
+    f->ws_replay_pending = false;
+    f->ws_replay_mode = false;
   }
   f->ws_extra = extra;
   f->ws_task_pbr = task_pbr;
@@ -572,6 +634,9 @@ void superfx_set_widescreen_replay_zero_words(SuperFx *f,
                                               const uint16_t *ram_offsets,
                                               unsigned count) {
   if (!f) return;
+  if (f->enhancement_mode !=
+      kSuperFxEnhancement_WidescreenLinearProjection)
+    count = 0;
   if (!ram_offsets) count = 0;
   if (count > 8) count = 8;
   f->ws_replay_zero_word_count = (uint8_t)count;
@@ -583,7 +648,10 @@ void superfx_set_widescreen_replay_zero_words(SuperFx *f,
 bool superfx_get_widescreen_frame(const SuperFx *f, const uint8_t **pixels,
                                   const uint8_t **valid, unsigned *width,
                                   unsigned *height) {
-  if (!f || !f->ws_frame_ready || !f->ws_present_pixels ||
+  if (!f ||
+      f->enhancement_mode !=
+          kSuperFxEnhancement_WidescreenLinearProjection ||
+      !f->ws_frame_ready || !f->ws_present_pixels ||
       !f->ws_present_valid) return false;
   if (pixels) *pixels = f->ws_present_pixels;
   if (valid) *valid = f->ws_present_valid;
@@ -593,7 +661,10 @@ bool superfx_get_widescreen_frame(const SuperFx *f, const uint8_t **pixels,
 }
 
 void superfx_latch_widescreen_frame(SuperFx *f) {
-  if (!f || !f->ws_pending_ready) return;
+  if (!f ||
+      f->enhancement_mode !=
+          kSuperFxEnhancement_WidescreenLinearProjection ||
+      !f->ws_pending_ready) return;
   uint8_t *pixels = f->ws_present_pixels;
   uint8_t *valid = f->ws_present_valid;
   f->ws_present_pixels = f->ws_pixels;

@@ -24,6 +24,15 @@ typedef struct SuperFxTraceEntry {
   uint8_t opcode;
 } SuperFxTraceEntry;
 
+/* Host-side presentation enhancements. The default is always the faithful
+ * hardware execution path; enhanced modes must be selected explicitly by a
+ * title and never change the authoritative GSU registers, RAM, or native
+ * framebuffer. */
+typedef enum SuperFxEnhancementMode {
+  kSuperFxEnhancement_None = 0,
+  kSuperFxEnhancement_WidescreenLinearProjection = 1,
+} SuperFxEnhancementMode;
+
 /* Architectural state for the Nintendo GSU/Super FX coprocessor.  This is a
  * correctness-oriented LLE core: callers expose the real register and memory
  * buses and advance it from the shared SNES master-clock timeline. */
@@ -59,9 +68,9 @@ typedef struct SuperFx {
   uint64_t instruction_count;
   SuperFxTraceEntry trace[256];
 
-  /* Optional presentation-only raster extension. Architectural GSU RAM and
-   * the native framebuffer remain authoritative; the replay uses this linear
-   * surface for the wider projection's 16-bit PLOT and RPIX coordinates. */
+  /* Optional presentation-only enhancement state. Architectural GSU state
+   * above remains authoritative and always follows native hardware behavior. */
+  SuperFxEnhancementMode enhancement_mode;
   uint8_t *ws_pixels;
   uint8_t *ws_valid;
   uint8_t *ws_present_pixels;
@@ -94,10 +103,17 @@ uint8_t superfx_cpu_read_rom(SuperFx *fx, uint32_t address, uint8_t open_bus);
 uint8_t superfx_cpu_read_ram(SuperFx *fx, uint32_t address, uint8_t open_bus);
 void superfx_cpu_write_ram(SuperFx *fx, uint32_t address, uint8_t data);
 
-/* Enable a presentation-only wider replay for a GSU rendering task. The
- * task's projection center and maximum X are supplied as GSU RAM offsets,
- * keeping title-specific addresses out of the LLE core. `extra` is the added
- * projected width per side; zero disables it. */
+/* Select a host-side presentation enhancement. Newly created cores default
+ * to None. Changing modes discards all queued/presented enhanced frames. */
+void superfx_set_enhancement_mode(SuperFx *fx,
+                                  SuperFxEnhancementMode mode);
+SuperFxEnhancementMode superfx_get_enhancement_mode(const SuperFx *fx);
+
+/* Configure a presentation-only wider replay for a GSU rendering task.
+ * Configuration is inert unless WidescreenLinearProjection was explicitly
+ * selected above. The task's projection center and maximum X are supplied as
+ * GSU RAM offsets, keeping title-specific addresses out of the LLE core.
+ * `extra` is the added projected width per side; zero disables it. */
 void superfx_set_widescreen(SuperFx *fx, uint8_t extra, uint8_t task_pbr,
                             uint16_t task_address, uint16_t center_x_ram,
                             uint16_t max_x_ram, uint8_t height);
