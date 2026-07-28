@@ -60,8 +60,8 @@ typedef struct SuperFx {
   SuperFxTraceEntry trace[256];
 
   /* Optional presentation-only raster extension. Architectural GSU RAM and
-   * the native framebuffer remain authoritative; this records pixels whose
-   * 16-bit raster X would otherwise be truncated by hardware PLOT. */
+   * the native framebuffer remain authoritative; the replay uses this linear
+   * surface for the wider projection's 16-bit PLOT and RPIX coordinates. */
   uint8_t *ws_pixels;
   uint8_t *ws_valid;
   uint8_t *ws_present_pixels;
@@ -72,7 +72,8 @@ typedef struct SuperFx {
   uint8_t ws_height, ws_extra;
   bool ws_render_active, ws_replay_pending, ws_replay_mode, ws_frame_ready;
   bool ws_pending_ready;
-  uint8_t ws_replay_side;
+  uint8_t ws_replay_zero_word_count;
+  uint16_t ws_replay_zero_words[8];
   uint16_t ws_saved_center_x, ws_saved_max_x;
   uint16_t ws_last_task, ws_task_address;
   uint16_t ws_center_ram, ws_max_ram;
@@ -93,13 +94,19 @@ uint8_t superfx_cpu_read_rom(SuperFx *fx, uint32_t address, uint8_t open_bus);
 uint8_t superfx_cpu_read_ram(SuperFx *fx, uint32_t address, uint8_t open_bus);
 void superfx_cpu_write_ram(SuperFx *fx, uint32_t address, uint8_t data);
 
-/* Enable symmetric presentation-only side replays for a GSU rendering task.
- * The task's projection center and maximum X are supplied as GSU RAM offsets,
+/* Enable a presentation-only wider replay for a GSU rendering task. The
+ * task's projection center and maximum X are supplied as GSU RAM offsets,
  * keeping title-specific addresses out of the LLE core. `extra` is the added
  * projected width per side; zero disables it. */
 void superfx_set_widescreen(SuperFx *fx, uint8_t extra, uint8_t task_pbr,
                             uint16_t task_address, uint16_t center_x_ram,
                             uint16_t max_x_ram, uint8_t height);
+/* Clear title-selected word flags only in the presentation replay. This lets
+ * callers exclude screen-space HUD/effect subpasses from a task while keeping
+ * the authoritative native task unchanged. */
+void superfx_set_widescreen_replay_zero_words(SuperFx *fx,
+                                              const uint16_t *ram_offsets,
+                                              unsigned count);
 bool superfx_get_widescreen_frame(const SuperFx *fx, const uint8_t **pixels,
                                   const uint8_t **valid, unsigned *width,
                                   unsigned *height);

@@ -226,25 +226,34 @@ static void plot(SuperFx *f, uint16_t x, uint8_t y) {
   if (plot_transparent(f)) return;
 
   if (f->ws_replay_mode) {
-    const unsigned native_width = (unsigned)f->ws_saved_max_x + 1u;
-    const unsigned capture_base = (native_width - f->ws_extra) / 2u;
-    int logical_x = f->ws_replay_side == 1
-                        ? (int)x - (int)capture_base - f->ws_extra
-                        : (int)x - (int)capture_base + (int)native_width;
-    uint8_t c = plot_color(f, (uint16_t)logical_x, y);
-    /* Capture is decoded from the completed planar framebuffer after STOP.
-     * PLOT events are intermediate state: later polygons may overwrite them,
-     * and the game can read pixels while constructing the final image. */
-    plot_native(f, (uint8_t)x, y, c);
+    if (x < f->ws_width && y < f->ws_height) {
+      const size_t offset = (size_t)y * f->ws_width + x;
+      /* Preserve the native framebuffer's dither phase. The wider replay's
+       * x=extra is the original viewport's x=0. */
+      const uint8_t pixel =
+          plot_color(f, (uint16_t)(x - f->ws_extra), y);
+      f->ws_pixels[offset] = pixel;
+      /* The PPU treats color index zero as transparent even when the GSU's
+       * POR setting allowed PLOT to use zero to erase an older framebuffer
+       * pixel. Mirror the completed planar framebuffer, not merely the fact
+       * that a PLOT instruction touched this coordinate. */
+      f->ws_valid[offset] = pixel != 0;
+    }
     return;
   }
 
   plot_native(f, (uint8_t)x, y, plot_color(f, x, y));
 }
-static uint8_t rpix(SuperFx *f, uint8_t x, uint8_t y) {
+static uint8_t rpix(SuperFx *f, uint16_t x, uint8_t y) {
+  if (f->ws_replay_mode)
+    return x < f->ws_width && y < f->ws_height
+               ? f->ws_pixels[(size_t)y * f->ws_width + x]
+               : 0;
+
   flush_pixel(f, &f->pixel[1]); flush_pixel(f, &f->pixel[0]);
-  uint32_t a = pixel_address(f, x, y);
-  uint8_t d = 0; x = (x & 7) ^ 7;
+  uint32_t a = pixel_address(f, (uint8_t)x, y);
+  uint8_t d = 0;
+  x = (x & 7) ^ 7;
   for (unsigned n = 0; n < bpp(f); n++) {
     uint32_t by = ((n >> 1) << 4) + (n & 1);
     step_clocks(f, f->clsr ? 5 : 6);
@@ -291,7 +300,7 @@ static void instruction(SuperFx *f, uint8_t op) {
   if (op == 0x3e) { f->sfr=(f->sfr&~SFR_B)|SFR_ALT2; return; }
   if (op == 0x3f) { f->sfr=(f->sfr&~SFR_B)|SFR_ALT1|SFR_ALT2; return; }
   if (op >= 0x40 && op <= 0x4b) { f->ramaddr=rv(f,n); uint16_t v=read_ram_buffer(f,f->ramaddr); if(!(f->sfr&SFR_ALT1)) v|=(uint16_t)read_ram_buffer(f,f->ramaddr^1)<<8; wd(f,v); reset_prefix(f); return; }
-  if (op == 0x4c) { if(!(f->sfr&SFR_ALT1)){ plot(f,rv(f,1),(uint8_t)rv(f,2)); wr(f,1,rv(f,1)+1); } else { wd(f,rpix(f,(uint8_t)rv(f,1),(uint8_t)rv(f,2))); set_sz(f,rv(f,f->dreg)); } reset_prefix(f); return; }
+  if (op == 0x4c) { if(!(f->sfr&SFR_ALT1)){ plot(f,rv(f,1),(uint8_t)rv(f,2)); wr(f,1,rv(f,1)+1); } else { wd(f,rpix(f,rv(f,1),(uint8_t)rv(f,2))); set_sz(f,rv(f,f->dreg)); } reset_prefix(f); return; }
   if (op == 0x4d) { wd(f,(sr(f)>>8)|(sr(f)<<8)); set_sz(f,rv(f,f->dreg)); reset_prefix(f); return; }
   if (op == 0x4e) { if(!(f->sfr&SFR_ALT1)) f->colr=color(f,(uint8_t)sr(f)); else f->por=(uint8_t)sr(f)&0x1f; reset_prefix(f); return; }
   if (op == 0x4f) { wd(f,~sr(f)); set_sz(f,rv(f,f->dreg)); reset_prefix(f); return; }
@@ -336,7 +345,7 @@ static void run_one(SuperFx *f) {
   if(f->r[15].modified) f->r[15].modified=false; else wr(f,15,rv(f,15)+1), f->r[15].modified=false;
 }
 
-static bool render_widescreen_pass(SuperFx *f, uint8_t side) {
+static bool render_widescreen_frame(SuperFx *f) {
   SuperFx clone;
   uint8_t *work_ram = (uint8_t *)malloc(f->ram_size);
   if (!work_ram) return false;
@@ -354,74 +363,68 @@ static bool render_widescreen_pass(SuperFx *f, uint8_t side) {
   clone.ws_render_active = false;
   clone.ws_replay_pending = false;
   clone.ws_replay_mode = true;
-  clone.ws_replay_side = side;
+  for (unsigned i = 0; i < clone.ws_replay_zero_word_count; i++) {
+    const unsigned address = clone.ws_replay_zero_words[i];
+    if (address + 1u < clone.ram_size) {
+      clone.ram[address] = 0;
+      clone.ram[address + 1u] = 0;
+    }
+  }
 
-  /* Render each new side inside a full hardware-sized LLE viewport. Keep the
-   * capture strip in the middle of that viewport: placing it against x=0 or
-   * maxX makes the game's polygon clipper reshape an object precisely as it
-   * crosses the native/widescreen seam. */
-  const int native_width = (int)f->ws_saved_max_x + 1;
-  const int capture_base = (native_width - f->ws_extra) / 2;
-  int center = side == 1
-                   ? (int)f->ws_saved_center_x + f->ws_extra + capture_base
-                   : (int)f->ws_saved_center_x - native_width + capture_base;
+  /* Materialize any pixels still in the task snapshot's two hardware caches
+   * before using its framebuffer as the RPIX seed for the wider replay. */
+  flush_pixel(&clone, &clone.pixel[1]);
+  flush_pixel(&clone, &clone.pixel[0]);
+
+  /* Seed the native picture at its matching location in the wide coordinate
+   * system. It is intentionally not marked valid: only pixels actually
+   * plotted by this replay may be composited into the new side columns. */
+  const unsigned native_width = (unsigned)f->ws_saved_max_x + 1u;
+  for (unsigned y = 0; y < f->ws_height; y++) {
+    for (unsigned native_x = 0; native_x < native_width; native_x++) {
+      const uint32_t a =
+          pixel_address(&clone, (uint8_t)native_x, (uint8_t)y);
+      const unsigned bit_index = (native_x & 7) ^ 7;
+      uint8_t pixel = 0;
+      for (unsigned n = 0; n < bpp(&clone); n++) {
+        const uint32_t plane = ((n >> 1) << 4) + (n & 1);
+        pixel |= ((gsu_read(&clone, a + plane) >> bit_index) & 1) << n;
+      }
+      f->ws_pixels[(size_t)y * f->ws_width + f->ws_extra + native_x] =
+          pixel;
+    }
+  }
+
+  /* One coherent camera spans the native framebuffer plus both margins.
+   * Camera-bound objects therefore remain centered, while the game's own
+   * polygon clipper receives the true output bounds instead of two shifted
+   * 224-pixel substitutes. PLOT and RPIX use the linear host surface above,
+   * avoiding the hardware framebuffer's 8-bit X/tile addressing limit. */
+  const uint16_t center =
+      (uint16_t)(f->ws_saved_center_x + f->ws_extra);
+  const uint16_t max_x =
+      (uint16_t)(f->ws_saved_max_x + 2u * f->ws_extra);
   clone.ram[f->ws_center_ram] = (uint8_t)center;
-  clone.ram[f->ws_center_ram + 1] = (uint8_t)((uint16_t)center >> 8);
-  /* Keep the game's authentic clipping maximum. Reducing max X to the side
-   * capture width changes polygon clipping itself, so an object deforms as it
-   * crosses the native/extended seam. The shifted projection center places
-   * the desired side frustum in x=0..extra-1; the host capture below simply
-   * ignores the remaining pixels from this full-width replay. */
-  clone.ram[f->ws_max_ram] = (uint8_t)f->ws_saved_max_x;
-  clone.ram[f->ws_max_ram + 1] = (uint8_t)(f->ws_saved_max_x >> 8);
+  clone.ram[f->ws_center_ram + 1] = (uint8_t)(center >> 8);
+  clone.ram[f->ws_max_ram] = (uint8_t)max_x;
+  clone.ram[f->ws_max_ram + 1] = (uint8_t)(max_x >> 8);
 
   unsigned guard = 0;
   while ((clone.sfr & SFR_G) && guard++ < 20000000)
     run_one(&clone);
   bool complete = !(clone.sfr & SFR_G);
   if (!complete)
-    fprintf(stderr, "[superfx] widescreen side %u replay exceeded guard\n",
-            side);
+    fprintf(stderr, "[superfx] widescreen replay exceeded guard\n");
 
-  if (complete) {
-    /* Materialize the final two cached slivers, then decode the exact planar
-     * framebuffer that the cloned LLE task produced. Pixel zero is
-     * transparent to the PPU; palette selection is supplied later by BG1's
-     * tilemap rather than guessed from transient COLR writes. */
-    flush_pixel(&clone, &clone.pixel[1]);
-    flush_pixel(&clone, &clone.pixel[0]);
-    for (unsigned side_x = 0; side_x < f->ws_extra; side_x++) {
-      const uint8_t x = (uint8_t)(capture_base + side_x);
-      const unsigned host_x = side == 1
-                                  ? side_x
-                                  : (unsigned)native_width + f->ws_extra +
-                                        side_x;
-      for (unsigned y = 0; y < f->ws_height; y++) {
-        const uint32_t a = pixel_address(&clone, x, (uint8_t)y);
-        const unsigned bit_index = (x & 7) ^ 7;
-        uint8_t pixel = 0;
-        for (unsigned n = 0; n < bpp(&clone); n++) {
-          const uint32_t plane = ((n >> 1) << 4) + (n & 1);
-          pixel |= ((gsu_read(&clone, a + plane) >> bit_index) & 1) << n;
-        }
-        if (pixel && host_x < f->ws_width) {
-          f->ws_pixels[(size_t)y * f->ws_width + host_x] = pixel;
-          f->ws_valid[(size_t)y * f->ws_width + host_x] = 1;
-        }
-      }
-    }
-  }
   free(work_ram);
   return complete;
 }
 
-static void render_widescreen_sides(SuperFx *f) {
+static void finish_widescreen_replay(SuperFx *f) {
   f->ws_replay_pending = false;
   memset(f->ws_pixels, 0, (size_t)kSuperFxWsMaxWidth * 192);
   memset(f->ws_valid, 0, (size_t)kSuperFxWsMaxWidth * 192);
-  bool left = render_widescreen_pass(f, 1);
-  bool right = render_widescreen_pass(f, 2);
-  f->ws_pending_ready = left && right;
+  f->ws_pending_ready = render_widescreen_frame(f);
 }
 
 SuperFx *superfx_create(uint8_t *rom, uint32_t rom_size, uint8_t *ram, uint32_t ram_size) {
@@ -462,7 +465,7 @@ void superfx_sync(SuperFx *f, uint64_t master) {
   unsigned guard=0; while(f->clock_credit>=6 && guard++<2000000) {
     run_one(f);
     if (f->ws_replay_pending)
-      render_widescreen_sides(f);
+      finish_widescreen_replay(f);
   }
 }
 
@@ -500,8 +503,8 @@ void superfx_cpu_write_io(SuperFx *f, uint16_t a, uint8_t v) {
         f->ws_width=(uint16_t)width;
         memcpy(f->ws_task_state,f,sizeof(*f));
         memcpy(f->ws_task_ram,f->ram,f->ram_size);
-        /* Keep presenting the last completed side frame while this native
-         * task and its replays are in flight. */
+        /* Keep presenting the last completed wide frame while this native
+         * task and its replay are in flight. */
         f->ws_render_active=true;
       }
     }
@@ -528,7 +531,7 @@ void superfx_set_widescreen(SuperFx *f, uint8_t extra, uint8_t task_pbr,
   if (!f) return;
   if (extra > kSuperFxWsMaxExtra) extra = kSuperFxWsMaxExtra;
   /* The architectural framebuffer persists until the game replaces it, so
-   * its presentation-only side replays must persist as well. Clearing this
+   * its presentation-only wide replay must persist as well. Clearing this
    * on every host frame made objects disappear whenever RenderObjects did
    * not finish a fresh task between two adjacent PPU draws. */
   if (!extra || extra != f->ws_extra) {
@@ -563,6 +566,18 @@ void superfx_set_widescreen(SuperFx *f, uint8_t extra, uint8_t task_pbr,
       f->ws_extra = 0;
     }
   }
+}
+
+void superfx_set_widescreen_replay_zero_words(SuperFx *f,
+                                              const uint16_t *ram_offsets,
+                                              unsigned count) {
+  if (!f) return;
+  if (!ram_offsets) count = 0;
+  if (count > 8) count = 8;
+  f->ws_replay_zero_word_count = (uint8_t)count;
+  if (count && ram_offsets)
+    memcpy(f->ws_replay_zero_words, ram_offsets,
+           count * sizeof(f->ws_replay_zero_words[0]));
 }
 
 bool superfx_get_widescreen_frame(const SuperFx *f, const uint8_t **pixels,
