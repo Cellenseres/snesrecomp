@@ -178,6 +178,14 @@ function(snesrecomp_target_post_mortem target)
     endif()
 endfunction()
 
+# Win32 Fiber API compatibility for non-Windows cooperative schedulers.
+function(snesrecomp_target_fiber_compat target)
+    target_sources(${target} PRIVATE
+        ${SNESRECOMP_RUNNER_ROOT}/src/desktop/fiber_compat.c)
+    target_include_directories(${target} PRIVATE
+        ${SNESRECOMP_RUNNER_ROOT}/src/desktop)
+endfunction()
+
 # Optional delay-sync netcode (lib/recomp-net submodule). See docs/RECOMP_NET.md.
 # Does nothing unless SNESRECOMP_ENABLE_NET=ON or the game calls
 # snesrecomp_enable_recomp_net(<target>).
