@@ -150,6 +150,16 @@ function(snesrecomp_target_glsl_shader target)
     endif()
 endfunction()
 
+# Shared configuration/keybinding implementation used by the Mega Man X
+# trilogy hosts. Kept opt-in because its Config structure and INI grammar are
+# intentionally game-facing rather than part of the core runner ABI.
+function(snesrecomp_target_mmx_config target)
+    target_sources(${target} PRIVATE
+        ${SNESRECOMP_RUNNER_ROOT}/src/desktop/mmx_config.c)
+    target_include_directories(${target} PRIVATE
+        ${SNESRECOMP_RUNNER_ROOT}/src/desktop)
+endfunction()
+
 # Optional delay-sync netcode (lib/recomp-net submodule). See docs/RECOMP_NET.md.
 # Does nothing unless SNESRECOMP_ENABLE_NET=ON or the game calls
 # snesrecomp_enable_recomp_net(<target>).
