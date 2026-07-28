@@ -815,12 +815,14 @@ def build_manifest(rom: bytes, parsed, *, max_insns: int, max_nodes: int,
             recursive_solutions = _solve_exit_equation_sccs(
                 round_exit_equations, active_exit_modes,
                 active_exit_mode_sets)
+            recursive_solution_keys = set()
             for key, modes in sorted(recursive_solutions.items()):
                 fact_key = (key.pc24, key.m, key.x)
                 if (fact_key in declared_exit_modes
                         or fact_key in unstable_exit_modes
                         or fact_key in unstable_exit_mode_sets):
                     continue
+                recursive_solution_keys.add(fact_key)
                 if len(modes) == 1:
                     round_exit_modes.setdefault(key, next(iter(modes)))
                 else:
@@ -878,6 +880,7 @@ def build_manifest(rom: bytes, parsed, *, max_insns: int, max_nodes: int,
             for node_key, node in manifest.nodes.items():
                 fact_key = (node_key.pc24, node_key.m, node_key.x)
                 if (fact_key not in declared_exit_modes
+                        and fact_key not in recursive_solution_keys
                         and "unproven_callee_exit" in node.reasons):
                     next_exit_modes.pop(fact_key, None)
                     next_exit_mode_sets.pop(fact_key, None)
