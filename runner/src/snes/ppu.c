@@ -564,11 +564,17 @@ static void PpuApplyMarginGap(Ppu *ppu, uint layer, PpuWindows *win,
   }
 }
 
-static bool PpuViewportAllows(Ppu *ppu, uint layer, int source_x) {
-  return !ppu->widescreenLineEnhancer ||
-         !(ppu->wsViewportInsetL[layer] | ppu->wsViewportInsetR[layer]) ||
-         (source_x >= ppu->wsViewportInsetL[layer] &&
-          source_x < kPpuXPixels - ppu->wsViewportInsetR[layer]);
+static bool PpuViewportAllows(Ppu *ppu, uint layer, int screen_x,
+                              int source_x) {
+  if (!ppu->widescreenLineEnhancer)
+    return true;
+  if (ppu->wsViewportInsetL[layer] | ppu->wsViewportInsetR[layer])
+    return source_x >= ppu->wsViewportInsetL[layer] &&
+           source_x < kPpuXPixels - ppu->wsViewportInsetR[layer];
+  /* Preserve the pre-policy behavior for existing line-enhancer users:
+   * BG1 is limited to its authentic destination viewport, while other layers
+   * are unaffected. A title must explicitly opt in to a source-space inset. */
+  return layer != 0 || (screen_x >= 0 && screen_x < kPpuXPixels);
 }
 
 // Draw a whole line of a 4bpp background layer into bgBuffers
@@ -577,6 +583,7 @@ static void PpuDrawBackground_4bpp(Ppu *ppu, PpuPixelPrioBufs *dstbuf,
                                    PpuZbufType zhi, PpuZbufType zlo) {
 #define VIEWPORT_ALLOWED(i) \
   PpuViewportAllows(ppu, layer, \
+      (int)(dstz + (i) - dstbuf->data - kPpuExtraLeftRight), \
       (int)(dstz + (i) - dstbuf->data - kPpuExtraLeftRight) + \
           ws_bias[windex])
 #define DO_PIXEL(i) do { \
@@ -1020,6 +1027,7 @@ static void PpuDrawBackground_4bpp_opt(Ppu *ppu, uint y, bool sub, uint layer,
           bg1_palette[capture_x] = (uint8_t)((tile & 0x1c00) >> 6);
         if (palette_pixel && z > *dstz &&
             PpuViewportAllows(ppu, layer,
+                              screen_x + (int)i,
                               screen_x + (int)i + sample_bias))
           *dstz = z + palette_pixel;
       }
@@ -1166,6 +1174,7 @@ static void PpuDrawBackground_4bpp_mosaic(Ppu *ppu,
                                           PpuZbufType zhi, PpuZbufType zlo) {
 #define VIEWPORT_ALLOWED(i) \
   PpuViewportAllows(ppu, layer, \
+      (int)(dstz + (i) - dstbuf->data - kPpuExtraLeftRight), \
       (int)(dstz + (i) - dstbuf->data - kPpuExtraLeftRight))
 #define GET_PIXEL() pixel = (bits) & 1 | (bits >> 7) & 2 | (bits >> 14) & 4 | (bits >> 21) & 8
 #define GET_PIXEL_HFLIP() pixel = (bits >> 7) & 1 | (bits >> 14) & 2 | (bits >> 21) & 4 | (bits >> 28) & 8

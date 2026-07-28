@@ -53,6 +53,13 @@ static int check(bool condition, const char *message) {
     return condition ? 0 : 1;
 }
 
+static void no_op_line_enhancer(Ppu *ppu, uint y, bool sub, void *context) {
+    (void)ppu;
+    (void)y;
+    (void)sub;
+    (void)context;
+}
+
 int main(void) {
     enum { kPitch = kPpuXPixels * 4 };
     uint8_t pixels[kPitch];
@@ -94,6 +101,53 @@ int main(void) {
     ppu_runLine(ppu, 1);
     failures += check((ppu->objBuffer.data[kPpuExtraLeftRight] & 0xff) != 0,
                       "disabling sprite limits renders the low slot");
+
+    /* Existing line-enhancer users rely on BG1 staying inside its authentic
+     * destination viewport. New title-specific source insets must be opt-in
+     * and must not relax that legacy fallback. */
+    {
+        enum { kExtra = 8, kWidePixels = kPpuXPixels + kExtra * 2 };
+        uint32_t wide_pixels[kWidePixels];
+
+        ppu_reset(ppu);
+        memset(wide_pixels, 0, sizeof wide_pixels);
+        PpuBeginDrawing(ppu, (uint8_t *)wide_pixels,
+                        sizeof(uint32_t) * kWidePixels,
+                        kPpuRenderFlags_NewRenderer);
+        PpuSetExtraSpace(ppu, kExtra);
+        PpuSetWidescreenLineEnhancer(ppu, no_op_line_enhancer, NULL);
+        ppu->inidisp = 0x0f;
+        ppu->bgmode = 1;
+        ppu->screenEnabled[0] = 1;
+        for (size_t i = 0; i < sizeof ppu->vram / sizeof ppu->vram[0]; i++)
+            ppu->vram[i] = 0xffff;
+        ppu->cgram[0] = 0;
+        for (size_t i = 1; i < sizeof ppu->cgram / sizeof ppu->cgram[0]; i++)
+            ppu->cgram[i] = 0x7fff;
+
+        ppu_runLine(ppu, 0);
+        ppu_runLine(ppu, 1);
+        failures += check(wide_pixels[0] == 0 &&
+                              wide_pixels[kExtra - 1] == 0 &&
+                              wide_pixels[kExtra + kPpuXPixels] == 0,
+                          "legacy line enhancer keeps BG1 out of margins");
+        failures += check(wide_pixels[kExtra] != 0 &&
+                              wide_pixels[kExtra + kPpuXPixels - 1] != 0,
+                          "legacy line enhancer retains native BG1");
+
+        memset(wide_pixels, 0, sizeof wide_pixels);
+        PpuSetExtraSpace(ppu, kExtra);
+        PpuSetWidescreenLayerViewportInset(ppu, 0, 16, 16);
+        ppu_runLine(ppu, 0);
+        ppu_runLine(ppu, 1);
+        failures += check(wide_pixels[kExtra] == 0 &&
+                              wide_pixels[kExtra + 15] == 0 &&
+                              wide_pixels[kExtra + 240] == 0,
+                          "explicit BG1 viewport inset hides native padding");
+        failures += check(wide_pixels[kExtra + 16] != 0 &&
+                              wide_pixels[kExtra + 239] != 0,
+                          "explicit BG1 viewport inset retains visible span");
+    }
 
     ppu_free(ppu);
     if (failures) return 1;
