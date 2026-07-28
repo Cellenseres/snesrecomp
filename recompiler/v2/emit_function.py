@@ -35,6 +35,10 @@ from v2.decoder import (  # noqa: E402
 from v2.cfg import V2Block, V2CFG, build_cfg  # noqa: E402
 from v2.lowering import lower  # noqa: E402
 from v2.codegen import emit_op  # noqa: E402
+from v2.naming import (  # noqa: E402
+    default_func_name as _default_func_name,
+    variant_suffix as _variant_suffix,
+)
 from snes_cycles import (  # noqa: E402
     block_static_cycles, instr_runtime_charges, region_speed,
 )
@@ -135,16 +139,6 @@ def _dynamic_charge_lines(insn, speed_expr: str = "8") -> List[str]:
         # INDIR_Y (dp),Y: effective pointer is loaded at runtime from DP — not
         # reconstructable from the static operand; left as a measured residual.
     return out
-
-
-def _default_func_name(bank: int, start: int) -> str:
-    return f"bank_{bank:02X}_{start:04X}"
-
-
-def _variant_suffix(m: int, x: int) -> str:
-    """Mirror of codegen._variant_suffix — kept duplicated to avoid the
-    cross-module import cycle. Must stay in sync."""
-    return f"_M{m & 1}X{x & 1}"
 
 
 def _stack_width_for_a(insn) -> int:

@@ -29,6 +29,10 @@ from dataclasses import dataclass  # noqa: E402
 from typing import List, Optional, Tuple  # noqa: E402
 
 from v2.emit_function import emit_function  # noqa: E402
+from v2.naming import (  # noqa: E402
+    default_func_name as _default_func_name_local,
+    variant_suffix as _variant_suffix,
+)
 
 
 @dataclass
@@ -307,16 +311,6 @@ def emit_bank(rom: bytes, bank: int,
         parts.append("")
 
     return "\n".join(parts)
-
-
-def _default_func_name_local(bank: int, start: int) -> str:
-    return f"bank_{bank:02X}_{start:04X}"
-
-
-def _variant_suffix(m: int, x: int) -> str:
-    """Mirror of codegen._variant_suffix — duplicated to avoid the
-    cross-module import cycle. Must stay in sync."""
-    return f"_M{m & 1}X{x & 1}"
 
 
 def _default_file_header(bank: int) -> str:

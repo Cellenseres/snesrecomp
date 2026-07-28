@@ -43,7 +43,6 @@ from v2.codegen import (  # noqa: E402
     take_rejected_call_targets,
     take_trampoline_returns,
     take_unresolved_call_targets,
-    take_unresolved_goto_targets,
 )
 from v2.decoder import (  # noqa: E402
     classify_dispatch_helper, decode_function, analyze_function_exit_mx,
@@ -2008,9 +2007,9 @@ def main() -> int:
         _phase(f"emit_pass_{pass_idx}")
         # Clear any leftovers from prior session/process.
         take_unresolved_call_targets()
-        # take_unresolved_goto_targets() retired 2026-05-02 — goto
-        # targets are now inlined into source functions by the decoder
-        # (see decoder._labeled_successors), not auto-promoted.
+        # Goto targets are inlined into source functions by the decoder
+        # (see decoder._labeled_successors), not auto-promoted; there is no
+        # separate promotion state to drain here.
         succeeded = 0
         failed = []
 

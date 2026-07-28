@@ -28,7 +28,6 @@ from .codegen import (
     take_rejected_call_targets,
     take_trampoline_returns,
     take_unresolved_call_targets,
-    take_unresolved_goto_targets,
 )
 from .decoder import (
     clear_decode_cache,
@@ -585,7 +584,6 @@ def emit_program(*, rom: bytes, parsed, manifest: ProgramManifest,
         set_trampoline_returns(set())
         set_active_inline_arg_map(dict(inline_arg_map) or None)
         take_unresolved_call_targets()
-        take_unresolved_goto_targets()
         take_rejected_call_targets()
         take_trampoline_returns()
 

@@ -34,6 +34,7 @@ for p in (str(_THIS_DIR), str(_RECOMPILER_DIR)):
 
 from typing import Dict, List, Optional, Tuple  # noqa: E402
 from snes_cycles import region_speed  # noqa: E402
+from v2.naming import variant_suffix as _variant_suffix  # noqa: E402
 
 # Resolver: 24-bit address (bank << 16 | pc) -> friendly C function name.
 # Populated by emit_bank before each bank emit (a process-wide map of every
@@ -206,21 +207,7 @@ def _is_invalid_lorom_call_target(addr_24: int) -> bool:
 # that lie past cfg `end:` directly into the SAME function's CFG (see
 # `_labeled_successors` + the end:-applies-to-fall-through-only rule
 # in decoder.py). Auto-promote remains for genuine subroutine targets
-# (JSR/JSL) only. See `record_unresolved_goto_target` placeholder
-# below for the contract enforcement.
-
-
-def _variant_suffix(m: int, x: int) -> str:
-    """Return the `_M{m}X{x}` suffix used for per-variant function names.
-
-    Centralised so emit_function, _emit_call, and the cross-tool
-    sync_funcs_h regen all agree on the mangling. Suffix is universal
-    in v2 — every gen function name carries it, every call site
-    appends it. Hand-written entry-point shims (e.g. I_RESET in
-    smw_rtl.c) rely on cfg-emitted aliases that drop the suffix for
-    the cfg-default (m,x).
-    """
-    return f"_M{m & 1}X{x & 1}"
+# (JSR/JSL) only.
 
 
 # All four (m, x) variants — used by every site that demands the full
@@ -389,19 +376,6 @@ def take_unresolved_call_targets() -> set:
     out = _UNRESOLVED_CALL_TARGETS
     _UNRESOLVED_CALL_TARGETS = set()
     return out
-
-
-def take_unresolved_goto_targets() -> set:
-    """Compatibility shim. The auto-promote-goto-targets pass has been
-    retired (2026-05-02) in favor of the inline-cross-fn-blocks model.
-    Returns an empty set so v2_regen's drain loop terminates immediately
-    on the first pass.
-
-    Old callers of `record_unresolved_goto_target` are gone — emit_function
-    now emits a LOUD `return; /* unresolvable cross-fn goto */` for the
-    handful of jumps that can't be imported (cross-bank, out-of-range),
-    without recording for promotion."""
-    return set()
 
 
 def get_name_for_pc(pc24: int):
