@@ -153,8 +153,14 @@ static inline void PpuResetLayerPolicies(Ppu *ppu) {
   memset(ppu->wsRepeatY1, 0, sizeof(ppu->wsRepeatY1));
   memset(ppu->wsStretchY0, 0, sizeof(ppu->wsStretchY0));
   memset(ppu->wsStretchY1, 0, sizeof(ppu->wsStretchY1));
+  memset(ppu->wsAnchorY0, 0, sizeof(ppu->wsAnchorY0));
+  memset(ppu->wsAnchorY1, 0, sizeof(ppu->wsAnchorY1));
+  memset(ppu->wsAnchorLeftEnd, 0, sizeof(ppu->wsAnchorLeftEnd));
+  memset(ppu->wsAnchorRightStart, 0, sizeof(ppu->wsAnchorRightStart));
   memset(ppu->wsMarginGapL, 0, sizeof(ppu->wsMarginGapL));
   memset(ppu->wsMarginGapR, 0, sizeof(ppu->wsMarginGapR));
+  memset(ppu->wsViewportInsetL, 0, sizeof(ppu->wsViewportInsetL));
+  memset(ppu->wsViewportInsetR, 0, sizeof(ppu->wsViewportInsetR));
 }
 
 void PpuSetExtraSpace(Ppu *ppu, uint8_t extra) {
@@ -214,7 +220,7 @@ void PpuSetWidescreenHudAlwaysVisible(Ppu *ppu, bool enabled) {
 void PpuSetWsHudOamBand(Ppu *ppu, uint8_t height, uint8_t left_end,
                         uint8_t right_start) {
   if (left_end == 0 || left_end >= right_start) height = 0;
-  ppu->wsHudOamHeight = height & 0x7f;
+  ppu->wsHudOamHeight = height;
   ppu->wsHudLeftEnd = left_end;
   ppu->wsHudRightStart = right_start;
 }
@@ -300,11 +306,33 @@ void PpuSetWidescreenLayerStretchBand(Ppu *ppu, uint8_t layer, uint8_t y0,
   }
 }
 
+void PpuSetWidescreenLayerAnchorBand(Ppu *ppu, uint8_t layer, uint8_t y0,
+                                     uint8_t y1, uint8_t left_end,
+                                     uint8_t right_start) {
+  if (layer >= 4)
+    return;
+  if (y1 <= y0 || left_end == 0 || left_end >= right_start) {
+    y0 = y1 = left_end = right_start = 0;
+  }
+  ppu->wsAnchorY0[layer] = y0;
+  ppu->wsAnchorY1[layer] = y1;
+  ppu->wsAnchorLeftEnd[layer] = left_end;
+  ppu->wsAnchorRightStart[layer] = right_start;
+}
+
 void PpuSetWidescreenLayerMarginGap(Ppu *ppu, uint8_t layer, uint8_t left_px,
                                     uint8_t right_px) {
   if (layer < 4) {
     ppu->wsMarginGapL[layer] = left_px;
     ppu->wsMarginGapR[layer] = right_px;
+  }
+}
+
+void PpuSetWidescreenLayerViewportInset(Ppu *ppu, uint8_t layer,
+                                        uint8_t left_px, uint8_t right_px) {
+  if (layer < 4) {
+    ppu->wsViewportInsetL[layer] = left_px;
+    ppu->wsViewportInsetR[layer] = right_px;
   }
 }
 
@@ -497,6 +525,30 @@ static void PpuWindowsSplit(PpuWindows *win, int16 *bias, int xpos) {
   }
 }
 
+static bool PpuApplyLayerAnchorBand(Ppu *ppu, uint layer, uint y,
+                                    PpuWindows *win, int16 *bias) {
+  if (y < ppu->wsAnchorY0[layer] || y >= ppu->wsAnchorY1[layer] ||
+      !(ppu->extraLeftCur | ppu->extraRightCur) ||
+      win->nr != 1 || win->bits != 0)
+    return false;
+  int left_end = ppu->wsAnchorLeftEnd[layer];
+  int right_start = ppu->wsAnchorRightStart[layer];
+  if (left_end == 0 || left_end >= right_start)
+    return false;
+
+  win->nr = 5;
+  win->bits = 0x0a;
+  win->edges[0] = -(int16)ppu->extraLeftCur;
+  win->edges[1] = (int16)(left_end - ppu->extraLeftCur);
+  win->edges[2] = (int16)left_end;
+  win->edges[3] = (int16)right_start;
+  win->edges[4] = (int16)(right_start + ppu->extraRightCur);
+  win->edges[5] = (int16)(256 + ppu->extraRightCur);
+  bias[0] = ppu->extraLeftCur;
+  bias[4] = -(int16)ppu->extraRightCur;
+  return true;
+}
+
 static void PpuApplyMarginGap(Ppu *ppu, uint layer, PpuWindows *win,
                               int16 *bias) {
   int gl = ppu->wsMarginGapL[layer], gr = ppu->wsMarginGapR[layer];
@@ -512,20 +564,27 @@ static void PpuApplyMarginGap(Ppu *ppu, uint layer, PpuWindows *win,
   }
 }
 
+static bool PpuViewportAllows(Ppu *ppu, uint layer, int source_x) {
+  return !ppu->widescreenLineEnhancer ||
+         !(ppu->wsViewportInsetL[layer] | ppu->wsViewportInsetR[layer]) ||
+         (source_x >= ppu->wsViewportInsetL[layer] &&
+          source_x < kPpuXPixels - ppu->wsViewportInsetR[layer]);
+}
+
 // Draw a whole line of a 4bpp background layer into bgBuffers
 static void PpuDrawBackground_4bpp(Ppu *ppu, PpuPixelPrioBufs *dstbuf,
                                    uint y, bool sub, uint layer,
                                    PpuZbufType zhi, PpuZbufType zlo) {
-#define BG1_MARGIN_ALLOWED(i) \
-  (layer != 0 || !ppu->widescreenLineEnhancer || \
-   (dstz + (i) >= dstbuf->data + kPpuExtraLeftRight && \
-    dstz + (i) < dstbuf->data + kPpuExtraLeftRight + kPpuXPixels))
+#define VIEWPORT_ALLOWED(i) \
+  PpuViewportAllows(ppu, layer, \
+      (int)(dstz + (i) - dstbuf->data - kPpuExtraLeftRight) + \
+          ws_bias[windex])
 #define DO_PIXEL(i) do { \
   pixel = (bits >> i) & 1 | (bits >> (7 + i)) & 2 | (bits >> (14 + i)) & 4 | (bits >> (21 + i)) & 8; \
-  if (BG1_MARGIN_ALLOWED(i) && (bits & (0x01010101 << i)) && z > dstz[i]) dstz[i] = z + pixel; } while (0)
+  if (VIEWPORT_ALLOWED(i) && (bits & (0x01010101 << i)) && z > dstz[i]) dstz[i] = z + pixel; } while (0)
 #define DO_PIXEL_HFLIP(i) do { \
   pixel = (bits >> (7 - i)) & 1 | (bits >> (14 - i)) & 2 | (bits >> (21 - i)) & 4 | (bits >> (28 - i)) & 8; \
-  if (BG1_MARGIN_ALLOWED(i) && (bits & (0x80808080 >> i)) && z > dstz[i]) dstz[i] = z + pixel; } while (0)
+  if (VIEWPORT_ALLOWED(i) && (bits & (0x80808080 >> i)) && z > dstz[i]) dstz[i] = z + pixel; } while (0)
 #define READ_BITS(ta, tile) (addr = &ppu->vram[((ta) + (tile) * 16) & 0x7fff], addr[0] | addr[8] << 16)
   enum { kPaletteShift = 6 };
   if (!IS_SCREEN_ENABLED(ppu, sub, layer))
@@ -533,7 +592,8 @@ static void PpuDrawBackground_4bpp(Ppu *ppu, PpuPixelPrioBufs *dstbuf,
   PpuWindows win;
   IS_SCREEN_WINDOWED(ppu, sub, layer) ? PpuWindows_Calc(&win, ppu, layer, y) : PpuWindows_Clear(&win, ppu, layer, y);
   int16 ws_bias[8] = { 0 };
-  PpuApplyMarginGap(ppu, layer, &win, ws_bias);
+  if (!PpuApplyLayerAnchorBand(ppu, layer, y, &win, ws_bias))
+    PpuApplyMarginGap(ppu, layer, &win, ws_bias);
   y += ppu->vScroll[layer];
   int sc_offs = PPU_bgTilemapAdr(ppu, layer) + (((y >> 3) & 0x1f) << 5);
   if ((y & 0x100) && PPU_bgTilemapHigher(ppu, layer))
@@ -620,7 +680,7 @@ static void PpuDrawBackground_4bpp(Ppu *ppu, PpuPixelPrioBufs *dstbuf,
 #undef READ_BITS
 #undef DO_PIXEL
 #undef DO_PIXEL_HFLIP
-#undef BG1_MARGIN_ALLOWED
+#undef VIEWPORT_ALLOWED
 }
 
 /* Draw an 8bpp tiled background (mode 3/4 BG1).  The original renderer only
@@ -867,6 +927,8 @@ static void PpuDrawBackground_4bpp_opt(Ppu *ppu, uint y, bool sub, uint layer,
   IS_SCREEN_WINDOWED(ppu, sub, layer)
       ? PpuWindows_Calc(&win, ppu, layer, y)
       : PpuWindows_Clear(&win, ppu, layer, y);
+  int16 ws_bias[8] = { 0 };
+  PpuApplyLayerAnchorBand(ppu, layer, y, &win, ws_bias);
 
   const bool big = PPU_bigTiles(ppu, layer) != 0;
   const bool opt_big = PPU_bigTiles(ppu, 2) != 0;
@@ -889,6 +951,7 @@ static void PpuDrawBackground_4bpp_opt(Ppu *ppu, uint y, bool sub, uint layer,
       continue;
     const int left = win.edges[windex];
     const int right = win.edges[windex + 1];
+    const int sample_bias = ws_bias[windex];
     PpuZbufType *dstz =
         ppu->bgBuffers[sub].data + left + kPpuExtraLeftRight;
     bool left_edge = left < 8 - (hscroll & 7);
@@ -905,7 +968,8 @@ static void PpuDrawBackground_4bpp_opt(Ppu *ppu, uint y, bool sub, uint layer,
         left_edge = false;
       } else {
         const unsigned opt_pos =
-            (opt_hscroll + (unsigned)screen_x - 1) & opt_coord_mask;
+            (opt_hscroll + (unsigned)(screen_x + sample_bias) - 1) &
+            opt_coord_mask;
         const int opt_x = opt_pos >> opt_shift;
         const uint16 hcell = PpuReadTilemapEntry(ppu, 2, opt_x, opt_hrow);
         const uint16 vcell = PpuReadTilemapEntry(ppu, 2, opt_x, opt_vrow);
@@ -915,7 +979,8 @@ static void PpuDrawBackground_4bpp_opt(Ppu *ppu, uint y, bool sub, uint layer,
           voffset = (uint16)(vcell + 1);
       }
 
-      const unsigned sx = (hoffset + (unsigned)screen_x) & coord_mask;
+      const unsigned sx =
+          (hoffset + (unsigned)(screen_x + sample_bias)) & coord_mask;
       const unsigned sy = (voffset + y) & coord_mask;
       unsigned width = 8 - (sx & 7);
       if (width > (unsigned)(right - screen_x))
@@ -953,7 +1018,9 @@ static void PpuDrawBackground_4bpp_opt(Ppu *ppu, uint y, bool sub, uint layer,
           capture[capture_x] = palette_pixel;
         if (bg1_palette && capture_x >= 0 && capture_x < kPpuXPixels)
           bg1_palette[capture_x] = (uint8_t)((tile & 0x1c00) >> 6);
-        if (palette_pixel && z > *dstz)
+        if (palette_pixel && z > *dstz &&
+            PpuViewportAllows(ppu, layer,
+                              screen_x + (int)i + sample_bias))
           *dstz = z + palette_pixel;
       }
       screen_x += width;
@@ -1097,10 +1164,9 @@ static void PpuDrawBackground_4bpp_mosaic(Ppu *ppu,
                                           PpuPixelPrioBufs *dstbuf, uint y,
                                           bool sub, uint layer,
                                           PpuZbufType zhi, PpuZbufType zlo) {
-#define BG1_MARGIN_ALLOWED(i) \
-  (layer != 0 || !ppu->widescreenLineEnhancer || \
-   (dstz + (i) >= dstbuf->data + kPpuExtraLeftRight && \
-    dstz + (i) < dstbuf->data + kPpuExtraLeftRight + kPpuXPixels))
+#define VIEWPORT_ALLOWED(i) \
+  PpuViewportAllows(ppu, layer, \
+      (int)(dstz + (i) - dstbuf->data - kPpuExtraLeftRight))
 #define GET_PIXEL() pixel = (bits) & 1 | (bits >> 7) & 2 | (bits >> 14) & 4 | (bits >> 21) & 8
 #define GET_PIXEL_HFLIP() pixel = (bits >> 7) & 1 | (bits >> 14) & 2 | (bits >> 21) & 4 | (bits >> 28) & 8
 #define READ_BITS(ta, tile) (addr = &ppu->vram[((ta) + (tile) * 16) & 0x7fff], addr[0] | addr[8] << 16)
@@ -1146,7 +1212,7 @@ static void PpuDrawBackground_4bpp_mosaic(Ppu *ppu,
         pixel += (tile & 0x1c00) >> kPaletteShift;
         int i = 0;
         do {
-          if (BG1_MARGIN_ALLOWED(i) && z > dstz[i])
+          if (VIEWPORT_ALLOWED(i) && z > dstz[i])
             dstz[i] = pixel + z;
         } while (++i != w);
       }
@@ -1160,7 +1226,7 @@ static void PpuDrawBackground_4bpp_mosaic(Ppu *ppu,
 #undef READ_BITS
 #undef GET_PIXEL
 #undef GET_PIXEL_HFLIP
-#undef BG1_MARGIN_ALLOWED
+#undef VIEWPORT_ALLOWED
 }
 
 // Merge one isolated layer into the live priority buffer, padding only that
