@@ -25,9 +25,7 @@ void debug_on_wram_write_word(uint32_t addr, uint16_t old_val, uint16_t new_val)
     (void)addr; (void)old_val; (void)new_val;
 }
 
-/* PPU/widescreen globals normally owned by main.c. Headless = authentic 4:3,
- * new-PPU path (same defaults main.c uses). */
-bool g_new_ppu = true;
+/* Widescreen globals normally owned by main.c. Headless = authentic 4:3. */
 int  g_ws_extra = 0;
 
 /* main.c normally shows an SDL message box; headless just prints + exits. */

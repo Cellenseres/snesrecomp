@@ -1,4 +1,5 @@
 #include "ppu.h"
+#include "ppu_legacy.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,9 +14,7 @@
 #include "ws_shadow.h"
 
 
-extern bool g_new_ppu;
 extern Snes *g_snes;
-void PpuDrawWholeLineOldPpu(Ppu *ppu, int line);
 static void PpuDrawWholeLine(Ppu *ppu, uint y);
 
 static bool ppu_evaluateSprites(Ppu* ppu, int line);
@@ -378,10 +377,10 @@ void ppu_runLine(Ppu* ppu, int line) {
              sizeof(ppu->overlayBuffers[kPpuOverlaySource_Obj]));
     ppu->lineHasSprites = !PPU_forcedBlank(ppu) && ppu_evaluateSprites(ppu, line - 1);
 
-    if (g_new_ppu) {
+    if (ppu->renderFlags & kPpuRenderFlags_NewRenderer) {
       PpuDrawWholeLine(ppu, line);
     } else {
-      PpuDrawWholeLineOldPpu(ppu, line);
+      ppu_draw_whole_line_legacy(ppu, line);
     }
   }
 }

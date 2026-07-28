@@ -1,4 +1,4 @@
-#include "ppu.h"
+#include "ppu_legacy.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -66,7 +66,7 @@ static const int bitDepthsPerMode[10][4] = {
   {8, 7, 5, 5}
 };
 
-void PpuDrawWholeLineOldPpu(Ppu *ppu, int line) {
+void ppu_draw_whole_line_legacy(Ppu *ppu, int line) {
   // actual line
   if (PPU_mode(ppu) == 7)
     ppu_calculateMode7Starts(ppu, line);

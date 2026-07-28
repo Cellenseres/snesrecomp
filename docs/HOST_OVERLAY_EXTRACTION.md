@@ -90,8 +90,8 @@ SNES Modes 1, 2, 3, and 7; capture is currently wired for **Mode 1 BG1/BG2
 (4bpp) and BG3 (2bpp), and Mode 7 BG1**. Modes 2 and 3 render normally but do
 not yet feed the overlay path; wiring them (and BG4, once a mode that draws it
 lands) is a mechanical follow-up that reuses the same
-`PpuBeginBackgroundOverlay`/`PpuFinishBackgroundOverlay` seam. The old PPU
-renderer (`PpuDrawWholeLineOldPpu`) does not implement host-overlay extraction.
+`PpuBeginBackgroundOverlay`/`PpuFinishBackgroundOverlay` seam. The compatibility
+renderer in `ppu_legacy.c` does not implement host-overlay extraction.
 
 This port leaves the engine's existing widescreen layer-policy controls
 (`PpuSetWidescreenLayerClamp`/`Mirror`/`Repeat`, the clamp/repeat bands, the

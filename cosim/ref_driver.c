@@ -54,7 +54,6 @@ void debug_on_wram_write_byte(uint32_t a, uint8_t o, uint8_t n) { (void)a;(void)
 void debug_on_wram_write_word(uint32_t a, uint16_t o, uint16_t n) { (void)a;(void)o;(void)n; }
 
 /* Globals the device sources reference (normally owned by main.c / infra). */
-bool g_new_ppu = true;
 bool g_fail = false;
 
 /* Observability / enhancement hooks the device sources call — no-ops in the ref

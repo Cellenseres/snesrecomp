@@ -98,7 +98,7 @@ add_executable(smw_cosim_ref
     ${RUNSNES}/snes/dma.c
     ${RUNSNES}/snes/dsp.c
     ${RUNSNES}/snes/ppu.c
-    ${RUNSNES}/snes/ppu_old.c
+    ${RUNSNES}/snes/ppu_legacy.c
     ${RUNSNES}/snes/snes.c
     ${RUNSNES}/snes/snes_other.c
     ${RUNSNES}/snes/spc.c

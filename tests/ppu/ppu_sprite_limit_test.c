@@ -7,10 +7,9 @@
 #include "snes/ppu.h"
 #include "snes/snes.h"
 
-bool g_new_ppu = true;
 Snes *g_snes;
 
-void PpuDrawWholeLineOldPpu(Ppu *ppu, int line) {
+void ppu_draw_whole_line_legacy(Ppu *ppu, int line) {
     (void)ppu;
     (void)line;
 }
