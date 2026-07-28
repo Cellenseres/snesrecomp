@@ -13,6 +13,72 @@
 
 set(SNESRECOMP_RUNNER_ROOT ${CMAKE_CURRENT_LIST_DIR})
 
+# Desktop SDL selection is shared by every game host. SDL3 is the default;
+# SDL2 remains available as an explicit compatibility fallback:
+#
+#   cmake -S . -B build                         # SDL3
+#   cmake -S . -B build-sdl2 -DSNESRECOMP_SDL_BACKEND=SDL2
+#
+# Keep discovery and target wiring in one helper so games do not grow their
+# own subtly different SDL package/link rules.
+set(SNESRECOMP_SDL_BACKEND "SDL3" CACHE STRING
+    "Desktop SDL backend (SDL3 or SDL2)")
+set_property(CACHE SNESRECOMP_SDL_BACKEND PROPERTY STRINGS SDL3 SDL2)
+string(TOUPPER "${SNESRECOMP_SDL_BACKEND}" _SNESRECOMP_SDL_BACKEND)
+if(NOT _SNESRECOMP_SDL_BACKEND STREQUAL "SDL3" AND
+   NOT _SNESRECOMP_SDL_BACKEND STREQUAL "SDL2")
+    message(FATAL_ERROR
+        "SNESRECOMP_SDL_BACKEND must be SDL3 or SDL2 "
+        "(got '${SNESRECOMP_SDL_BACKEND}')")
+endif()
+set(SNESRECOMP_SDL_BACKEND "${_SNESRECOMP_SDL_BACKEND}" CACHE STRING
+    "Desktop SDL backend (SDL3 or SDL2)" FORCE)
+
+function(snesrecomp_target_sdl target)
+    if(_SNESRECOMP_SDL_BACKEND STREQUAL "SDL3")
+        find_package(SDL3 CONFIG REQUIRED)
+        target_link_libraries(${target} PRIVATE SDL3::SDL3)
+        target_compile_definitions(${target} PRIVATE
+            SNESRECOMP_SDL3=1
+            LNG_SDL3=1
+            SDL_MAIN_HANDLED)
+        if(WIN32 AND TARGET SDL3::SDL3-shared)
+            add_custom_command(TARGET ${target} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_FILE:SDL3::SDL3-shared>
+                    $<TARGET_FILE_DIR:${target}>)
+        endif()
+        message(STATUS "${target}: SDL3 desktop backend")
+    else()
+        find_package(SDL2 REQUIRED)
+        target_compile_definitions(${target} PRIVATE
+            SNESRECOMP_SDL3=0
+            SDL_MAIN_HANDLED)
+        if(TARGET SDL2::SDL2)
+            target_link_libraries(${target} PRIVATE SDL2::SDL2)
+            if(WIN32)
+                get_target_property(_snesrecomp_sdl2_type SDL2::SDL2 TYPE)
+                if(_snesrecomp_sdl2_type STREQUAL "SHARED_LIBRARY")
+                    add_custom_command(TARGET ${target} POST_BUILD
+                        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                            $<TARGET_FILE:SDL2::SDL2>
+                            $<TARGET_FILE_DIR:${target}>)
+                endif()
+            endif()
+        else()
+            target_include_directories(${target} PRIVATE ${SDL2_INCLUDE_DIRS})
+            set(_snesrecomp_sdl2_libraries ${SDL2_LIBRARIES})
+            if(WIN32)
+                list(FILTER _snesrecomp_sdl2_libraries
+                    EXCLUDE REGEX "SDL2main")
+            endif()
+            target_link_libraries(${target} PRIVATE
+                ${_snesrecomp_sdl2_libraries})
+        endif()
+        message(STATUS "${target}: SDL2 compatibility backend")
+    endif()
+endfunction()
+
 set(SNESRECOMP_RUNNER_SOURCES
     ${SNESRECOMP_RUNNER_ROOT}/src/common_cpu_infra.c
     ${SNESRECOMP_RUNNER_ROOT}/src/common_rtl.c

@@ -60,7 +60,7 @@
 #endif
 #endif
 
-#include <SDL.h>
+#include "desktop/sdl_compat.h"
 
 /* ── Ring storage ───────────────────────────────────────────────────── */
 
@@ -299,9 +299,14 @@ static void dump_os_json(FILE *f) {
 }
 
 static void dump_sdl_json(FILE *f) {
+#if SNESRECOMP_SDL3
+    const int compiled = SDL_VERSION;
+    const int linked = SDL_GetVersion();
+#else
     SDL_version compiled, linked;
     SDL_VERSION(&compiled);
     SDL_GetVersion(&linked);
+#endif
     const char *vd = SDL_GetCurrentVideoDriver();   /* NULL before/without init */
     const char *ad = SDL_GetCurrentAudioDriver();
     char esc_vd[64], esc_ad[64];
@@ -310,8 +315,15 @@ static void dump_sdl_json(FILE *f) {
     fprintf(f,
         "  \"sdl\": {\"compiled\": \"%u.%u.%u\", \"linked\": \"%u.%u.%u\","
         " \"video_driver\": \"%s\", \"audio_driver\": \"%s\"},\n",
+#if SNESRECOMP_SDL3
+        SDL_VERSIONNUM_MAJOR(compiled), SDL_VERSIONNUM_MINOR(compiled),
+        SDL_VERSIONNUM_MICRO(compiled),
+        SDL_VERSIONNUM_MAJOR(linked), SDL_VERSIONNUM_MINOR(linked),
+        SDL_VERSIONNUM_MICRO(linked), esc_vd, esc_ad);
+#else
         compiled.major, compiled.minor, compiled.patch,
         linked.major, linked.minor, linked.patch, esc_vd, esc_ad);
+#endif
 }
 
 #ifdef _WIN32
