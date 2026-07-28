@@ -1,16 +1,19 @@
 # Widescreen pattern parity — engine doctrine
 
-Mega Man X 1 (`MegamanXRecomp`) is the only surveyed, shipping 16:9 in this
-project. Getting it right took a long tail of small corrections, and **every one
-of them is a pattern, not an address.** A new port that reimplements widescreen
-from scratch will rediscover the same bugs in the same order.
+Mega Man X 1 (`MegamanXRecomp`) was the original surveyed, shipping 16:9
+reference for this engine family. The same patterns have since been applied to
+the X2 and X3 implementations. Getting X1 right took a long tail of small
+corrections, and **every one of them is a pattern, not an address.** A new port
+that reimplements widescreen from scratch will rediscover the same bugs in the
+same order.
 
 This document is the transferable part. Each entry is a defect X1 actually hit,
 the invariant that prevents it, and how to check you have it. Treat it as a
 checklist a port must satisfy — not as background reading.
 
-`MegamanX2Recomp/docs/WIDESCREEN.md` (and X3's) hold the per-title work plan and
-point back here.
+`MegamanX2Recomp/docs/WIDESCREEN.md` and
+`MegamanX3Recomp/docs/WIDESCREEN.md` hold the per-title measurements, release
+gates, and relocated addresses; both point back here.
 
 ---
 
@@ -218,9 +221,9 @@ earlier step's bug:
 | game | state |
 |---|---|
 | Mega Man X 1 | surveyed and shipping; source of every entry above |
-| Mega Man X2 | not started; ground floor 4:3, toggle hidden |
-| Mega Man X3 | not started; ground floor 4:3, toggle hidden |
-| others | not applicable / not surveyed |
+| Mega Man X2 | HUD, exact BG margins, object windows, dynamic record frontier, and weather margins implemented; broad stage playtest still gates launcher exposure |
+| Mega Man X3 | 342x224 rendering, HUD, exact BG margins, and widened activation/culling implemented; authentic 4:3 remains the default |
+| others | use title-specific strategies until their reusable patterns are catalogued here |
 
 A port claiming widescreen support should record which of P1-P16 it has verified,
 and by what measurement.

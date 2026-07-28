@@ -1,35 +1,160 @@
 <p align="center">
-  <img src="docs/assets/snesrecomp-logo.png" alt="SNES Recomp" width="640">
+  <img src="docs/assets/snesrecomp-logo.png" alt="SNESRecomp" width="640">
 </p>
 
-# snesrecomp
+# SNESRecomp
 
-A static recompiler for SNES (Super Famicom) games. Translates 65816
-machine code into native C ahead-of-time, so the recompiled game runs
-as a normal binary rather than under interpretation.
+**A general-purpose static recompiler for the Super Nintendo Entertainment
+System (Super Famicom).** SNESRecomp translates 65816 machine code into C,
+compiles it into a native executable, and links it against a shared SNES
+hardware runtime.
 
-> ## Status: alpha (v0.1.0), three games at varying playability
->
-> **Super Mario World is believed fully playable** through the
-> recompiler. **Mega Man X is believed fully playable** end-to-end.
-> **A Link to the Past** is playable through the early dungeon. The
-> framework itself is still alpha: APIs change without warning and
-> internal docs assume active-session context.
-> [`v0.1.0`](https://github.com/mstan/snesrecomp/releases/tag/v0.1.0) is
-> the first tagged release — a working snapshot that all three games
-> build against, not a stability guarantee.
+The game CPU runs as native code instead of inside a full-system emulator.
+The runtime models the hardware around it—including the PPU, APU, DSP, DMA,
+cartridge mapping, and supported enhancement chips—and provides a safe
+interpreter tier for code that cannot yet be resolved statically.
 
-## How to use snesrecomp
+Projects built on SNESRecomp already support true widescreen views, Adaptive
+View, versioned mod packages, MSU-1 audio, cross-platform builds, launchers,
+and save states. The framework is game-agnostic: each title supplies its own
+analysis configuration and integration code while improvements to the CPU and
+hardware model benefit every project.
 
-snesrecomp takes a SNES ROM and creates a recompilation project containing C
-source and build scripts.
+<table>
+  <tr>
+    <td width="29%"><img src="docs/assets/games/super-mario-world-wide.png" alt="Super Mario World running in SNESRecomp at 16:9" width="100%"><br><sub><b>Super Mario World</b></sub></td>
+    <td width="41%"><img src="docs/assets/games/alttp-adaptive.png" alt="The Legend of Zelda: A Link to the Past running in SNESRecomp with Adaptive View" width="100%"><br><sub><b>The Legend of Zelda: A Link to the Past</b></sub></td>
+    <td width="30%"><img src="docs/assets/games/mega-man-x-wide.png" alt="Mega Man X running in SNESRecomp at 16:9" width="100%"><br><sub><b>Mega Man X</b></sub></td>
+  </tr>
+</table>
+
+## Games
+
+Each public game is maintained in its own repository, pins a known framework
+revision, and ships its own ROM-free release. These projects are still alpha;
+see each repository for its supported ROM revision, controls, build
+instructions, and current validation status.
+
+| Game | Repository | Latest build | Current status |
+|---|---|---|---|
+| *Super Mario World* | [SuperMarioWorldRecomp](https://github.com/mstan/SuperMarioWorldRecomp) | [releases](https://github.com/mstan/SuperMarioWorldRecomp/releases/latest) | Believed playable end to end; 4:3, fixed 16:9, Adaptive View, and MSU-1 audio. |
+| *The Legend of Zelda: A Link to the Past* | [ZeldaAlttPSNESRecomp](https://github.com/mstan/ZeldaAlttPSNESRecomp) | [releases](https://github.com/mstan/ZeldaAlttPSNESRecomp/releases/latest) | Playable through the early dungeon; Adaptive View and MSU-1 audio. |
+| *Mega Man X* | [MegaManXSNESRecomp](https://github.com/mstan/MegaManXSNESRecomp) | [releases](https://github.com/mstan/MegaManXSNESRecomp/releases/latest) | Fully playable; experimental true-widescreen mod; Windows, macOS, and Linux builds. |
+
+## Development showcase
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/assets/games/mega-man-x2-wide.png" alt="SNESRecomp development screenshot" width="100%"></td>
+    <td width="50%"><img src="docs/assets/games/mega-man-x3-wide.png" alt="SNESRecomp development screenshot" width="100%"></td>
+  </tr>
+  <tr>
+    <td><img src="docs/assets/games/star-fox.png" alt="SNESRecomp development screenshot" width="100%"></td>
+    <td><img src="docs/assets/games/super-metroid.png" alt="SNESRecomp development screenshot" width="100%"></td>
+  </tr>
+</table>
+
+## What it is
+
+SNESRecomp turns a ROM into a recompilation project:
+
+1. The analyzer discovers code, follows control flow, tracks the 65816 M/X
+   width state, and resolves direct and indirect dispatch where it can.
+2. The emitter translates discovered 65816 functions into portable C.
+3. A normal C compiler builds that output together with the shared runner and
+   game-specific integration code.
+4. At runtime, unresolved or dynamically reached code can fall through to the
+   interpreter tier instead of becoming a correctness hole.
+
+This is a hybrid low-level design. The original game logic remains the source
+of truth: recompiled CPU code drives modeled SNES hardware at the same
+register boundaries a cartridge uses. Game projects can add narrowly scoped
+high-level helpers or presentation enhancements, but the low-level path stays
+available for validation.
+
+SNESRecomp is a **framework**, not a collection of ROMs. It does not include
+copyrighted game data, and a generated project is only the starting point for
+a playable port. A new title still needs accurate function boundaries,
+indirect-dispatch configuration, validation, and a host application.
+
+## Widescreen and Adaptive View
+
+These are genuinely wider views—not stretched 4:3 output. SNES 2D engines
+normally stream backgrounds, spawn objects, and cull sprites for a 256-pixel
+viewport. A correct widescreen integration widens those systems together while
+leaving game simulation and authentic 4:3 behavior unchanged.
+
+<table>
+  <tr><td><img src="docs/assets/games/super-mario-world-wide.png" alt="Super Mario World true widescreen at 16:9" width="100%"></td></tr>
+  <tr><td align="center"><sub><b>Super Mario World — fixed 16:9.</b> The native 224-pixel logical height is retained while the level view expands horizontally.</sub></td></tr>
+</table>
+
+<table>
+  <tr><td><img src="docs/assets/games/mega-man-x-wide.png" alt="Mega Man X true widescreen at 16:9" width="100%"></td></tr>
+  <tr><td align="center"><sub><b>Mega Man X — true widescreen.</b> Background streaming, object windows, HUD placement, and sprite rendering are widened together.</sub></td></tr>
+</table>
+
+Adaptive View grows or clamps the logical viewport according to the available
+scene and window width. At a map boundary it can preserve an authentic edge
+instead of wrapping or inventing scenery.
+
+<table>
+  <tr>
+    <td width="32%"><img src="docs/assets/games/alttp-standard.png" alt="A Link to the Past at its authentic 4:3 view" width="100%"></td>
+    <td width="68%"><img src="docs/assets/games/alttp-adaptive.png" alt="A Link to the Past with Adaptive View" width="100%"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub><b>Authentic 4:3</b></sub></td>
+    <td align="center"><sub><b>Adaptive View</b></sub></td>
+  </tr>
+</table>
+
+The transferable 2D-engine checklist lives in
+[`docs/WIDESCREEN_PATTERNS.md`](docs/WIDESCREEN_PATTERNS.md).
+
+## Mods
+
+SNESRecomp supports opt-in, versioned `.snesmod` packages. A package is an
+installation, update, provenance, and trust boundary; it may expose multiple
+independently toggleable features and typed options in the launcher.
+
+Packages contain data only—never DLLs or arbitrary native code. Native behavior
+is owned by the game, statically linked into its executable, and registered
+under stable plugin IDs. Before launch, the runtime verifies the selected stock
+ROM, resolves enabled features, rejects missing or conflicting plugins, and
+then activates the trusted game-side implementations.
+
+The system is off by default at the framework level, so a game must explicitly
+enable and integrate it. Mega Man X uses this path for its built-in
+true-widescreen feature. See
+[`docs/MOD_PACKAGES.md`](docs/MOD_PACKAGES.md) for the package format and trust
+model.
+
+## MSU-1 audio
+
+The shared runner implements the MSU-1 registers, data channel, and 44.1 kHz
+stereo PCM streaming mixed over the S-DSP output. SMW and ALttP integrate this
+with their launchers: select a compatible music-pack folder and keep using a
+verified stock ROM.
+
+Their MSU-1 drivers are compiled into the executable from a temporary,
+locally-patched analysis image during regeneration. The user's stock ROM is
+not modified. With no pack selected, the games retain their authentic SPC
+soundtracks.
+
+The chip is inert by default for projects that do not integrate it. Developers
+can also point `SNESRECOMP_MSU1` at a pack directory or base prefix directly.
+See [`docs/MSU1.md`](docs/MSU1.md) for the register model, pack resolution, and
+game-integration details.
+
+## How to use SNESRecomp
 
 ### Generate a project with the released CLI
 
 1. Download `snesrecomp-cli-windows-x86_64.zip` from
    [Releases](https://github.com/mstan/snesrecomp/releases).
-2. Extract the whole zip to a folder. Keep its contents together.
-3. Open PowerShell in that folder and run:
+2. Extract the entire archive to one folder.
+3. Open PowerShell there and run:
 
 ```powershell
 .\snesrecomp.exe build `
@@ -37,38 +162,30 @@ source and build scripts.
   --output "C:\Projects\MyGameRecomp"
 ```
 
-Both `.sfc` and `.smc` ROM images are accepted. The command detects standard
-LoROM and HiROM mapping automatically.
+Both `.sfc` and `.smc` images are accepted. Standard LoROM and HiROM mapping
+are detected automatically.
 
-The output folder contains:
-
-- automatically discovered recompiled C source;
-- a starter bank configuration under `config/`;
-- `CMakeLists.txt` and build scripts; and
-- the SNESRecomp runner source needed for further integration.
-
-The downloaded CLI is self-contained. You do not need Python, Rust, or a
-source checkout to generate a project.
+The generated folder contains discovered C source, a starter bank
+configuration, CMake build files, and the runner sources needed for further
+integration. The released CLI is self-contained; generating a project does
+not require Python, Rust, or a source checkout.
 
 ### Build the generated source
 
-Install CMake, Ninja, and a C compiler. Then run:
+Install CMake, Ninja, and a C compiler, then run:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File "C:\Projects\MyGameRecomp\build.ps1"
 ```
 
-This builds a static library containing the generated code. An arbitrary SNES
-game still needs game-specific function boundaries, indirect-dispatch
-configuration, and a host application before it becomes a playable native
-port. The generated project is the starting point for that work.
+The generated project also includes `build.sh` for macOS and Linux. This step
+builds a static library containing the generated code; turning an arbitrary
+game into a playable native port still requires the game-specific work
+described above.
 
-The ready-made CLI release is currently for 64-bit Windows. The generated
-project also includes `build.sh` for macOS and Linux.
-
-Use only a ROM image you obtained legally. SNESRecomp does not include ROM
-data and does not copy the original ROM into the output project. Generated C
-is derived from that ROM, so do not redistribute it without permission.
+Use only a ROM image you obtained legally. SNESRecomp neither includes ROM
+data nor copies the input ROM into the generated project. Generated C is
+derived from that ROM, so do not redistribute it without permission.
 
 ### Build the CLI from source
 
@@ -83,176 +200,80 @@ python tools/build_cli.py release
 
 The ready-to-use ZIP is written to `dist/`.
 
-## Per-game runner repos
+## Architecture
 
-snesrecomp is the shared framework. Each game lives in its own
-companion repo that junctions this checkout as a sibling and supplies
-the game-specific runtime, `.cfg`, and build glue.
+| Path | Purpose |
+|---|---|
+| `recompiler/` | Python reference analyzer and authoritative C emitter. |
+| `recompiler-rs/` | Production native whole-program analyzer; preserves the Python manifest/emitter boundary while accelerating analysis. |
+| `runner/` | Shared CPU state, memory map, hardware model, interpreter tier, launcher helpers, diagnostics, and enhancement hooks. |
+| `tests/` | Analyzer, decoder, interpreter, runtime-dispatch, launcher, and PPU tests. |
+| `fuzz/` | Differential fuzzing over synthetic 65816 programs. |
+| `tools/` | Generation, validation, trace-diff, and release tooling, including the `snesref` reference frontend. |
 
-- **Super Mario World** —
-  [mstan/SuperMarioWorldRecomp](https://github.com/mstan/SuperMarioWorldRecomp).
-  **Believed playable end-to-end.** Hand-verified from Yoshi's Island
-  through the Forest of Illusion and into Star Road (the secret world
-  hub); later/special content beyond that not yet hand-verified but
-  expected to play similarly. Two always-on runtime tripwires (M/X claim
-  verifier and async cpu->m_flag/x_flag-write detector) have not latched
-  on the verified worlds.
+Useful technical references:
 
-- **The Legend of Zelda: A Link to the Past** —
-  [mstan/ZeldaAlttPSNESRecomp](https://github.com/mstan/ZeldaAlttPSNESRecomp).
-  **Playable through early dungeon.** Boot → attract demo → file
-  select → overworld → Module 07 (Dungeon) with sword combat is
-  hand-verified. Later content not yet hand-verified.
+- [`docs/MULTI_TIER.md`](docs/MULTI_TIER.md) — static and interpreted execution
+  tiers.
+- [`docs/LLE_FIRST_ANALYSIS.md`](docs/LLE_FIRST_ANALYSIS.md) — analysis policy
+  and the low-level correctness floor.
+- [`docs/TRIPWIRES.md`](docs/TRIPWIRES.md) — runtime checks for M/X state,
+  dispatch, and control-flow failures.
+- [`docs/LAUNCHER_DESIGN.md`](docs/LAUNCHER_DESIGN.md) — shared launcher
+  integration.
+- [`docs/HOST_OVERLAY_EXTRACTION.md`](docs/HOST_OVERLAY_EXTRACTION.md) —
+  extracting PPU layers for host-side composition.
 
-- **Mega Man X** —
-  [mstan/MegaManXSNESRecomp](https://github.com/mstan/MegaManXSNESRecomp).
-  **Believed playable end-to-end.** Boot → Capcom logo → attract intro
-  → title screen → intro stage and the Maverick stages with their
-  bosses play through; the earlier lockups (cooperative-scheduler
-  stalls, dispatch-site m/x mistranslations) and visual rough edges
-  have been resolved.
+## Status
 
-The intent is for snesrecomp to be **game-agnostic** — adding a new
-game should cost mostly per-game `.cfg` work, not months of framework
-patching. SMW exercised the framework hard during 2026-04/05 and
-surfaced the bug classes the framework now handles permanently:
-per-variant exit-(M, X) inference with order-independent fixpoint,
-dispatch-terminator JSL recognition, PHP/PLP-bracketed M/X tracking,
-wrapper-bypass autorouter, tail-call autorouter, and a full runtime
-tripwire suite catalogued in [`docs/TRIPWIRES.md`](docs/TRIPWIRES.md).
-LttP and MMX have each surfaced their own framework gaps (LoROM
-bank-mirror routing, MMX cooperative-scheduler HLE, abs-indirect
-dispatch emit, dispatch-site m/x tracking) that are now baked in.
+SNESRecomp is alpha software. Multiple games run through the same shared
+framework, but APIs, generated-code conventions, and internal integration
+points can still change. Per-game maturity varies; the [Games](#games) table
+and each project's release notes are the authoritative status sources.
 
-## Conventions for per-game repos
+The current direction is to move recurring fixes into the framework, retain
+an exact low-level fallback for uncertain code, and keep authentic output as
+the regression baseline for every optional enhancement.
 
-To keep new games consistent and free of leftover game-specific naming:
+## Contributing
 
-- **Window title** (`kWindowTitle` in the game's `src/main.c`):
-  `"<Full Game Name> (Recompiled)"` — e.g. `Super Mario World (Recompiled)`,
-  `Megaman X (Recompiled)`, `Legend of Zelda: A Link to the Past (Recompiled)`.
-- **Config file:** a generic `config.ini` (plus optional `config.user.ini` /
-  `config.local.ini`) — not a per-game-named `.ini`.
-- **Shared framework hooks** use neutral, game-agnostic names (e.g.
-  `RunOneFrameOfGame` / `RunOneFrameOfGame_Internal`, `recomp_post_mortem_dump`) —
-  never a game prefix.
+Bug reports and framework improvements are welcome. For a game-specific issue,
+open it in that game's repository and include the ROM revision, platform,
+configuration, reproduction steps, and a screenshot or save state when useful.
 
-## What's in this repo
-
-- `recompiler/` — the Python reference analyzer and authoritative C emitter.
-- `recompiler-rs/` — the production native whole-program analyzer used
-  automatically when built; it preserves the Python manifest/emitter boundary
-  while accelerating the dominant analysis phase.
-- `runner/` — C runtime that the generated code links against (CPU
-  state, memory mapping, PPU/APU/DSP, debug server, always-on trace rings).
-  Its PPU can also export arbitrary BG/OBJ rectangles for independent host
-  composition; see [`docs/HOST_OVERLAY_EXTRACTION.md`](docs/HOST_OVERLAY_EXTRACTION.md).
-- `lib/recomp-net/` — git submodule with
-  [recomp-net](https://github.com/TechnicallyComputers/recomp-net) delay-sync
-  netcode. Opt-in for any game via `snesrecomp_enable_recomp_net(MyGame)`;
-  see [`docs/RECOMP_NET.md`](docs/RECOMP_NET.md).
-- `tests/` — framework tests (decoder, CFG, SSA placement, etc.) and
-  L3 fixtures.
-- `fuzz/` — differential fuzzer over synthetic 65816 snippets.
-- `tools/` — scripts for regen, trace diffing, etc., plus
-  [`tools/snesref/`](tools/snesref/): a standalone SDL2 libretro
-  frontend that serves as the hardware-accurate timing/state reference for
-  diffing the recompiled build (also published standalone as
-  [`mstan/snesref`](https://github.com/mstan/snesref); formerly `mmxref`).
-
-## Netcode (recomp-net)
-
-Multiplayer delay-sync is available through the `lib/recomp-net` submodule.
-Initialize it, then from the game `CMakeLists.txt`:
-
-```sh
-git submodule update --init lib/recomp-net
-```
-
-```cmake
-include(${SNESRECOMP_ROOT}/runner/runner.cmake)
-add_executable(MyGame ${SNESRECOMP_RUNNER_SOURCES} ...)
-snesrecomp_enable_recomp_net(MyGame)
-```
-
-```c
-#include "recomp_net/recomp_net.h"
-```
-
-Full integration notes: [`docs/RECOMP_NET.md`](docs/RECOMP_NET.md).
-
-## MSU-1 audio
-
-The runner implements the [MSU-1](https://sneslab.net/wiki/MSU1)
-coprocessor (near's spec): the `$2000-$2007` registers, the `.msu` data
-channel, and 44.1 kHz stereo PCM track streaming mixed on top of the
-S-DSP output. It's a shared runtime feature, so it works for any game.
-
-**Default-OFF and byte-identical** when no pack is present — the `$2000`
-range reads back as open bus exactly as before, so non-MSU builds are
-unaffected.
-
-**Using it** — point `SNESRECOMP_MSU1` at an MSU pack:
-
-```sh
-# A folder: the pack base name is auto-detected from the *-<N>.pcm files
-SNESRECOMP_MSU1=/path/to/msu_pack ./game rom.sfc
-
-# …or an explicit base prefix (resolves <prefix>-<N>.pcm + <prefix>.msu)
-SNESRECOMP_MSU1=/path/to/msu_pack/alttp_msu ./game rom.sfc
-```
-
-A pack is the usual set of `<name>-<N>.pcm` files (each an `MSU1` header +
-44.1 kHz signed-16 stereo PCM); header-less raw PCM is also accepted.
-
-**Game side** — the chip is inert until a ROM drives it. Vanilla ROMs
-have no MSU-1 driver, so a game must be recompiled from an MSU-1-patched
-ROM (e.g. ALttP via qwertymodo's patch + a `bank22.cfg`). See
-[`docs/MSU1.md`](docs/MSU1.md) for the full integration write-up.
-
-## Public API / docs
-
-There isn't a public API yet, and there aren't user-facing docs.
-Internal docs assume context from active development sessions and
-will not make sense without it. This will change once the framework
-stabilizes.
+When bringing up a new game, keep game-specific addresses and behavior in its
+companion repository. Reusable CPU, mapper, coprocessor, diagnostics, launcher,
+and presentation mechanisms belong here.
 
 ## Acknowledgements
 
-snesrecomp did not start from scratch — its runtime and tooling stand on
-prior reverse-engineering and emulation work, and we're grateful for it:
+SNESRecomp did not start from scratch. Its runtime and tooling stand on prior
+reverse-engineering and emulation work:
 
 - **[snesrev](https://github.com/snesrev)** (`snesrev/zelda3`,
-  `snesrev/smw`) — the C runner and surrounding ecosystem were heavily
-  based on the snesrev reverse-engineered ports. The "recompile/port the
-  CPU code to C, emulate the rest of the silicon, and verify against a
-  reference emulator" model is theirs, and concrete pieces were adapted
-  directly: the function-boundary conventions consumed by
-  `tools/ingest_zelda3_decomp.py`, runtime utilities (`runner/src/util.h`
-  still carries the `ZELDA3_UTIL_H_` guard), the SHA-256 ROM-verification
-  path, and the default keybind layout.
+  `snesrev/smw`) — the C runner and surrounding ecosystem were heavily based
+  on the snesrev reverse-engineered ports. The model of recompiling or porting
+  CPU code to C, modeling the surrounding silicon, and validating against a
+  reference emulator comes from that work. Runtime utilities, ROM verification,
+  function-boundary conventions, and the default input layout were also
+  adapted from it.
 - The C SNES hardware core under
-  [`runner/src/snes/`](runner/src/snes/) (PPU, APU, DSP, SPC700, DMA,
-  cart mapping) is derived from the **[LakeSnes](https://github.com/elzo-d/LakeSnes)**
-  (elzo-d) C emulator that snesrev's projects vendor, with individual
-  algorithms credited inline to **snes9x**.
-- **[IsoFrieze/SMWDisX](https://github.com/IsoFrieze/SMWDisX)** — the
-  Super Mario World disassembly used as the symbol/RAM-map basis and as
-  the conformance oracle for the SMW port (see
-  `tools/cfg_override_smwdisx_crosscheck.py`,
-  `tests/test_smwdisx_compare.py`). SMWDisX in turn credits mikeyk's
-  original 2013 disassembly and loveemu's SPC700 work.
+  [`runner/src/snes/`](runner/src/snes/) derives from
+  **[LakeSnes](https://github.com/elzo-d/LakeSnes)** by elzo-d, as vendored by
+  snesrev, with individual algorithms credited inline to **snes9x**.
+- **[IsoFrieze/SMWDisX](https://github.com/IsoFrieze/SMWDisX)** — the Super
+  Mario World disassembly used as the symbol and RAM-map basis and as a
+  conformance reference. SMWDisX in turn credits mikeyk's original 2013
+  disassembly and loveemu's SPC700 work.
 
 ## License
 
-Not yet declared. Code in this repo is original except where noted in
-**Acknowledgements** above. The libretro API header
-`tools/snesref/libretro.h` is MIT (RetroArch team). The reference tool
-(`tools/snesref/`) loads a libretro emulator core as a runtime DLL — no
-emulator source or binary is vendored in this repo, so it carries none of
-a core's licensing terms; supply a core yourself. The `runner/src/snes/`
-hardware core derives from LakeSnes (and, transitively, snes9x); their
-respective terms apply to that code.
+Not yet declared. Code in this repository is original except where noted in
+[Acknowledgements](#acknowledgements). The libretro API header
+`tools/snesref/libretro.h` is MIT (RetroArch team). The `snesref` tool loads a
+libretro emulator core as a runtime library; no emulator source or binary is
+vendored here. The `runner/src/snes/` hardware core derives from LakeSnes and,
+transitively, snes9x; their respective terms apply to that code.
 
 ---
 

@@ -1,96 +1,116 @@
-# MSU-1 support (feat/msu-1)
+# MSU-1 support
 
-MSU-1 is near's SNES streaming-audio + data coprocessor. It is two
-independent channels exposed through registers `$2000-$2007`:
+SNESRecomp's shared runner implements near's MSU-1 streaming-audio and data
+coprocessor. It exposes two independent channels through `$2000-$2007`:
 
-- **Audio** — 44.1 kHz signed-16 stereo PCM tracks (`<base>-<N>.pcm`),
-  selected/played/looped via the registers and mixed on top of the
-  S-DSP output.
-- **Data** — a byte-addressable file (`<base>.msu`) read through a seek
-  pointer + auto-incrementing read port. (Used by full enhancements;
-  most music packs ship an empty/absent `.msu`.)
+- **Audio:** 44.1 kHz signed 16-bit stereo PCM tracks
+  (`<base>-<N>.pcm`), selected and controlled by the guest.
+- **Data:** a byte-addressable `<base>.msu` file with a seek pointer and
+  auto-incrementing read port.
 
-## What this branch implements (the hardware side)
+The hardware model is available to every game, but remains inert unless a pack
+is selected and the game contains an MSU-1 driver.
 
-The chip itself lives entirely in the shared runtime — one new file plus
-three small hooks — so it works for **every** recompiled game at once:
+## Runtime implementation
 
 | Piece | Location |
 |---|---|
-| Chip core (registers, `.pcm` loader, PCM ring/resample, `.msu` data channel) | `runner/src/snes/msu1.{c,h}` |
-| Register dispatch (`$2000-$2007` → `msu1_read`/`msu1_write`) | `runner/src/common_rtl.c` `ReadReg`/`WriteReg` |
-| Audio mix (after `dsp_getSamples`, under the APU lock) | `runner/src/common_rtl.c` `RtlRenderAudio` |
-| Arm-from-env at startup (every game, no per-game wiring) | `runner/src/common_cpu_infra.c` `RtlRegisterGame` |
-| Build source list | `runner/runner.cmake` |
+| Register, PCM, resampling, and data-channel core | `runner/src/snes/msu1.{c,h}` |
+| `$2000-$2007` register dispatch | `runner/src/common_rtl.c` |
+| PCM mix after S-DSP rendering | `runner/src/common_rtl.c` |
+| Environment initialization | `runner/src/common_cpu_infra.c` |
+| Shared CMake source list | `runner/runner.cmake` |
 
-Why these points: `is_hw_reg()` already classifies `$2000-$5FFF` as
-hardware registers, so reads/writes to `$2000-$2007` already route to
-`ReadReg`/`WriteReg` (they previously returned open-bus `0`). And
-`RtlRenderAudio` is the single place final stereo samples are produced.
+`is_hw_reg()` already routes `$2000-$5FFF` through the hardware-register path,
+so MSU-1 does not need a separate memory-map exception.
 
 ### Threading
 
-`msu1_read`/`msu1_write` (CPU thread) take the existing APU lock
-(`RtlApuLock`, a recursive SDL mutex) to serialise against the audio
-thread. `msu1_mix` runs **inside** `RtlRenderAudio`'s already-held lock,
-so it must not re-take it. No new dependency, no new mutex.
+Guest reads and writes happen on the CPU thread and take the existing recursive
+APU mutex through `RtlApuLock`. `msu1_mix()` runs inside
+`RtlRenderAudio()` while that mutex is already held, so it deliberately does
+not acquire it a second time.
 
-### Sync / resampling
+### Timing and resampling
 
-Each `RtlRenderAudio` call is exactly 1/60 s of audio. MSU therefore
-consumes `44100/60 = 735` source frames per call and linearly resamples
-them to the output block size — staying locked to the same 60 Hz block
-clock as the S-DSP and adapting to any host output rate automatically.
+The runner renders one 60 Hz audio block at a time. MSU-1 therefore consumes
+`44100 / 60 = 735` source frames for each block and linearly resamples them to
+the host block size. This keeps PCM playback on the same block clock as the
+S-DSP while allowing different host output rates.
 
-## Default-OFF guarantee
+## Default-off behavior
 
-With `SNESRECOMP_MSU1` unset, `msu1_enabled()` is false: `ReadReg`
-returns `0` and `WriteReg`/`RtlRenderAudio` no-op for the MSU range —
-**byte-identical** to pre-branch behaviour. Verified that the disabled
-path matches the prior fall-through exactly.
+With `SNESRECOMP_MSU1` unset and no game-side launcher selection:
 
-## Usage
+- `msu1_enabled()` is false;
+- reads from the MSU-1 range retain the runner's previous open-bus value of
+  zero;
+- writes are ignored; and
+- the audio mixer is a no-op.
 
+A PCM pack alone is not enough. An unmodified game has no code that selects
+tracks or writes the MSU-1 control registers.
+
+## Player integration
+
+Super Mario World and A Link to the Past provide the complete user-facing path:
+
+1. Their regeneration scripts apply a bundled MSU-1 driver patch to a
+   **temporary copy** of the user's verified stock ROM.
+2. SNESRecomp analyzes that temporary image, so the driver becomes native code
+   in the executable.
+3. The temporary image is discarded. The user's stock ROM is neither modified
+   nor redistributed.
+4. At runtime, the launcher accepts a compatible PCM-pack directory and still
+   loads the stock ROM.
+5. With no pack enabled, the driver falls back to the authentic SPC soundtrack.
+
+Drivers and track mappings are game-specific. SMW's audio-only driver, for
+example, does not use the same track layout as SMW MSU+ or Plus Ultra. Consult
+the game repository's README and patch attribution before choosing a pack.
+
+## Direct environment usage
+
+Game integrations may expose the same selection in a launcher, but the shared
+runtime can also be configured directly:
+
+```sh
+# Directory: find the dominant <name>-<N>.pcm base automatically.
+SNESRECOMP_MSU1=/path/to/msu_pack ./game rom.sfc
+
+# Explicit prefix: resolve <prefix>-<N>.pcm and <prefix>.msu.
+SNESRECOMP_MSU1=/path/to/msu_pack/alttp_msu ./game rom.sfc
+
+# Derive the prefix later from msu1_set_rom_path().
+SNESRECOMP_MSU1=auto ./game rom.sfc
 ```
-# Pack base prefix: tracks resolve as <prefix>-<N>.pcm, data as <prefix>.msu
-SNESRECOMP_MSU1=C:/msu/alttp      # loads C:/msu/alttp-1.pcm, alttp-2.pcm, ...
 
-# Or enable and derive the base from the ROM name (needs a one-line
-# msu1_set_rom_path(rom_path) call in the game's main.c — see below):
-SNESRECOMP_MSU1=auto
-```
+`msu1_set_rom_path()` is useful for `auto` mode. A game should call it after
+resolving the runtime ROM path.
 
-`.pcm` format: 8-byte header = `"MSU1"` magic + uint32 little-endian loop
-point (in stereo sample-frames), then raw int16-LE stereo @ 44100 Hz.
+Standard PCM files begin with an eight-byte header: the ASCII magic `MSU1`
+followed by a little-endian 32-bit loop point measured in stereo sample frames.
+The remaining data is raw signed 16-bit little-endian stereo PCM at 44.1 kHz.
+The runner also accepts headerless raw PCM.
 
-## Register map implemented
+## Register map
 
-Read: `$2000` status (`d a r p` + revision), `$2001` data port
-(auto-inc), `$2002-$2007` ID `"S-MSU1"`.
-Write: `$2000-$2003` 32-bit data seek (commits on `$2003`), `$2004-$2005`
-16-bit track select (commits + loads on `$2005`), `$2006` volume,
-`$2007` control (bit0 play, bit1 repeat). A missing/invalid track sets
-the status error bit so a driver can fall back to native SPC music.
+| Register | Access | Behavior |
+|---|---|---|
+| `$2000` | read/write | Status on read; low byte of the 32-bit data seek on write. |
+| `$2001` | read/write | Auto-incrementing data port on read; second seek byte on write. |
+| `$2002-$2003` | read/write | Identification bytes on read; remaining seek bytes on write, committing on `$2003`. |
+| `$2004-$2005` | read/write | Identification bytes on read; 16-bit track select on write, committing on `$2005`. |
+| `$2006` | read/write | Identification byte on read; volume on write. |
+| `$2007` | read/write | Identification byte on read; play/repeat control on write. |
 
-## Remaining work (game side — NOT in this branch)
+The identification string is `S-MSU1`. A missing or invalid track sets the
+audio-error status bit so a guest driver can fall back to native music.
 
-The chip is inert without a ROM that drives it. Vanilla SMW/ALttP have
-no MSU-1 driver, so to actually hear it:
+## Validation status
 
-1. **Per-game MSVC build:** add `msu1.c` to each game's `src/<game>.vcxproj`
-   source list (CMake auto-picks it up via `runner.cmake`; the `.vcxproj`
-   lists sources explicitly — same step the shadow-audio feature needed).
-2. **Driver:** recompile from an MSU-1-patched ROM (the complete/faithful
-   path — e.g. the ALttP/SM combo-randomizer MSU asm, or the SMW
-   MSU-1(+) hack). This is a different ROM → new pin + full re-validation.
-   The patch's new asm must recompile cleanly.
-3. *(Optional)* one line in each game's `main.c` after ROM resolution:
-   `msu1_set_rom_path(rom_path_buf);` to support `SNESRECOMP_MSU1=auto`.
-
-## Test status
-
-Compile-validated (`gcc -Wall -Wextra`, via PowerShell — the Bash sandbox
-suppresses compiler stderr/exit codes here): `msu1.c`,
-`common_cpu_infra.c`, and `common_rtl.c` (with SDL + game config.h)
-all build clean. Not yet exercised against a live pack — that needs a
-game build + an MSU pack (game-side step above).
+The core and its integration points compile in the shared CMake and MSVC source
+paths. SMW and ALttP exercise the live launcher, stock-ROM, compiled-driver, and
+PCM-pack workflow. A dedicated standalone register/timing conformance suite is
+not yet present; additions should validate status transitions, seek behavior,
+loop points, missing-track fallback, and sample-block timing.
