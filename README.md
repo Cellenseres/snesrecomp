@@ -41,6 +41,34 @@ instructions, and current validation status.
 | *The Legend of Zelda: A Link to the Past* | [ZeldaAlttPSNESRecomp](https://github.com/mstan/ZeldaAlttPSNESRecomp) | [releases](https://github.com/mstan/ZeldaAlttPSNESRecomp/releases/latest) | Playable through the early dungeon; Adaptive View and MSU-1 audio. |
 | *Mega Man X* | [MegaManXSNESRecomp](https://github.com/mstan/MegaManXSNESRecomp) | [releases](https://github.com/mstan/MegaManXSNESRecomp/releases/latest) | Fully playable; experimental true-widescreen mod; Windows, macOS, and Linux builds. |
 
+## ROM compatibility
+
+SNESRecomp is not a drop-in emulator: support in this table means that the
+analyzer and shared runner understand the cartridge mapping or enhancement
+chip. Each game still needs its own analysis configuration, integration, and
+validation before it becomes a playable native port. The companion game
+repositories are authoritative for supported ROM regions and revisions.
+
+| Cartridge mapping or chip | Status | Notes |
+|---|---|---|
+| Standard LoROM and FastROM | **Supported** | ROM and battery-backed SRAM mapping are implemented. Headerless `.sfc` and copier-headered `.smc` images are accepted. |
+| Standard HiROM and FastROM | **Supported** | ROM and battery-backed SRAM mapping are implemented and detected automatically. |
+| Capcom Cx4 / CX4 | **Supported** | Instruction-level support for the chip used by *Mega Man X2* and *Mega Man X3*. Its internal data ROM is synthesized and does not require a separate firmware file. See [`runner/src/snes/CX4_NOTES.md`](runner/src/snes/CX4_NOTES.md). |
+| Nintendo Super FX / GSU | **Supported** | Instruction-level core and cartridge mapping are implemented. *Star Fox* is the current development validation target; other Super FX games have not yet been qualified individually. |
+| MSU-1 | **Supported, opt-in** | The extension's registers, data channel, and PCM audio are implemented, but a game must integrate an MSU-1 driver and pack selection. See [`docs/MSU1.md`](docs/MSU1.md). |
+| ExLoROM, ExHiROM, and other custom mappings | **Not supported yet** | The current mapper layer handles standard LoROM, HiROM, Cx4, and Super FX layouts only. |
+| SA-1 | **Not supported yet** | No SA-1 CPU, memory map, or synchronization model is present. |
+| Nintendo DSP-1/1B, DSP-2, DSP-3, and DSP-4 | **Not supported yet** | These cartridge DSPs are distinct from the console's audio S-DSP. |
+| S-DD1 | **Not supported yet** | No decompression chip or cartridge mapping support is present. |
+| SPC7110 and SPC7110 RTC | **Not supported yet** | No data-decompression, mapping, or RTC model is present. |
+| OBC-1, ST010, ST011, ST018, and S-RTC | **Not supported yet** | Their register windows and coprocessor behavior are not modeled. |
+| BS-X, Sufami Turbo, and Super Game Boy cartridge adapters | **Not supported yet** | Their special cartridge or subsystem behavior is outside the current mapper model. |
+
+Chips and mapping schemes not listed as supported should be assumed
+unsupported. Some unsupported cartridges may get far enough through header
+detection to load as a plain LoROM or HiROM image, but their unmodeled register
+windows will still prevent correct execution.
+
 ## Development showcase
 
 <table>
