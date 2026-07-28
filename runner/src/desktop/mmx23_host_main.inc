@@ -56,6 +56,7 @@
 #endif
 
 #include "launcher.h"
+#include "launcher_cache.h"
 #include "keybinds.h"
 #include "host_report.h"
 
@@ -901,15 +902,7 @@ int main(int argc, char** argv) {
        * forces the GUI. A missing/unreadable cache falls through to the launcher. */
       if (want_launcher && g_config.skip_launcher && !force_launcher) {
         char cached[512]; cached[0] = '\0';
-        FILE *rc = fopen("rom.cfg", "r");
-        if (rc) {
-          if (fgets(cached, sizeof(cached), rc)) {
-            size_t l = strlen(cached);
-            while (l && (cached[l-1] == '\n' || cached[l-1] == '\r')) cached[--l] = '\0';
-          }
-          fclose(rc);
-        }
-        if (cached[0]) {
+        if (snesrecomp_rom_cache_read(cached, sizeof(cached))) {
           FILE *probe = fopen(cached, "rb");
           if (probe) {
             fclose(probe);
@@ -947,16 +940,7 @@ int main(int argc, char** argv) {
         ls.msu1_enabled  = 0;   /* MMX: no MSU-1 (panel hidden) */
 
         char init_rom[512]; init_rom[0] = '\0';
-        {
-          FILE *rc = fopen("rom.cfg", "r");
-          if (rc) {
-            if (fgets(init_rom, sizeof(init_rom), rc)) {
-              size_t l = strlen(init_rom);
-              while (l && (init_rom[l-1] == '\n' || init_rom[l-1] == '\r')) init_rom[--l] = '\0';
-            }
-            fclose(rc);
-          }
-        }
+        snesrecomp_rom_cache_read(init_rom, sizeof(init_rom));
 
 #if defined(RECOMP_LAUNCHER)
         RecompLauncherCGameInfo gi;
@@ -1023,8 +1007,7 @@ int main(int argc, char** argv) {
            * above preserves [KeyMap] lines, so order is safe.) */
           ConfigReloadKeyMap(config_file);
           if (rom_path_buf[0]) {
-            FILE *rc = fopen("rom.cfg", "w");
-            if (rc) { fprintf(rc, "%s\n", rom_path_buf); fclose(rc); }
+            snesrecomp_rom_cache_write(rom_path_buf);
             rom_resolved_by_launcher = 1;
           }
         }
@@ -1039,8 +1022,6 @@ int main(int argc, char** argv) {
       (char *)((argc >= 1 && argv[0]) ? argv[0] : "")
     };
     int la_argc = (la_argv[1][0] != '\0') ? 2 : 1;
-    extern int snesrecomp_launcher_resolve_rom_sha256(
-        int, char **, char *, size_t, const uint8_t *);
     if (!snesrecomp_launcher_resolve_rom_sha256(la_argc, la_argv, rom_path_buf,
                                                 sizeof(rom_path_buf), kMmxRomSha256)) {
       /* User cancelled the picker or repeatedly chose a non-matching ROM. */
@@ -1051,8 +1032,7 @@ int main(int argc, char** argv) {
   /* Issue #4: co-locate the ROM with the exe (interactive launches only). */
   if (!start_paused && script_file == NULL && framedump_dir == NULL) {
     if (RelocateRomToExeDir(rom_path_buf, sizeof(rom_path_buf))) {
-      FILE *rc = fopen("rom.cfg", "w");
-      if (rc) { fprintf(rc, "%s\n", rom_path_buf); fclose(rc); }
+      snesrecomp_rom_cache_write(rom_path_buf);
     }
   }
 #if SNESRECOMP_ENABLE_MODS

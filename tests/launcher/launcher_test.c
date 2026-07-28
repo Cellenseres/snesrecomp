@@ -6,6 +6,7 @@
 
 #include "crc32.h"
 #include "launcher.h"
+#include "launcher_cache.h"
 #include "sha256.h"
 
 static void fail(const char *message) {
@@ -48,6 +49,16 @@ int main(void) {
     if (strcmp(resolved, rom_path) != 0)
         fail("CRC32 resolver changed the absolute ROM path");
 
+    char cached[1024];
+    if (!snesrecomp_rom_cache_read(cached, sizeof(cached)) ||
+        strcmp(cached, rom_path) != 0)
+        fail("resolver did not persist the selected ROM");
+
+    if (!snesrecomp_rom_cache_write("cache-roundtrip.sfc") ||
+        !snesrecomp_rom_cache_read(cached, sizeof(cached)) ||
+        strcmp(cached, "cache-roundtrip.sfc") != 0)
+        fail("ROM cache API did not round-trip");
+
     uint8_t sha[32];
     sha256_compute(payload, sizeof(payload), sha);
     if (!snesrecomp_launcher_resolve_rom_sha256(
@@ -63,6 +74,10 @@ int main(void) {
     if (snesrecomp_launcher_resolve_rom(
             2, argv, resolved, 0, crc) != 0)
         fail("zero-size output buffer was accepted");
+    if (snesrecomp_rom_cache_read(cached, 0) != 0)
+        fail("zero-size cache output buffer was accepted");
+    if (snesrecomp_rom_cache_write("") != 0)
+        fail("empty ROM cache path was accepted");
 
     remove(rom_path);
     remove(cfg_path);
