@@ -137,6 +137,19 @@ set(SNESRECOMP_RUNNER_INCLUDE_DIRS
     ${SNESRECOMP_RUNNER_ROOT}/src/snes
 )
 
+# Optional desktop GLSL preset renderer. It deliberately stays out of
+# SNESRECOMP_RUNNER_SOURCES because headless tools and non-OpenGL frontends do
+# not carry the game-owned gl_core/stb/config dependencies it consumes.
+function(snesrecomp_target_glsl_shader target)
+    target_sources(${target} PRIVATE
+        ${SNESRECOMP_RUNNER_ROOT}/src/desktop/glsl_shader.c)
+    target_include_directories(${target} PRIVATE
+        ${SNESRECOMP_RUNNER_ROOT}/src/desktop)
+    if(NOT MSVC)
+        target_link_libraries(${target} PRIVATE m)
+    endif()
+endfunction()
+
 # Optional delay-sync netcode (lib/recomp-net submodule). See docs/RECOMP_NET.md.
 # Does nothing unless SNESRECOMP_ENABLE_NET=ON or the game calls
 # snesrecomp_enable_recomp_net(<target>).
