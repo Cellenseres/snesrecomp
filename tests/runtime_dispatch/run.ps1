@@ -8,7 +8,8 @@ $args = @(
     "$root\tests\runtime_dispatch\known_lle_entry_test.c",
     "$root\runner\src\cpu_state.c",
     "$root\runner\src\snes\cart.c",
-    "-Wl,--gc-sections", "-o", $out
+    "$root\runner\src\snes\cx4.c",
+    "-Wl,--gc-sections", "-lm", "-o", $out
 )
 
 New-Item -ItemType Directory -Force (Split-Path $out) | Out-Null

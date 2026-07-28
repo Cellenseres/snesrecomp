@@ -18,5 +18,5 @@ echo "=== Phase 1: interp_bridge contract ==="
 gcc $CFLAGS -I runner/src -I runner/src/snes \
     tests/interp816/bridge_test.c \
     runner/src/snes/interp816.c runner/src/snes/interp_bridge.c \
-    -o build/bridge_test
+    runner/src/snes/cx4.c -lm -o build/bridge_test
 exec ./build/bridge_test

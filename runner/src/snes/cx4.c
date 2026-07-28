@@ -29,6 +29,7 @@
  */
 #include "cx4.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1120,26 +1121,6 @@ void cx4_synthesize_data_rom(Cx4 *c) {
     c->dataROM[896 + n] = (cv > 16777215.0) ? 0xFFFFFFu : (uint32_t)cv & M24;
   }
   c->firmware_ok = 1;
-}
-
-static int cx4_read_firmware_file(Cx4 *c, const char *path) {
-  FILE *f = fopen(path, "rb");
-  if (!f) return 0;
-  uint8_t buf[3072];
-  const size_t n = fread(buf, 1, sizeof(buf), f);
-  fclose(f);
-  if (n != sizeof(buf)) {
-    fprintf(stderr, "[cx4] %s is %u bytes, expected 3072 — ignoring\n",
-            path, (unsigned)n);
-    return 0;
-  }
-  for (unsigned i = 0; i < 1024; i++)
-    c->dataROM[i] = (uint32_t)buf[i * 3] |
-                    ((uint32_t)buf[i * 3 + 1] << 8) |
-                    ((uint32_t)buf[i * 3 + 2] << 16);
-  c->firmware_ok = 1;
-  fprintf(stderr, "[cx4] loaded HG51B S169 data ROM: %s\n", path);
-  return 1;
 }
 
 /* Load a firmware dump into a scratch buffer and diff it against whatever is

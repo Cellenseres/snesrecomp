@@ -31,7 +31,9 @@ Build-BelowNormal @(
     "-I$root\runner\src", "-I$root\runner\src\snes",
     "$root\tests\interp816\bridge_test.c",
     "$root\runner\src\snes\interp816.c",
-    "$root\runner\src\snes\interp_bridge.c", "-o", $bridgeOut
+    "$root\runner\src\snes\interp_bridge.c",
+    "$root\runner\src\snes\cx4.c",
+    "-lm", "-o", $bridgeOut
 ) $bridgeOut
 & $bridgeOut
 if ($LASTEXITCODE -ne 0) { throw "interp bridge test failed" }
