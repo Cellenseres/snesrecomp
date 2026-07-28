@@ -221,7 +221,7 @@ earlier step's bug:
 | game | state |
 |---|---|
 | Mega Man X 1 | surveyed and shipping; source of every entry above |
-| Mega Man X2 | HUD, exact BG margins, object windows, dynamic record frontier, and weather margins implemented; broad stage playtest still gates launcher exposure |
+| Mega Man X2 | HUD, exact BG margins, object windows, dynamic record frontier, and weather margins implemented as a default-disabled mod; broad stage playtest remains pending |
 | Mega Man X3 | 342x224 rendering, HUD, exact BG margins, and widened activation/culling implemented; authentic 4:3 remains the default |
 | others | use title-specific strategies until their reusable patterns are catalogued here |
 
