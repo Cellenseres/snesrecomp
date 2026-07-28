@@ -1,6 +1,6 @@
 #pragma once
 #include <stdint.h>
-#include <SDL.h>
+#include "desktop/sdl_compat.h"
 
 #ifdef __cplusplus
 extern "C" {

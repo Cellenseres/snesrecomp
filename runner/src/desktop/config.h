@@ -1,7 +1,7 @@
 #pragma once
 /* Shared Mega Man X trilogy desktop configuration contract. */
 #include "types.h"
-#include <SDL_keycode.h>
+#include "sdl_compat.h"
 
 enum {
   kKeys_Null,

@@ -200,6 +200,105 @@ python tools/build_cli.py release
 
 The ready-to-use ZIP is written to `dist/`.
 
+## Choosing SDL3 or SDL2 for a desktop game
+
+SDL3 is the default desktop backend for CMake game hosts. SDL2 remains a
+supported compatibility fallback, but it must be selected explicitly. The
+choice applies to both the game window and the shared recomp-ui launcher, so a
+build never mixes SDL major versions.
+
+Install the development package for the backend you want:
+
+- Windows: use an SDL development package for your compiler and architecture.
+  For the official MinGW archives, point CMake at the contained
+  `x86_64-w64-mingw32` directory.
+- macOS: install `sdl3` for the default build or `sdl2` for the fallback.
+- Linux: install your distribution's SDL3 development package, or its SDL2
+  development package for the fallback.
+
+Keep separate build directories for the two backends. This avoids stale CMake
+package paths and also makes side-by-side testing straightforward.
+
+### Build with SDL3 (default)
+
+From a game repository that consumes SNESRecomp:
+
+```powershell
+$engine = 'C:\src\snesrecomp'
+$ui = 'C:\src\recomp-ui'
+$sdl3 = 'C:\deps\SDL3\x86_64-w64-mingw32'
+
+cmake -S . -B build-sdl3 -G Ninja `
+  -DCMAKE_BUILD_TYPE=Release `
+  -DSNESRECOMP_ROOT="$engine" `
+  -DRECOMP_UI_ROOT="$ui" `
+  -DCMAKE_PREFIX_PATH="$sdl3"
+cmake --build build-sdl3 --parallel
+```
+
+`-DSNESRECOMP_SDL_BACKEND=SDL3` is accepted but optional because SDL3 is the
+default.
+
+### Build with the SDL2 fallback
+
+Configure a different build directory and select SDL2 explicitly:
+
+```powershell
+$engine = 'C:\src\snesrecomp'
+$ui = 'C:\src\recomp-ui'
+$sdl2 = 'C:\deps\SDL2\x86_64-w64-mingw32'
+
+cmake -S . -B build-sdl2 -G Ninja `
+  -DCMAKE_BUILD_TYPE=Release `
+  -DSNESRECOMP_ROOT="$engine" `
+  -DRECOMP_UI_ROOT="$ui" `
+  -DSNESRECOMP_SDL_BACKEND=SDL2 `
+  -DCMAKE_PREFIX_PATH="$sdl2"
+cmake --build build-sdl2 --parallel
+```
+
+If SDL is installed in a standard system prefix, omit
+`-DCMAKE_PREFIX_PATH`. On Windows, the build helper copies the selected
+`SDL3.dll` or `SDL2.dll` beside each executable.
+
+During configuration, verify that CMake prints matching lines:
+
+```text
+<game-target>: SDL3 desktop backend
+recomp-ui: SDL3 platform backend
+```
+
+The SDL2 build reports `SDL2 compatibility backend` instead. After a clean
+game exit, `last_run_report.json` records the compiled and loaded SDL versions.
+
+### Add backend selection to a game project
+
+A game CMake file should use the shared helper instead of calling
+`find_package(SDL2)` or `find_package(SDL3)` itself:
+
+```cmake
+set(SNESRECOMP_ROOT "${CMAKE_SOURCE_DIR}/snesrecomp" CACHE PATH
+    "Path to SNESRecomp")
+include(${SNESRECOMP_ROOT}/runner/runner.cmake)
+
+set(RECOMP_UI_ROOT "${CMAKE_SOURCE_DIR}/recomp-ui" CACHE PATH
+    "Path to recomp-ui")
+include(${RECOMP_UI_ROOT}/recomp_ui.cmake)
+
+add_executable(my_game ${SNESRECOMP_RUNNER_SOURCES} ${GAME_SOURCES})
+target_include_directories(my_game PRIVATE
+    ${SNESRECOMP_RUNNER_INCLUDE_DIRS})
+snesrecomp_target_sdl(my_game)
+recomp_target_launcher_ui(my_game)
+```
+
+`snesrecomp_target_sdl()` owns package discovery, compile definitions, linking,
+and Windows runtime-DLL staging. See
+[`docs/SDL_BACKENDS.md`](docs/SDL_BACKENDS.md) for the benchmark mode and
+maintainer notes. Some legacy Visual Studio game projects deliberately remain
+on the explicitly defined SDL2 fallback; the CMake release path is the SDL3
+default.
+
 ## Architecture
 
 | Path | Purpose |
