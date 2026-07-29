@@ -167,6 +167,16 @@ int main(void) {
                    "random multiply HLE matches firmware");
     fails += check(compare_hle(d, 0x08, input, 3),
                    "random vector-size HLE matches firmware");
+    fails += check(compare_hle(d, 0x04, input, 2),
+                   "random sin/cos HLE matches firmware");
+    fails += check(compare_hle(d, 0x0c, input, 3),
+                   "random 2D rotate HLE matches firmware");
+    fails += check(compare_hle(d, 0x10, input, 2),
+                   "random inverse HLE matches firmware");
+    int16_t range_input[4] = {input[0], input[1], input[2],
+                              (int16_t)(input[0] ^ input[2])};
+    fails += check(compare_hle(d, 0x18, range_input, 4),
+                   "random range HLE matches firmware");
   }
   fails += check(dsp1_instructions_executed(d) > 0,
                  "firmware executed instructions");

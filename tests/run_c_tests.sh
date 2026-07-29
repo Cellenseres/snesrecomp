@@ -72,6 +72,7 @@ echo "=== DSP-1 bus/core shell ==="
     -I "$ROOT/runner/src" -I "$ROOT/runner/src/snes" \
     "$ROOT/tests/dsp1/dsp1_hle_test.c" \
     "$ROOT/runner/src/snes/dsp1_hle.c" \
+    -lm \
     -o "$OUT/dsp1_hle_test"
 "$OUT/dsp1_hle_test"
 
@@ -80,6 +81,7 @@ echo "=== DSP-1 bus/core shell ==="
     "$ROOT/tests/dsp1/dsp1_firmware_test.c" \
     "$ROOT/runner/src/snes/dsp1.c" \
     "$ROOT/runner/src/snes/dsp1_hle.c" \
+    -lm \
     -o "$OUT/dsp1_firmware_test"
 "$OUT/dsp1_firmware_test"
 
