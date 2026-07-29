@@ -955,12 +955,13 @@ static int cb_lobby_max_slots(void *ctx)
   const SnesLobbyJoinInfo *join;
   RNetLanLobby state;
   (void)ctx;
-  if (use_lan_members(&state))
+  /* SNES LAN / Direct IP rooms are always 2-player. */
+  if (use_lan_members(&state) || g_hosting_lan || g_joined_lan || g_joined_direct)
     return 2;
   if (!snes_lobby_in_lobby())
     return 0;
   join = snes_lobby_join_info();
-  if (join && join->max_slots >= 2)
+  if (join && join->ok && join->max_slots >= 2)
     return clamp_lobby_max_slots(join->max_slots);
   return clamp_lobby_max_slots(g_lobby_max_slots);
 }
@@ -999,20 +1000,6 @@ static int cb_fill_launch(void *ctx, RecompLauncherCNetplayLaunch *out)
   snprintf(out->peer_hostport, sizeof(out->peer_hostport), "%s",
            join.peer_hostport);
   return 1;
-}
-
-static int cb_lobby_max_slots(void *ctx)
-{
-  const SnesLobbyJoinInfo *join;
-  (void)ctx;
-  if (g_hosting_lan || g_joined_lan || g_joined_direct)
-    return g_lobby_max_slots >= 2 ? g_lobby_max_slots : 2;
-  join = snes_lobby_join_info();
-  if (join && join->ok && join->max_slots >= 2)
-    return join->max_slots;
-  if (snes_lobby_in_lobby())
-    return g_lobby_max_slots >= 2 ? g_lobby_max_slots : 2;
-  return 0;
 }
 
 static RecompLauncherCNetplayCallbacks g_callbacks = {
