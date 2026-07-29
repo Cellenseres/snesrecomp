@@ -3,6 +3,7 @@
 #include <stdlib.h>
 
 #include "dsp1.h"
+#include "dsp1_hle.h"
 
 enum {
   kRqm = 0x80,
@@ -50,6 +51,35 @@ static int read_word(Dsp1 *d, uint16_t *value) {
   uint8_t lo = dsp1_read(d, 0);
   uint8_t hi = dsp1_read(d, 0);
   *value = (uint16_t)(lo | ((uint16_t)hi << 8));
+  return 1;
+}
+
+static int compare_hle(Dsp1 *d, uint8_t command, const int16_t *input,
+                       uint8_t input_words) {
+  int16_t hle_output[4] = {0};
+  uint16_t lle_output[4] = {0};
+  uint8_t output_words = 0;
+  if (!dsp1_hle_execute(command, input, input_words, hle_output, 4,
+                        &output_words) ||
+      !write_command(d, command))
+    return 0;
+  for (uint8_t i = 0; i < input_words; i++) {
+    if (!write_word(d, (uint16_t)input[i])) return 0;
+  }
+  for (uint8_t i = 0; i < output_words; i++) {
+    if (!read_word(d, &lle_output[i])) return 0;
+    if (lle_output[i] != (uint16_t)hle_output[i]) {
+      fprintf(stderr,
+              "dsp1_hle mismatch: command=%02x input=%04x,%04x,%04x "
+              "word=%u lle=%04x hle=%04x count=%llu\n",
+              command, (uint16_t)input[0],
+              input_words > 1 ? (uint16_t)input[1] : 0,
+              input_words > 2 ? (uint16_t)input[2] : 0, i, lle_output[i],
+              (uint16_t)hle_output[i],
+              (unsigned long long)dsp1_command_count(d, command));
+      return 0;
+    }
+  }
   return 1;
 }
 
@@ -115,6 +145,29 @@ int main(void) {
   fails += check(result == 0x3fff && result2 == 0x1fff,
                  "DSP-1 2D identity rotation");
 
+  fails += check(dsp1_command_count(d, 0x00) == 1 &&
+                     dsp1_command_count(d, 0x20) == 1 &&
+                     dsp1_command_count(d, 0x04) == 1 &&
+                     dsp1_command_count(d, 0x08) == 1 &&
+                     dsp1_command_count(d, 0x0c) == 1,
+                 "command-ready writes are counted by command ID");
+  fails += check(dsp1_command_count(d, 0x40) == 0,
+                 "16-bit parameter writes are not counted as commands");
+
+  uint32_t random = 0x1badb002u;
+  for (unsigned i = 0; i < 512 && !fails; i++) {
+    int16_t input[3];
+    for (unsigned word = 0; word < 3; word++) {
+      random = random * 1664525u + 1013904223u;
+      input[word] = (int16_t)(random >> 16);
+    }
+    fails += check(compare_hle(d, 0x20, input, 2),
+                   "random multiply-plus-one HLE matches firmware");
+    fails += check(compare_hle(d, 0x00, input, 2),
+                   "random multiply HLE matches firmware");
+    fails += check(compare_hle(d, 0x08, input, 3),
+                   "random vector-size HLE matches firmware");
+  }
   fails += check(dsp1_instructions_executed(d) > 0,
                  "firmware executed instructions");
 

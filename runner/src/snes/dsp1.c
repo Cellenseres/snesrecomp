@@ -56,6 +56,7 @@ struct Dsp1 {
   uint64_t insns;
   uint64_t host_reads;
   uint64_t host_writes;
+  uint64_t command_count[256];
 };
 
 static uint16_t u16(unsigned v) { return (uint16_t)(v & 0xffffu); }
@@ -391,6 +392,8 @@ uint8_t dsp1_read(Dsp1 *d, uint16_t addr) {
 void dsp1_write(Dsp1 *d, uint16_t addr, uint8_t value) {
   if (!d || (addr & 1)) return;
   d->host_writes++;
+  if (d->r.sr.drc && d->r.sr.rqm)
+    d->command_count[value]++;
   if (!d->r.sr.drc) {
     if (!d->r.sr.drs) {
       d->r.sr.drs = 1;
@@ -519,6 +522,9 @@ int dsp1_firmware_loaded(const Dsp1 *d) { return d ? d->firmware_ok : 0; }
 uint64_t dsp1_instructions_executed(const Dsp1 *d) { return d ? d->insns : 0; }
 uint64_t dsp1_host_reads(const Dsp1 *d) { return d ? d->host_reads : 0; }
 uint64_t dsp1_host_writes(const Dsp1 *d) { return d ? d->host_writes : 0; }
+uint64_t dsp1_command_count(const Dsp1 *d, uint8_t command) {
+  return d ? d->command_count[command] : 0;
+}
 
 void dsp1_saveload(Dsp1 *d, struct SaveLoadInfo *sli) {
   if (!d || !sli) return;

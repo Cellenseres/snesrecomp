@@ -70,8 +70,16 @@ echo "=== DSP-1 bus/core shell ==="
 
 "$CC" -std=c11 -Wall -Wextra -Werror -O1 \
     -I "$ROOT/runner/src" -I "$ROOT/runner/src/snes" \
+    "$ROOT/tests/dsp1/dsp1_hle_test.c" \
+    "$ROOT/runner/src/snes/dsp1_hle.c" \
+    -o "$OUT/dsp1_hle_test"
+"$OUT/dsp1_hle_test"
+
+"$CC" -std=c11 -Wall -Wextra -Werror -O1 \
+    -I "$ROOT/runner/src" -I "$ROOT/runner/src/snes" \
     "$ROOT/tests/dsp1/dsp1_firmware_test.c" \
     "$ROOT/runner/src/snes/dsp1.c" \
+    "$ROOT/runner/src/snes/dsp1_hle.c" \
     -o "$OUT/dsp1_firmware_test"
 "$OUT/dsp1_firmware_test"
 

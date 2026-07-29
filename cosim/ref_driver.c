@@ -539,6 +539,19 @@ int main(int argc, char **argv) {
             (unsigned long long)s_joy_reads,
             (unsigned long long)s_joy_nonzero_reads,
             (unsigned long long)s_joy_strobe_writes);
+    if (g_snes->cart->dsp1) {
+        bool first = true;
+        fputs("ref: dsp1_commands=", stderr);
+        for (unsigned command = 0; command < 256; command++) {
+            uint64_t count =
+                dsp1_command_count(g_snes->cart->dsp1, (uint8_t)command);
+            if (!count) continue;
+            fprintf(stderr, "%s%02x:%llu", first ? "" : ",", command,
+                    (unsigned long long)count);
+            first = false;
+        }
+        fputc('\n', stderr);
+    }
     fprintf(stderr,
             "ref: PASS frames=%llu master=%llu cpu_insns=%llu "
             "logic_changes=%llu logic_frozen_max=%llu "
