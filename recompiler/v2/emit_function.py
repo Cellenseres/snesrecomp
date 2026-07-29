@@ -2099,6 +2099,13 @@ def emit_function(rom: bytes, bank: int, start: int,
             f'      return interp_bridge_lle_yield_unwind('
             f'cpu, 0x{block_pc24:06X}u);')
         src.append('    }')
+        # Cartridge coprocessors observe CPU bus accesses no earlier than this
+        # architectural block boundary. The aggregate static charge below
+        # advances the frame clock to the end of the block before its emitted
+        # operations run; exposing that future timestamp to DSP-1 can let
+        # firmware consume a word before the CPU has written it.
+        src.append(
+            '    cpu->coprocessor_master_cycles = cpu->master_cycles;')
         # Axis-2: charge this block's static 65816 CPU cycles as one constant
         # add (recompiler/snes_cycles.py). Near-free. Runtime-only modifiers
         # (D.l/page-cross/branch-taken) are charged dynamically in block_lines.

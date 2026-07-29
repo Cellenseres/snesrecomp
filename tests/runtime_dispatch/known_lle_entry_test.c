@@ -35,6 +35,10 @@ static uint8 g_test_rom[0x400000];
 
 uint8 ReadReg(uint16 reg) { (void)reg; return 0; }
 uint16 ReadRegWord(uint16 reg) { (void)reg; return 0; }
+uint8 ReadRegOpenBus(uint16 reg, uint8 open_bus) {
+    (void)reg;
+    return open_bus;
+}
 void WriteReg(uint16 reg, uint8 value) { (void)reg; (void)value; }
 void WriteRegWord(uint16 reg, uint16 value) { (void)reg; (void)value; }
 uint8 *RomPtr(uint32 addr) {
@@ -135,6 +139,20 @@ int main(void) {
     g_sram = sram;
     g_sram_size = (int)sizeof sram;
     cpu_state_init(&cpu, ram);
+
+    /* SMK indexes $7F:5000 by $FA78, carrying into unmapped $80:4A78.
+     * Its final operand byte leaves $7F on the data bus. */
+    cpu.open_bus = 0x7f;
+    fails += check(cpu_read16(&cpu, 0x80, 0x4a78) == 0x7f7f,
+                   "unmapped word read retains the CPU data bus");
+    fails += check(cpu.open_bus == 0x7f,
+                   "unmapped word read leaves its high byte on the bus");
+    cpu_write8(&cpu, 0x7e, 0x1234, 0xa5);
+    fails += check(cpu.open_bus == 0xa5,
+                   "byte write drives the CPU data bus");
+    cpu_write16(&cpu, 0x7e, 0x1234, 0x5aa5);
+    fails += check(cpu.open_bus == 0x5a,
+                   "word write leaves its high byte on the CPU data bus");
 
     /* $F0:0000-$7FFF is LoROM SRAM but full-address HiROM ROM. The runtime
      * must select only the active cartridge's SRAM window. */

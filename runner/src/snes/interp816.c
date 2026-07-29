@@ -151,17 +151,25 @@ int interp816_runOpcode(Interp816* cpu) {
   cpu->cyclesUsed = 0;
   if(cpu->stopped) return 1;
 
-  // not stopped or waiting, execute a opcode or go to interrupt
-  if((!cpu->i && cpu->irqWanted) || cpu->nmiWanted) {
-    cpu->cyclesUsed = 7; // interrupt: at least 7 cycles
-    if(cpu->nmiWanted) {
-      cpu->nmiWanted = false;
-      interp816_doInterrupt(cpu, false);
-    } else {
-      // must be irq
-      interp816_doInterrupt(cpu, true);
-    }
+  bool interruptPending = cpu->nmiWanted || cpu->irqWanted;
+  if(cpu->waiting) {
+    if(!interruptPending) return 1;
+    cpu->waiting = false;
   }
+
+  if(cpu->nmiWanted) {
+    cpu->nmiWanted = false;
+    cpu->cyclesUsed = 7;
+    interp816_doInterrupt(cpu, false);
+    return cpu->cyclesUsed;
+  }
+  if(!cpu->i && cpu->irqWanted) {
+    cpu->irqWanted = false;
+    cpu->cyclesUsed = 7;
+    interp816_doInterrupt(cpu, true);
+    return cpu->cyclesUsed;
+  }
+
   uint8_t opcode = interp816_readOpcode(cpu);
   uint32_t _pcb = ((uint32_t)cpu->k << 16) | (uint16_t)(cpu->pc - 1);
   g_interp816_cur_pc = _pcb;

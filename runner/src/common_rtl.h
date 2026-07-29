@@ -163,6 +163,7 @@ void WriteReg(uint16 reg, uint8 value);
 void WriteRegWord(uint16 reg, uint16 value);
 uint16 ReadRegWord(uint16 reg);
 uint8 ReadReg(uint16 reg);
+uint8 ReadRegOpenBus(uint16 reg, uint8 open_bus);
 uint8_t *IndirPtr_Slow(LongPtr ptr, uint16 offs);
 
 // 16-bit-indirect-via-DP resolution. The addressing modes `(dp)`,

@@ -1014,6 +1014,7 @@ static int _interp_run_core(CpuState *cpu, uint32_t entry_pc24,
             g_interp_wlog_pc24 = pc_before & 0xFFFFFFu;
             sync_interp_to_cpu(&in, cpu);
         }
+        cpu->coprocessor_master_cycles = cpu->master_cycles;
         int _cyc = interp816_runOpcode(&in);   /* executes the opcode; pushes/pops frames */
         s_interp_bus_timing_active=0;
         if (dtrace && in.dp != dp_before) {
@@ -1039,6 +1040,7 @@ static int _interp_run_core(CpuState *cpu, uint32_t entry_pc24,
             uint64_t _master = s_interp_bus_master + (uint64_t)_internal * 6u;
             cpu->cycles        += (uint64_t)_cyc;
             cpu->master_cycles += _master;
+            cpu->coprocessor_master_cycles = cpu->master_cycles;
             if (g_snes) snes_sync_master_clock(g_snes, cpu->master_cycles);
             if (g_snes && g_snes->cart)
                 cart_sync_coprocessors(g_snes->cart, cpu->master_cycles);

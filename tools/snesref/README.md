@@ -74,6 +74,8 @@ Environment variables select non-interactive capture outputs:
 | `SNESREF_FAST=1` | Hide the window and disable frame pacing. |
 | `SNESREF_FRAMES=N` | Exit after exactly `N` emulated frames. |
 | `SNESREF_INPUT_FILE=path` | Apply deterministic scripted joypad input. |
+| `SNESREF_WRAM_FILL=byte` | Fill exposed system WRAM before frame 1; use `0` to match SNESRecomp's hard-reset state. |
+| `SNESREF_WRAM_DUMP=path` | Write the core's final exposed system WRAM image. |
 | `SNESREF_TRACE_FILE=path` | Write low-WRAM change records as JSONL. |
 | `SNESREF_WAV=path` | Write core output as a PCM WAV file. |
 | `SNESREF_FRAME_DUMP_DIR=path` | Write selected frames as 256x224 BGRX raw files. |
@@ -114,6 +116,7 @@ Example:
 ```powershell
 $env:SNESREF_FAST = "1"
 $env:SNESREF_FRAMES = "1800"
+$env:SNESREF_WRAM_FILL = "0"
 $env:SNESREF_INPUT_FILE = "menu-input.txt"
 $env:SNESREF_TRACE_FILE = "wram.jsonl"
 $env:SNESREF_WAV = "reference.wav"

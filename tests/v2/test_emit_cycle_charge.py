@@ -24,6 +24,9 @@ def test_linear_block_charges_static_cycles():
     # Axis-5: the static block charge is region-weighted into master_cycles.
     # Bank 0 LoROM = SLOW (8 master/CPU cycle) -> 11 * 8 = 88.
     assert "cpu->master_cycles += 88;" in src, src
+    assert src.index(
+        "cpu->coprocessor_master_cycles = cpu->master_cycles;"
+    ) < src.index("cpu->master_cycles += 88;"), src
 
 
 def test_width_widens_static_charge():

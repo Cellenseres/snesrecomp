@@ -126,6 +126,47 @@ static bool load_input_file(const char* path) {
     return true;
 }
 
+static bool initialize_system_ram() {
+    const char* value = getenv("SNESREF_WRAM_FILL");
+    if (!value || !value[0]) return true;
+
+    char* end = nullptr;
+    unsigned long fill = strtoul(value, &end, 0);
+    if (!end || *end || fill > 0xff) {
+        fprintf(stderr, "invalid SNESREF_WRAM_FILL '%s' (expected 0..255)\n",
+                value);
+        return false;
+    }
+
+    void* ram = p_retro_get_memory_data(RETRO_MEMORY_SYSTEM_RAM);
+    size_t size = p_retro_get_memory_size(RETRO_MEMORY_SYSTEM_RAM);
+    if (!ram || !size) {
+        fprintf(stderr,
+                "core does not expose RETRO_MEMORY_SYSTEM_RAM; "
+                "cannot apply SNESREF_WRAM_FILL\n");
+        return false;
+    }
+    memset(ram, (int)fill, size);
+    fprintf(stderr, "[memory] initialized %zu WRAM bytes to 0x%02lx\n",
+            size, fill);
+    return true;
+}
+
+static bool dump_system_ram() {
+    const char* path = getenv("SNESREF_WRAM_DUMP");
+    if (!path || !path[0]) return true;
+    void* ram = p_retro_get_memory_data(RETRO_MEMORY_SYSTEM_RAM);
+    size_t size = p_retro_get_memory_size(RETRO_MEMORY_SYSTEM_RAM);
+    FILE* stream = fopen(path, "wb");
+    if (!ram || !size || !stream) {
+        if (stream) fclose(stream);
+        return false;
+    }
+    bool ok = fwrite(ram, 1, size, stream) == size;
+    if (fclose(stream) != 0) ok = false;
+    return ok;
+}
+
 static void update_scripted_input() {
     if (!g_scripted_input) return;
     uint16_t next = 0;
@@ -497,6 +538,7 @@ int main(int argc, char** argv) {
     p_retro_set_input_poll(cb_input_poll);
     p_retro_set_input_state(cb_input_state);
     if (!p_retro_load_game(&gi)) { fprintf(stderr,"retro_load_game failed\n"); return 4; }
+    if (!initialize_system_ram()) return 7;
     p_retro_set_controller_port_device(0, RETRO_DEVICE_JOYPAD);
 
     retro_system_av_info av; memset(&av,0,sizeof av); p_retro_get_system_av_info(&av);
@@ -584,6 +626,9 @@ int main(int argc, char** argv) {
         }
     }
     if (g_log) fflush(g_log);
+    if (!dump_system_ram()) {
+        fprintf(stderr, "unable to write SNESREF_WRAM_DUMP\n");
+    }
     wav_close();
     p_retro_unload_game(); p_retro_deinit();
     SDL_Quit(); FreeLibrary(g_core);

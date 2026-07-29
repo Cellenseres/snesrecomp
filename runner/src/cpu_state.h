@@ -112,6 +112,10 @@ typedef struct CpuState {
     uint8  _flag_I;
     uint8  _flag_D;
 
+    /* Last value driven on the CPU data bus. Unmapped reads return this
+     * latch, and every byte read or written replaces it. */
+    uint8  open_bus;
+
     /* RAM. Points at the runtime's `g_ram[]` 128KB region — same bytes
      * the existing hand-written runtime reads/writes. v2 codegen will
      * issue cpu_readN / cpu_writeN against this pointer so DB / D / S
@@ -138,6 +142,12 @@ typedef struct CpuState {
      * old +256-main-cycles-per-APU-touch synthetic estimate (the off-cue root).
      * Charged in the same one-add-per-block spot as `cycles` (near-free). */
     uint64_t master_cycles;
+
+    /* Master-clock timestamp visible to cartridge coprocessors during the
+     * current generated basic block. Generated blocks latch this before
+     * applying their aggregate cycle charge, so a device cannot execute to
+     * the end of the block before observing a CPU bus access inside it. */
+    uint64_t coprocessor_master_cycles;
 } CpuState;
 
 /* NB: NLR pending-skip state is intentionally NOT a CpuState field.

@@ -149,6 +149,42 @@ int main(void) {
     CHECK(p->k==0xBB && p->pc==0x9000,
           "K:PC=%02X:%04X exp BB:9000", p->k, p->pc); }
 
+  { uint8_t c[] = {0xCB,0xA9,0x42}; Interp816 *p = prep(c,sizeof c);
+    run(p,1);
+    int idle_cycles = interp816_runOpcode(p);
+    printf("T19 WAI parks until an interrupt request\n");
+    CHECK(p->waiting, "waiting=%d exp 1", p->waiting);
+    CHECK(p->pc==0x8001, "PC=%04X exp 8001", p->pc);
+    CHECK(idle_cycles==1, "idle cycles=%d exp 1", idle_cycles); }
+
+  { uint8_t c[] = {0xCB,0xA9,0x42}; Interp816 *p = prep(c,sizeof c);
+    run(p,1);
+    p->irqWanted = true;
+    interp816_runOpcode(p);
+    printf("T20 masked IRQ wakes WAI without vectoring\n");
+    CHECK(!p->waiting, "waiting=%d exp 0", p->waiting);
+    CHECK(p->pc==0x8003, "PC=%04X exp 8003", p->pc);
+    CHECK((p->a & 0xff)==0x42, "A.lo=%02X exp 42", p->a & 0xff);
+    CHECK(p->irqWanted, "masked IRQ request was cleared"); }
+
+  { uint8_t c[] = {0xCB}; Interp816 *p = prep(c,sizeof c);
+    p->e = false;
+    p->mf = false;
+    p->xf = false;
+    MEM[0xffea]=0x00; MEM[0xffeb]=0x90;
+    MEM[0x9000]=0xA9; MEM[0x9001]=0x77; MEM[0x9002]=0x00;
+    run(p,1);
+    p->nmiWanted = true;
+    int interrupt_cycles = interp816_runOpcode(p);
+    printf("T21 NMI vectors before executing the handler\n");
+    CHECK(!p->waiting, "waiting=%d exp 0", p->waiting);
+    CHECK(p->k==0 && p->pc==0x9000,
+          "K:PC=%02X:%04X exp 00:9000", p->k, p->pc);
+    CHECK(p->a==0, "A=%04X changed before handler opcode", p->a);
+    CHECK(interrupt_cycles==8, "NMI cycles=%d exp 8", interrupt_cycles);
+    run(p,1);
+    CHECK(p->a==0x0077, "handler A=%04X exp 0077", p->a); }
+
   printf("\n==== interp816 Phase-0: %d/%d checks passed ====\n", g_check - g_fail, g_check);
   if (g_fail) { printf("RESULT: FAIL (%d)\n", g_fail); return 1; }
   printf("RESULT: PASS\n");

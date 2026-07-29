@@ -9,6 +9,8 @@ $args = @(
     "$root\runner\src\cpu_state.c",
     "$root\runner\src\snes\cart.c",
     "$root\runner\src\snes\cx4.c",
+    "$root\runner\src\snes\dsp1.c",
+    "$root\runner\src\snes\dsp1_hle.c",
     "-Wl,--gc-sections", "-lm", "-o", $out
 )
 

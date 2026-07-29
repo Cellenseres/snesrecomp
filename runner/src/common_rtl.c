@@ -757,12 +757,11 @@ void WriteReg(uint16 reg, uint8 value) {
 }
 
 
-uint8 ReadReg(uint16 reg) {
+uint8 ReadRegOpenBus(uint16 reg, uint8 open_bus) {
   // Direct dispatch — bypass emulator bus
-  // MSU-1 ($2000-$2007). Returns 0 (open bus) when no pack is armed,
-  // matching the prior fall-through behaviour exactly.
+  // MSU-1 ($2000-$2007). An absent device leaves the data bus undriven.
   if (reg >= 0x2000 && reg < 0x2008) {
-    return msu1_enabled() ? msu1_read(reg) : 0;
+    return msu1_enabled() ? msu1_read(reg) : open_bus;
   }
   if (reg == 0x2137)
     snes_sync_master_clock(g_snes, g_cpu.master_cycles);
@@ -791,7 +790,11 @@ uint8 ReadReg(uint16 reg) {
   } else if (reg >= 0x4300 && reg < 0x4380) {
     return dma_read(g_dma, reg);
   }
-  return 0;
+  return open_bus;
+}
+
+uint8 ReadReg(uint16 reg) {
+  return ReadRegOpenBus(reg, g_cpu.open_bus);
 }
 
 uint16 ReadRegWord(uint16 reg) {
@@ -808,11 +811,14 @@ uint16 ReadRegWord(uint16 reg) {
     uint8_t lo = g_snes->apu->outPorts[(reg & 0x3)];
     uint8_t hi = g_snes->apu->outPorts[((reg + 1) & 0x3)];
     RtlApuUnlock();
+    g_cpu.open_bus = hi;
     return (uint16_t)lo | ((uint16_t)hi << 8);
   }
-  uint16_t rv = ReadReg(reg);
-  rv |= ReadReg(reg + 1) << 8;
-  return rv;
+  uint8_t lo = ReadReg(reg);
+  g_cpu.open_bus = lo;
+  uint8_t hi = ReadReg(reg + 1);
+  g_cpu.open_bus = hi;
+  return (uint16_t)lo | ((uint16_t)hi << 8);
 }
 
 static void WriteVramWord(Ppu *ppu, uint16 value) {

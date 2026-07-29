@@ -320,6 +320,10 @@ static void apply_frame_input(void) {
 
 static void handle_pos_stuff(Snes *snes) {
     Interp816 *cpu = g_ref_cpu;
+    if (snes->autoJoyTimer)
+        snes->autoJoyTimer =
+            snes->autoJoyTimer <= 2 ? 0 : (uint16_t)(snes->autoJoyTimer - 2);
+
     /* H/V timer IRQ */
     if (snes->vIrqEnabled && snes->hIrqEnabled) {
         if (snes->vPos == (snes->vTimer + 1) && snes->hPos == (4 * snes->hTimer)) {
@@ -351,7 +355,7 @@ static void handle_pos_stuff(Snes *snes) {
             snes->inVblank = true;
             snes->inNmi = true;
             if (snes->nmiEnabled) cpu->nmiWanted = true;   /* deliver NMI */
-            if (snes->autoJoyRead) snes->autoJoyTimer = 0;
+            if (snes->autoJoyRead) snes->autoJoyTimer = 4224;
         }
     } else if (snes->hPos == 1024) {
         if (!snes->inVblank) dma_cycle(snes->dma);          /* per-line HDMA */
@@ -506,6 +510,18 @@ int main(int argc, char **argv) {
         fprintf(stderr, "ref: dsp1_backend=%s\n",
                 dsp1_firmware_loaded(dsp1) ? "lle" : "hle");
     }
+    const uint8_t *representative = s_stats.video_best_brightness
+        ? s_best_video_pixels : s_video_pixels;
+    if (s_render_video && !write_ppm(frame_dump, representative)) {
+        fprintf(stderr, "ref: cannot write frame dump '%s'\n", frame_dump);
+        return 1;
+    }
+    if (s_render_video && !write_ppm(final_frame_dump, s_video_pixels)) {
+        fprintf(stderr, "ref: cannot write final frame dump '%s'\n",
+                final_frame_dump);
+        return 1;
+    }
+
     if (standalone_frames >= 120) {
         if (!s_stats.logic_changes) {
             fprintf(stderr, "ref: logic did not progress across frames\n");
@@ -521,17 +537,6 @@ int main(int argc, char **argv) {
             fprintf(stderr, "ref: rendered video stayed blank or frozen\n");
             return 1;
         }
-    }
-    const uint8_t *representative = s_stats.video_best_brightness
-        ? s_best_video_pixels : s_video_pixels;
-    if (s_render_video && !write_ppm(frame_dump, representative)) {
-        fprintf(stderr, "ref: cannot write frame dump '%s'\n", frame_dump);
-        return 1;
-    }
-    if (s_render_video && !write_ppm(final_frame_dump, s_video_pixels)) {
-        fprintf(stderr, "ref: cannot write final frame dump '%s'\n",
-                final_frame_dump);
-        return 1;
     }
     fprintf(stderr, "ref: final_pc=%02x:%04x pc_tail=",
             g_ref_cpu->k, g_ref_cpu->pc);
