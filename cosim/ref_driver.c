@@ -488,14 +488,23 @@ int main(int argc, char **argv) {
     }
 
     if (cart_has_dsp1(g_snes->cart)) {
-        if (!dsp1_firmware_loaded(g_snes->cart->dsp1)) {
-            fprintf(stderr, "ref: DSP-1 cartridge ran without firmware\n");
+        Dsp1 *dsp1 = g_snes->cart->dsp1;
+        if (!dsp1_firmware_loaded(dsp1) && !dsp1_hle_active(dsp1)) {
+            fprintf(stderr, "ref: DSP-1 cartridge has no usable backend\n");
             return 1;
         }
-        if (dsp1_instructions_executed(g_snes->cart->dsp1) == 0) {
+        if (dsp1_firmware_loaded(dsp1) &&
+            dsp1_instructions_executed(dsp1) == 0) {
             fprintf(stderr, "ref: DSP-1 firmware executed zero instructions\n");
             return 1;
         }
+        if (dsp1_hle_failed(dsp1)) {
+            fprintf(stderr, "ref: DSP-1 HLE failed on command %02x\n",
+                    dsp1_hle_failed_command(dsp1));
+            return 1;
+        }
+        fprintf(stderr, "ref: dsp1_backend=%s\n",
+                dsp1_firmware_loaded(dsp1) ? "lle" : "hle");
     }
     if (standalone_frames >= 120) {
         if (!s_stats.logic_changes) {

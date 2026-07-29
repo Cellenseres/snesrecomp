@@ -126,6 +126,7 @@ int main(void) {
   if (!d) return 1;
   fails += check(dsp1_load_firmware(d, NULL), "load DSP-1 firmware");
   fails += check(dsp1_firmware_loaded(d), "firmware reports loaded");
+  fails += check(!dsp1_hle_active(d), "loaded firmware keeps LLE active");
 
   master_clock = 100000;
   dsp1_sync(d, master_clock);
@@ -228,6 +229,7 @@ int main(void) {
   }
   fails += check(dsp1_instructions_executed(d) > 0,
                  "firmware executed instructions");
+  fails += check(!dsp1_hle_failed(d), "LLE run did not enter HLE failure");
 
   dsp1_destroy(d);
   if (fails) return 1;

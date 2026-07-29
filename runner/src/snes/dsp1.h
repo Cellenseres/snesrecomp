@@ -20,6 +20,9 @@ void dsp1_write_data_ram(Dsp1 *d, uint16_t addr, uint8_t value);
 
 int dsp1_load_firmware(Dsp1 *d, const char *rom_path);
 int dsp1_firmware_loaded(const Dsp1 *d);
+int dsp1_hle_active(const Dsp1 *d);
+int dsp1_hle_failed(const Dsp1 *d);
+uint8_t dsp1_hle_failed_command(const Dsp1 *d);
 uint64_t dsp1_instructions_executed(const Dsp1 *d);
 uint64_t dsp1_host_reads(const Dsp1 *d);
 uint64_t dsp1_host_writes(const Dsp1 *d);

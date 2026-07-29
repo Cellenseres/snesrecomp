@@ -141,12 +141,18 @@ which is **ISC-licensed**.
 
 ### Firmware (NOT included, and not ours to ship)
 
-DSP-1/DSP-1B firmware is required for the LLE core. It is Nintendo/NEC data;
-this project does not redistribute it. `dsp1_load_firmware()` searches
+DSP-1/DSP-1B firmware is used by the LLE core. It is Nintendo/NEC data; this
+project does not redistribute it. `dsp1_load_firmware()` searches
 `$SNESRECOMP_DSP1_ROM`, `./dsp1b.rom`, `./dsp1.rom`, `./dsp1.bin`,
 `./firmware/dsp1b.rom`, `./firmware/dsp1.rom`, and `./firmware/dsp1.bin`.
 Both ares-style firmware layout and common word-reversed `.bin` dumps are
 accepted.
+
+When no firmware is available, the independently derived
+`runner/src/snes/dsp1_hle.{c,h}` command model handles the firmware-verified
+SMK command set (`00`, `02`, `04`, `08`, `0a`, `0c`, `10`, `18`, `20`, and
+`80`). The runtime keeps LLE as the preferred backend and stops without
+fabricating output if HLE encounters an unverified command.
 
 ## LakeSnes — 65816 CPU core
 

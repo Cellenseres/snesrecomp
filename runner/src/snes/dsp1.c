@@ -2,12 +2,13 @@
  * Nintendo DSP-1 / NEC uPD7725 coprocessor.
  *
  * This is an instruction-level C11 port of ares' uPD96050 core restricted to
- * the uPD7725 geometry used by DSP-1/DSP-1B. The firmware is not included:
- * load an 8192-byte dump through SNESRECOMP_DSP1_ROM, ./dsp1b.rom,
- * ./dsp1.rom, ./dsp1.bin, or ./firmware/{dsp1b,dsp1}.rom.
+ * the uPD7725 geometry used by DSP-1/DSP-1B. Firmware is not included. When
+ * an external 8192-byte dump is unavailable, the verified command-level HLE
+ * model handles supported software and fails loudly on any unknown command.
  */
 
 #include "dsp1.h"
+#include "dsp1_hle.h"
 #include "saveload.h"
 
 #include <stdio.h>
@@ -41,6 +42,27 @@ typedef struct Dsp1Regs {
   Dsp1Status sr;
 } Dsp1Regs;
 
+enum {
+  kHlePhaseCommand,
+  kHlePhaseInput,
+  kHlePhaseOutput,
+  kHlePhaseFailed,
+};
+
+typedef struct Dsp1HleHost {
+  Dsp1HleState model;
+  int16_t input[7];
+  int16_t output[4];
+  uint8_t phase;
+  uint8_t command;
+  uint8_t input_words;
+  uint8_t output_words;
+  uint8_t input_byte;
+  uint8_t output_byte;
+  uint8_t output_discarded;
+  uint8_t failed_command;
+} Dsp1HleHost;
+
 struct Dsp1 {
   uint32_t programROM[kProgramWords];
   uint16_t dataROM[kDataRomWords];
@@ -48,6 +70,7 @@ struct Dsp1 {
   Dsp1Regs r;
   Dsp1Flag fa, fb;
   int firmware_ok;
+  int hle_active;
   int warned_missing;
   int in_dsp;
   uint64_t last_master;
@@ -57,6 +80,7 @@ struct Dsp1 {
   uint64_t host_reads;
   uint64_t host_writes;
   uint64_t command_count[256];
+  Dsp1HleHost hle;
 };
 
 static uint16_t u16(unsigned v) { return (uint16_t)(v & 0xffffu); }
@@ -317,6 +341,135 @@ static void dsp1_exec(Dsp1 *d) {
   d->insns++;
 }
 
+static void dsp1_hle_command_ready(Dsp1 *d) {
+  d->hle.phase = kHlePhaseCommand;
+  d->hle.command = 0;
+  d->hle.input_words = 0;
+  d->hle.output_words = 0;
+  d->hle.input_byte = 0;
+  d->hle.output_byte = 0;
+  d->hle.output_discarded = 0;
+  d->r.sr.drc = 1;
+  d->r.sr.drs = 0;
+  d->r.sr.rqm = 1;
+}
+
+static void dsp1_hle_host_reset(Dsp1 *d) {
+  memset(&d->hle, 0, sizeof(d->hle));
+  dsp1_hle_state_reset(&d->hle.model);
+  dsp1_hle_command_ready(d);
+}
+
+static void dsp1_hle_fail(Dsp1 *d, uint8_t command) {
+  d->hle.phase = kHlePhaseFailed;
+  d->hle.failed_command = command;
+  d->r.sr.drc = 1;
+  d->r.sr.drs = 0;
+  d->r.sr.rqm = 0;
+  fprintf(stderr,
+          "[dsp1] HLE stopped on unsupported or invalid command %02x; "
+          "provide DSP-1 firmware to continue\n",
+          command);
+}
+
+static int dsp1_hle_run_command(Dsp1 *d) {
+  uint8_t output_words = 0;
+  if (!dsp1_hle_execute_state(
+          &d->hle.model, d->hle.command, d->hle.input, d->hle.input_words,
+          d->hle.output, (uint8_t)(sizeof(d->hle.output) /
+                                   sizeof(d->hle.output[0])),
+          &output_words)) {
+    dsp1_hle_fail(d, d->hle.command);
+    return 0;
+  }
+  d->hle.output_words = output_words;
+  d->hle.output_byte = 0;
+  d->hle.output_discarded = 0;
+  if (!output_words) {
+    dsp1_hle_command_ready(d);
+    return 1;
+  }
+  d->hle.phase = kHlePhaseOutput;
+  d->r.sr.drc = 0;
+  d->r.sr.drs = 0;
+  d->r.sr.rqm = 1;
+  return 1;
+}
+
+static void dsp1_hle_begin_command(Dsp1 *d, uint8_t command) {
+  uint8_t input_words = 0;
+  uint8_t output_words = 0;
+  d->command_count[command]++;
+  d->hle.command = command;
+  if (!dsp1_hle_command_shape(command, &input_words, &output_words)) {
+    dsp1_hle_fail(d, command);
+    return;
+  }
+  d->hle.input_words = input_words;
+  d->hle.output_words = output_words;
+  d->hle.input_byte = 0;
+  d->hle.output_byte = 0;
+  d->hle.output_discarded = 0;
+  memset(d->hle.input, 0, sizeof(d->hle.input));
+  if (!input_words) {
+    (void)dsp1_hle_run_command(d);
+    return;
+  }
+  d->hle.phase = kHlePhaseInput;
+  d->r.sr.drc = 0;
+  d->r.sr.drs = 0;
+  d->r.sr.rqm = 1;
+}
+
+static void dsp1_hle_finish_output(Dsp1 *d) {
+  if (d->hle.command != 0x0a || d->hle.output_discarded) {
+    dsp1_hle_command_ready(d);
+    return;
+  }
+  d->hle.input[0] =
+      (int16_t)(uint16_t)((uint16_t)d->hle.input[0] + 1u);
+  (void)dsp1_hle_run_command(d);
+}
+
+static uint8_t dsp1_hle_read_data(Dsp1 *d) {
+  if (d->hle.phase != kHlePhaseOutput || !d->r.sr.rqm) return 0;
+  uint8_t byte = d->hle.output_byte;
+  uint16_t word = (uint16_t)d->hle.output[byte >> 1];
+  uint8_t value = (byte & 1) ? (uint8_t)(word >> 8) : (uint8_t)word;
+  d->hle.output_byte++;
+  d->r.sr.drs = (uint8_t)(d->hle.output_byte & 1u);
+  if (d->hle.output_byte == (uint8_t)(d->hle.output_words * 2u))
+    dsp1_hle_finish_output(d);
+  return value;
+}
+
+static void dsp1_hle_write_data(Dsp1 *d, uint8_t value) {
+  if (d->hle.phase == kHlePhaseCommand) {
+    dsp1_hle_begin_command(d, value);
+    return;
+  }
+  if (d->hle.phase == kHlePhaseInput) {
+    uint8_t byte = d->hle.input_byte;
+    uint16_t word = (uint16_t)d->hle.input[byte >> 1];
+    if (byte & 1) word = (uint16_t)((word & 0x00ffu) |
+                                    ((uint16_t)value << 8));
+    else word = (uint16_t)((word & 0xff00u) | value);
+    d->hle.input[byte >> 1] = (int16_t)word;
+    d->hle.input_byte++;
+    d->r.sr.drs = (uint8_t)(d->hle.input_byte & 1u);
+    if (d->hle.input_byte == (uint8_t)(d->hle.input_words * 2u))
+      (void)dsp1_hle_run_command(d);
+    return;
+  }
+  if (d->hle.phase == kHlePhaseOutput) {
+    d->hle.output_discarded = 1;
+    d->hle.output_byte++;
+    d->r.sr.drs = (uint8_t)(d->hle.output_byte & 1u);
+    if (d->hle.output_byte == (uint8_t)(d->hle.output_words * 2u))
+      dsp1_hle_finish_output(d);
+  }
+}
+
 Dsp1 *dsp1_create(void) {
   Dsp1 *d = (Dsp1 *)calloc(1, sizeof(Dsp1));
   if (d) dsp1_reset(d);
@@ -335,10 +488,15 @@ void dsp1_reset(Dsp1 *d) {
   d->budget = 0;
   d->frac = 0;
   d->last_master = 0;
+  if (d->hle_active) dsp1_hle_host_reset(d);
 }
 
 void dsp1_sync(Dsp1 *d, uint64_t master_clock) {
   if (!d || d->in_dsp) return;
+  if (d->hle_active) {
+    d->last_master = master_clock;
+    return;
+  }
   if (master_clock <= d->last_master) { d->last_master = master_clock; return; }
 
   uint64_t delta = master_clock - d->last_master;
@@ -376,6 +534,7 @@ uint8_t dsp1_read(Dsp1 *d, uint16_t addr) {
   if (!d) return 0;
   d->host_reads++;
   if (addr & 1) return (uint8_t)(status_pack(&d->r.sr) >> 8);
+  if (d->hle_active) return dsp1_hle_read_data(d);
   if (!d->r.sr.drc) {
     if (!d->r.sr.drs) {
       d->r.sr.drs = 1;
@@ -392,6 +551,10 @@ uint8_t dsp1_read(Dsp1 *d, uint16_t addr) {
 void dsp1_write(Dsp1 *d, uint16_t addr, uint8_t value) {
   if (!d || (addr & 1)) return;
   d->host_writes++;
+  if (d->hle_active) {
+    dsp1_hle_write_data(d, value);
+    return;
+  }
   if (d->r.sr.drc && d->r.sr.rqm)
     d->command_count[value]++;
   if (!d->r.sr.drc) {
@@ -460,6 +623,7 @@ static int dsp1_parse_firmware(Dsp1 *d, const uint8_t *buf) {
                              : (uint16_t)(p[0] | ((uint16_t)p[1] << 8));
   }
   d->firmware_ok = 1;
+  dsp1_reset(d);
   return reversed;
 }
 
@@ -484,6 +648,7 @@ static int dsp1_load_firmware_file(Dsp1 *d, const char *path) {
 int dsp1_load_firmware(Dsp1 *d, const char *rom_path) {
   if (!d) return 0;
   d->firmware_ok = 0;
+  d->hle_active = 0;
 
   const char *env = getenv("SNESRECOMP_DSP1_ROM");
   if (env && env[0] && dsp1_load_firmware_file(d, env)) return 1;
@@ -512,13 +677,22 @@ int dsp1_load_firmware(Dsp1 *d, const char *rom_path) {
     }
   }
 
+  d->hle_active = 1;
+  dsp1_reset(d);
   fprintf(stderr,
-          "[dsp1] no firmware found. Set SNESRECOMP_DSP1_ROM or place "
-          "dsp1b.rom/dsp1.rom/dsp1.bin in the working directory.\n");
+          "[dsp1] no firmware found; using firmware-free HLE. "
+          "Unverified commands stop execution and request firmware.\n");
   return 0;
 }
 
 int dsp1_firmware_loaded(const Dsp1 *d) { return d ? d->firmware_ok : 0; }
+int dsp1_hle_active(const Dsp1 *d) { return d ? d->hle_active : 0; }
+int dsp1_hle_failed(const Dsp1 *d) {
+  return d ? d->hle.phase == kHlePhaseFailed : 0;
+}
+uint8_t dsp1_hle_failed_command(const Dsp1 *d) {
+  return d ? d->hle.failed_command : 0;
+}
 uint64_t dsp1_instructions_executed(const Dsp1 *d) { return d ? d->insns : 0; }
 uint64_t dsp1_host_reads(const Dsp1 *d) { return d ? d->host_reads : 0; }
 uint64_t dsp1_host_writes(const Dsp1 *d) { return d ? d->host_writes : 0; }
@@ -534,4 +708,5 @@ void dsp1_saveload(Dsp1 *d, struct SaveLoadInfo *sli) {
   sli->func(sli, &d->fb, sizeof(d->fb));
   sli->func(sli, &d->budget, sizeof(d->budget));
   sli->func(sli, &d->frac, sizeof(d->frac));
+  sli->func(sli, &d->hle, sizeof(d->hle));
 }
