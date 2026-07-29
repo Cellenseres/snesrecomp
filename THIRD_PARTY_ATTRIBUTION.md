@@ -2,6 +2,62 @@
 
 snesrecomp incorporates the following third-party software.
 
+SNESRecomp's original code does not currently have a declared project license.
+The notices below describe only the identified third-party material and do not
+assign a license to the repository as a whole.
+
+## libretro API header
+
+`tools/snesref/libretro.h` is the libretro API header from the RetroArch team.
+It is included so the developer-only `snesref` frontend can load an emulator
+core selected by the developer at runtime.
+
+- Upstream: https://github.com/libretro/RetroArch
+- File of origin: `libretro-common/include/libretro.h`
+- License: MIT
+
+### MIT License
+
+```
+Copyright (C) 2010-2024 The RetroArch team
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+## snesref runtime dependencies (not vendored)
+
+`tools/snesref/frontend.cpp` builds against SDL2 and loads a libretro emulator
+core as a runtime DLL. These dependencies are supplied locally by developers.
+Their source and binaries are not committed, incorporated into SNESRecomp
+release archives, or linked into shipping game executables.
+
+- SDL2: zlib license, https://github.com/libsdl-org/SDL
+- bsnes libretro core: GPLv3, https://github.com/libretro/bsnes-libretro
+- Snes9x libretro core: Snes9x non-commercial license,
+  https://github.com/libretro/snes9x
+
+The `tools/snesref/.gitignore` rules exclude SDL packages and binaries,
+`snesref.exe`, and `*_libretro.dll`. A developer-only label does not waive a
+dependency's terms if someone distributes it; downstream packages must either
+comply with the selected dependency's license or continue to require developers
+to supply it separately.
+
 ## Native analyzer performance inspiration
 
 Derrick Gold's independent Go port of the snesrecomp recompiler demonstrated

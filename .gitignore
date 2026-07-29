@@ -19,6 +19,7 @@ smw_assets.dat
 
 # Save states
 saves/
+*.srm
 
 # NuGet / VS packages
 packages/

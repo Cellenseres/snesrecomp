@@ -55,7 +55,7 @@ repositories are authoritative for supported ROM regions and revisions.
 | Standard HiROM and FastROM | **Supported** | ROM and battery-backed SRAM mapping are implemented and detected automatically. |
 | Capcom Cx4 / CX4 | **Supported** | Instruction-level support for the chip used by *Mega Man X2* and *Mega Man X3*. Its internal data ROM is synthesized and does not require a separate firmware file. See [`runner/src/snes/CX4_NOTES.md`](runner/src/snes/CX4_NOTES.md). |
 | Nintendo Super FX / GSU | **Supported** | Instruction-level core and cartridge mapping are implemented. *Star Fox* is the current development validation target; other Super FX games have not yet been qualified individually. |
-| Nintendo DSP-1 / DSP-1B | **Supported** | Super Mario Kart's canonical SHVC-1K1X windows, an instruction-level NEC uPD7725 core, and a firmware-free command model for SMK's observed attract-mode command set are implemented. Supplied `dsp1b.rom`, `dsp1.rom`, and word-reversed `dsp1.bin` images always select LLE; when none is found, HLE is used and stops loudly on an unverified command. Canonical SMK passes a strict 36,000-frame native attract soak on both backends, covering commands `00`, `02`, `04`, `06`, `0a`, `0c`, `28`, and `80` with bounded command and host-traffic drift and no logic, audio, or video gate failures. A title-gated Fast HiROM mapping supports converted SMK development derivatives without broadening detection to other NEC DSP boards. |
+| Nintendo DSP-1 / DSP-1B | **Implemented; SMK qualification in progress** | Super Mario Kart's canonical SHVC-1K1X windows, an instruction-level NEC uPD7725 core, and a firmware-free command model for the firmware-verified SMK command set are implemented. Supplied `dsp1b.rom`, `dsp1.rom`, and word-reversed `dsp1.bin` images always select LLE; when none is found, HLE is used and stops loudly on an unverified command. Both backends pass unit and differential command gates. The existing 36,000-frame canonical soak remained on the title screen and therefore does not qualify gameplay, rendering, or the complete attract sequence; independent bsnes/Snes9x gameplay co-simulation is ongoing. A title-gated Fast HiROM mapping supports converted SMK development derivatives without broadening detection to other NEC DSP boards. |
 | MSU-1 | **Supported, opt-in** | The extension's registers, data channel, and PCM audio are implemented, but a game must integrate an MSU-1 driver and pack selection. See [`docs/MSU1.md`](docs/MSU1.md). |
 | ExLoROM, ExHiROM, and other custom mappings | **Not supported yet** | The current mapper layer handles standard LoROM, HiROM, Cx4, and Super FX layouts only. |
 | SA-1 | **Not supported yet** | No SA-1 CPU, memory map, or synchronization model is present. |
@@ -352,6 +352,83 @@ Useful technical references:
 - [`docs/HOST_OVERLAY_EXTRACTION.md`](docs/HOST_OVERLAY_EXTRACTION.md) —
   extracting PPU layers for host-side composition.
 
+## Reference debugging
+
+SNESRecomp has two complementary reference paths. Both are developer tools and
+are excluded from release packages and normal game builds.
+
+| Tool | Reference boundary | Best use |
+|---|---|---|
+| [`tools/snesref/`](tools/snesref/) | Loads an independently developed bsnes, Snes9x, or other libretro core at runtime. | Validate framebuffer output, audio, inputs, frame timing, and memory behavior without sharing SNESRecomp's device implementation. |
+| [`cosim/ref_driver.c`](cosim/ref_driver.c) + [`tools/snes_cosim.py`](tools/snes_cosim.py) | Runs `interp816` in a separate process against the same runner devices and exposes the same `SNES_COSIM_PORT` TCP protocol as a recompiled co-sim target. | Find the first CPU/runtime divergence with full-state and per-subsystem hashes. |
+
+Use `snesref` when the symptom could be in a shared PPU, APU, cartridge, or
+coprocessor model. Use the TCP co-simulation path to localize a difference
+between recompiled 65816 execution and interpreted execution. A clean internal
+co-sim is not proof that rendering or audio matches hardware because both sides
+intentionally share those device implementations.
+
+### Independent libretro reference
+
+Build the small SDL2 frontend, then provide an emulator core DLL and a legally
+obtained ROM at runtime:
+
+```powershell
+cd tools\snesref
+.\build.bat
+
+$env:SNESREF_FAST = "1"
+$env:SNESREF_FRAMES = "1800"
+$env:SNESREF_TRACE_FILE = "wram.jsonl"
+$env:SNESREF_WAV = "reference.wav"
+.\snesref.exe C:\cores\bsnes_libretro.dll C:\roms\game.sfc
+```
+
+For reproducible gameplay, set `SNESREF_INPUT_FILE` to a text file containing
+`start-frame:duration:hex-mask`, one event per line. The mask layout is
+`B,Y,Select,Start,Up,Down,Left,Right,A,X,L,R` from bit 0 through bit 11. Frame
+dumps are controlled by `SNESREF_FRAME_DUMP_DIR` and the optional
+`SNESREF_FRAME_DUMP_FROM`, `_TO`, and `_STEP` variables. See
+[`tools/snesref/README.md`](tools/snesref/README.md) for the complete capture
+interface.
+
+The frontend source and MIT-licensed `libretro.h` are tracked. Emulator cores,
+SDL binaries, ROMs, firmware, captures, and `snesref.exe` are not tracked or
+included in releases. In particular, bsnes is GPLv3 and Snes9x has a
+non-commercial license; developers supply either one separately.
+
+### Internal TCP co-simulation
+
+The reference-only target does not need a game checkout:
+
+```powershell
+cmake -S cosim -B build\cosim-ref -G Ninja `
+  -DSNES_COSIM_REF_ONLY=ON `
+  -DCMAKE_BUILD_TYPE=RelWithDebInfo `
+  -DCMAKE_C_COMPILER=C:/msys64/mingw64/bin/gcc.exe `
+  -DCMAKE_MAKE_PROGRAM=C:/msys64/mingw64/bin/ninja.exe
+cmake --build build\cosim-ref --target smw_cosim_ref
+
+.\build\cosim-ref\smw_cosim_ref.exe C:\roms\game.sfc `
+  --frames 1800 --final-frame-dump reference.raw
+```
+
+Despite its historical target name, `smw_cosim_ref` is the game-neutral
+interpreter side. For lockstep comparison, build the game-specific A-side
+co-sim target and let the coordinator launch both processes:
+
+```powershell
+python tools\snes_cosim.py `
+  --a-cmd "build/cosim/smw_cosim.exe C:/roms/smw.sfc" `
+  --b-cmd "build/cosim/smw_cosim_ref.exe C:/roms/smw.sfc" `
+  --stride 1 --max 3600
+```
+
+The coordinator injects separate `SNES_COSIM_PORT` values, advances both
+servers at deterministic checkpoints, and stops at the first full-state
+divergence. Run the A-vs-A, B-vs-B, fault-injection, and hash-audit gates in
+[`SNES_COSIM.md`](SNES_COSIM.md) before trusting an A-vs-B result.
+
 ## Status
 
 SNESRecomp is alpha software. Multiple games run through the same shared
@@ -397,11 +474,11 @@ reverse-engineering and emulation work:
 ## License
 
 Not yet declared. Code in this repository is original except where noted in
-[Acknowledgements](#acknowledgements). The libretro API header
-`tools/snesref/libretro.h` is MIT (RetroArch team). The `snesref` tool loads a
-libretro emulator core as a runtime library; no emulator source or binary is
-vendored here. The `runner/src/snes/` hardware core derives from LakeSnes and,
-transitively, snes9x; their respective terms apply to that code.
+[Acknowledgements](#acknowledgements) and
+[`THIRD_PARTY_ATTRIBUTION.md`](THIRD_PARTY_ATTRIBUTION.md). No license is
+asserted for the repository's original code at this time. The `snesref` tool
+loads a separately supplied libretro emulator core at runtime; no emulator core
+source or binary is vendored or released by this repository.
 
 ---
 

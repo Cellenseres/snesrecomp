@@ -2,14 +2,14 @@
  * with recomp debugging instrumentation, used as the differential oracle for
  * the recompiler. Loads a libretro SNES core, plays a ROM with reliable SDL
  * keyboard input, and logs per-frame WRAM changes (same JSON shape as the
- * recomp debug_server's wram_writes_at) to mmx_trace.jsonl.
+ * recomp debug_server's wram_writes_at) to snesref_trace.jsonl.
  *
  *   snesref.exe <core.dll> <rom.sfc>
  *
  * Keys (match the recomp keybinds): arrows=D-pad, Z=B(jump), X=A, A=Y(fire),
  *   S=X, C=L, V=R, Enter=Start, RShift=Select.
- *   F2 = save state -> mmx_state.bin    F4 = load state
- *   F5 = clear mmx_trace.jsonl (start a fresh capture)   Esc = quit
+ *   Shift+F1-F9 = save state slot       F1-F9 = load state slot
+ *   Backspace = clear the WRAM trace    Esc = quit
  */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -78,6 +78,66 @@ static FILE* g_log;
 static uint8_t g_prev[WRAM_HI - WRAM_LO + 1];
 static bool    g_primed = false;
 static uint32_t g_frame = 0;
+
+struct InputEvent {
+    uint64_t start;
+    uint64_t duration;
+    uint16_t mask;
+};
+static std::vector<InputEvent> g_input_events;
+static bool g_scripted_input = false;
+static uint16_t g_scripted_mask = 0;
+
+static bool load_input_file(const char* path) {
+    FILE* f = fopen(path, "r");
+    if (!f) {
+        fprintf(stderr, "cannot open input file %s\n", path);
+        return false;
+    }
+    char line[256];
+    unsigned line_number = 0;
+    while (fgets(line, sizeof(line), f)) {
+        line_number++;
+        char* comment = strchr(line, '#');
+        if (comment) *comment = '\0';
+        unsigned long long start = 0, duration = 0;
+        unsigned mask = 0;
+        if (sscanf(line, " %llu:%llu:%x", &start, &duration, &mask) == 3) {
+            if (!duration || mask > 0x0fffu) {
+                fprintf(stderr, "invalid input event at %s:%u\n", path, line_number);
+                fclose(f);
+                return false;
+            }
+            g_input_events.push_back({start, duration, (uint16_t)mask});
+            continue;
+        }
+        for (const char* p = line; *p; p++) {
+            if (*p != ' ' && *p != '\t' && *p != '\r' && *p != '\n') {
+                fprintf(stderr, "invalid input event at %s:%u\n", path, line_number);
+                fclose(f);
+                return false;
+            }
+        }
+    }
+    fclose(f);
+    g_scripted_input = true;
+    fprintf(stderr, "[input] loaded %zu event(s) from %s\n",
+            g_input_events.size(), path);
+    return true;
+}
+
+static void update_scripted_input() {
+    if (!g_scripted_input) return;
+    uint16_t next = 0;
+    for (const InputEvent& event : g_input_events) {
+        if (g_frame >= event.start && g_frame - event.start < event.duration)
+            next |= event.mask;
+    }
+    if (next != g_scripted_mask) {
+        fprintf(stderr, "[input] frame=%u mask=%03x\n", g_frame, next);
+        g_scripted_mask = next;
+    }
+}
 
 static const char* trace_path() {
     const char* p = getenv("SNESREF_TRACE_FILE");
@@ -312,7 +372,27 @@ static size_t cb_audio_batch(const int16_t* data, size_t frames) {
 static void  cb_input_poll(void) {}
 
 static int16_t cb_input_state(unsigned port, unsigned device, unsigned index, unsigned id) {
+    (void)index;
     if (port!=0 || device!=RETRO_DEVICE_JOYPAD) return 0;
+    if (g_scripted_input) {
+        uint16_t bit = 0;
+        switch (id) {
+            case RETRO_DEVICE_ID_JOYPAD_B:      bit=0x0001; break;
+            case RETRO_DEVICE_ID_JOYPAD_Y:      bit=0x0002; break;
+            case RETRO_DEVICE_ID_JOYPAD_SELECT: bit=0x0004; break;
+            case RETRO_DEVICE_ID_JOYPAD_START:  bit=0x0008; break;
+            case RETRO_DEVICE_ID_JOYPAD_UP:     bit=0x0010; break;
+            case RETRO_DEVICE_ID_JOYPAD_DOWN:   bit=0x0020; break;
+            case RETRO_DEVICE_ID_JOYPAD_LEFT:   bit=0x0040; break;
+            case RETRO_DEVICE_ID_JOYPAD_RIGHT:  bit=0x0080; break;
+            case RETRO_DEVICE_ID_JOYPAD_A:      bit=0x0100; break;
+            case RETRO_DEVICE_ID_JOYPAD_X:      bit=0x0200; break;
+            case RETRO_DEVICE_ID_JOYPAD_L:      bit=0x0400; break;
+            case RETRO_DEVICE_ID_JOYPAD_R:      bit=0x0800; break;
+            default: return 0;
+        }
+        return (g_scripted_mask & bit) != 0;
+    }
     const Uint8* ks = SDL_GetKeyboardState(nullptr);
     SDL_Scancode sc; SDL_GameControllerButton gb;
     switch (id) {
@@ -373,6 +453,8 @@ int main(int argc, char** argv) {
     if (argc < 3) { fprintf(stderr,"usage: snesref <core.dll> <rom.sfc>\n"); return 1; }
     const char* corePath = argv[1];
     const char* romPath  = argv[2];
+    { const char* input = getenv("SNESREF_INPUT_FILE");
+      if (input && input[0] && !load_input_file(input)) return 6; }
 
     g_core = LoadLibraryA(corePath);
     if (!g_core) { fprintf(stderr,"LoadLibrary failed: %s (err %lu)\n", corePath, GetLastError()); return 2; }
@@ -419,7 +501,8 @@ int main(int argc, char** argv) {
 
     retro_system_av_info av; memset(&av,0,sizeof av); p_retro_get_system_av_info(&av);
     int vw=(int)av.geometry.base_width, vh=(int)av.geometry.base_height;
-    if(vw<=0)vw=256; if(vh<=0)vh=224;
+    if(vw<=0)vw=256;
+    if(vh<=0)vh=224;
 
     printf("core timing: fps=%.4f sample_rate=%.2f\n", av.timing.fps, av.timing.sample_rate);
     { const char* wp = getenv("SNESREF_WAV");
@@ -428,13 +511,24 @@ int main(int argc, char** argv) {
     long quit_frames = 0;
     { const char* qf = getenv("SNESREF_QUIT_FRAMES");
       if (qf && qf[0]) quit_frames = atol(qf); }
+    const char* fast_value = getenv("SNESREF_FAST");
+    bool fast = fast_value && fast_value[0] && fast_value[0] != '0';
 
     SDL_SetMainReady();
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | SDL_INIT_JOYSTICK) != 0) { fprintf(stderr,"SDL_Init: %s\n",SDL_GetError()); return 5; }
     open_first_pad();
     g_win = SDL_CreateWindow("snesref (libretro) — Fn load / Shift+Fn save / Backspace clear-trace",
-        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, vw*2, vh*2, SDL_WINDOW_RESIZABLE);
-    g_ren = SDL_CreateRenderer(g_win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, vw*2, vh*2,
+        fast ? SDL_WINDOW_HIDDEN : SDL_WINDOW_RESIZABLE);
+    g_ren = SDL_CreateRenderer(g_win, -1,
+        fast ? SDL_RENDERER_ACCELERATED
+             : SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    if (!g_ren)
+        g_ren = SDL_CreateRenderer(g_win, -1, SDL_RENDERER_SOFTWARE);
+    if (!g_win || !g_ren) {
+        fprintf(stderr, "SDL renderer setup failed: %s\n", SDL_GetError());
+        return 5;
+    }
     SDL_RenderSetLogicalSize(g_ren, vw, vh);
 
     printf("RUN. KB: arrows=DPad Z=B(jump) X=A A=Y(fire) S=X C=L V=R Enter=Start RShift=Select\n");
@@ -461,6 +555,7 @@ int main(int argc, char** argv) {
                 }
             }
         }
+        update_scripted_input();
         p_retro_run();
         g_frame++;
         trace_tick();
@@ -477,13 +572,15 @@ int main(int argc, char** argv) {
         // input (attract/boot is self-driving), then quit. For diff captures.
         { static long fr=-2; if(fr==-2){const char*v=getenv("SNESREF_FRAMES"); fr=(v&&v[0])?atol(v):-1;}
           if(fr>0 && (long)g_frame>=fr){ if(g_log)fflush(g_log); running=false; } }
-        // 60fps cap
-        for (;;) {
-            Uint64 now=SDL_GetPerformanceCounter();
-            double el=(double)(now-prev);
-            if (el>=target) { prev=now; break; }
-            double rem_ms=(target-el)*1000.0/(double)freq;
-            if (rem_ms>1.5) SDL_Delay((Uint32)(rem_ms-1.0)); // else busy-spin
+        // 60fps cap (disabled only for deterministic offline capture).
+        if (!fast) {
+            for (;;) {
+                Uint64 now=SDL_GetPerformanceCounter();
+                double el=(double)(now-prev);
+                if (el>=target) { prev=now; break; }
+                double rem_ms=(target-el)*1000.0/(double)freq;
+                if (rem_ms>1.5) SDL_Delay((Uint32)(rem_ms-1.0)); // else busy-spin
+            }
         }
     }
     if (g_log) fflush(g_log);
