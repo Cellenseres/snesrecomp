@@ -28,6 +28,10 @@ int main(void) {
                  "second 16-bit DR write clears DRS");
   fails += check((dsp1_read(d, 0x8001) & 0x80) == 0,
                  "external DR write clears RQM");
+  fails += check(dsp1_host_reads(d) == 3,
+                 "host reads are counted");
+  fails += check(dsp1_host_writes(d) == 2,
+                 "host writes are counted");
 
   dsp1_write_data_ram(d, 0x0000, 0x78);
   dsp1_write_data_ram(d, 0x0001, 0x56);

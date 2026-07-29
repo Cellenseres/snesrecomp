@@ -182,10 +182,25 @@ int main(void) {
                    "SHVC-1K1X upper half-bank remains ROM");
     fails += check(cart_is_dsp1_window(&cart, 0x00, 0x6000),
                    "DSP-1 host-port decode");
+    fails += check(cart_dsp1_register(0x6000) == 0 &&
+                       cart_dsp1_register(0x6fff) == 0,
+                   "DSP-1 $6000-$6fff selects the data register");
+    fails += check(cart_dsp1_register(0x7000) == 1 &&
+                       cart_dsp1_register(0x7fff) == 1,
+                   "DSP-1 $7000-$7fff selects the status register");
     fails += check(cart_is_dsp1_sram_window(&cart, 0x20, 0x6000),
                    "SHVC-1K1X SRAM decode");
     fails += check(!cart_is_dsp1_window(&cart, 0x20, 0x8000),
                    "SHVC-1K1X ROM is not mistaken for a DSP port");
+
+    cart.type = CART_DSP1_HIROM;
+    fails += check(cart_getRomPtr(&cart, 0xc0, 0x1234) ==
+                       g_test_rom + 0x1234,
+                   "converted SMK DSP-1 cart uses HiROM ROM translation");
+    fails += check(cart_getRomPtr(&cart, 0x00, 0x6000) == NULL,
+                   "converted SMK keeps the DSP-1 host port");
+    fails += check(cart_getRomPtr(&cart, 0x20, 0x6000) == NULL,
+                   "converted SMK keeps the DSP-1 SRAM window");
 
     cpu_state_init(&cpu, ram);
     cpu.S = 0x01f0;

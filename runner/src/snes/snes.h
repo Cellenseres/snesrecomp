@@ -25,6 +25,11 @@ struct Snes {
   Cart* cart;
   uint16 input1_currentState;
   uint16 input2_currentState;
+  bool joypadStrobe;
+  uint8_t joypad1Index;
+  uint8_t joypad2Index;
+  uint16_t joypad1Latched;
+  uint16_t joypad2Latched;
   bool disableRender;
 
   // ram data port ($2180-$2183)

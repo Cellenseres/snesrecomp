@@ -166,8 +166,10 @@ static uint64_t fp_fnv1a(const uint8_t *p, size_t n) {
  *     resume contexts so a load can rebuild its scheduler fibers from any
  *     game mode or a fresh process. v4 files still load (no chunk).
  * v6: beamMasterLast removed from the snes_saveload region (host-only
- *     timing anchor). v5 files still load via an 8-byte compat skip. */
-#define RTL_SAV_VERSION 6u
+ *     timing anchor). v5 files still load via an 8-byte compat skip.
+ * v7: manual joypad latch/shift state appended after the existing SNES blob.
+ *     Older files initialize that transient serial state to idle. */
+#define RTL_SAV_VERSION 7u
 #define RTL_SAV_VERSION_MIN 4u
 
 typedef struct FileSli {

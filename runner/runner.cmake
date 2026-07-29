@@ -107,6 +107,7 @@ set(SNESRECOMP_RUNNER_SOURCES
     ${SNESRECOMP_RUNNER_ROOT}/src/snes/dma.c
     ${SNESRECOMP_RUNNER_ROOT}/src/snes/dsp.c
     ${SNESRECOMP_RUNNER_ROOT}/src/snes/dsp1.c
+    ${SNESRECOMP_RUNNER_ROOT}/src/snes/joypad.c
     ${SNESRECOMP_RUNNER_ROOT}/src/snes/audio_shadow.c
     ${SNESRECOMP_RUNNER_ROOT}/src/snes/dsp_shadow.c
     ${SNESRECOMP_RUNNER_ROOT}/src/snes/msu1.c

@@ -12,6 +12,7 @@
 #include "dma.h"
 #include "ppu.h"
 #include "cart.h"
+#include "joypad.h"
 #include "variables.h"
 #include "../common_rtl.h"
 #include "../debug_server.h"
@@ -60,10 +61,10 @@ void snes_free(Snes* snes) {
 
 /* RTLS v5 and earlier serialized beamMasterLast between vPos and
  * apuCatchupCycles (+8 bytes). v6+ keeps it host-only (before hPos). */
-static uint32_t s_saveload_version = 6;
+static uint32_t s_saveload_version = 7;
 
 void snes_saveload_set_version(uint32_t version) {
-  s_saveload_version = version ? version : 6;
+  s_saveload_version = version ? version : 7;
 }
 
 void snes_saveload(Snes *snes, SaveLoadInfo *sli) {
@@ -94,6 +95,17 @@ void snes_saveload(Snes *snes, SaveLoadInfo *sli) {
   }
   sli->func(sli, snes->ram, 0x20000);
   sli->func(sli, &snes->ramAdr, 4);
+  if (s_saveload_version >= 7) {
+    sli->func(sli, &snes->joypadStrobe, sizeof(snes->joypadStrobe));
+    sli->func(sli, &snes->joypad1Index, sizeof(snes->joypad1Index));
+    sli->func(sli, &snes->joypad2Index, sizeof(snes->joypad2Index));
+    sli->func(sli, &snes->joypad1Latched, sizeof(snes->joypad1Latched));
+    sli->func(sli, &snes->joypad2Latched, sizeof(snes->joypad2Latched));
+  } else {
+    snes->joypadStrobe = false;
+    snes->joypad1Index = snes->joypad2Index = 0;
+    snes->joypad1Latched = snes->joypad2Latched = 0;
+  }
 
   snes->cpu->e = 0;
 }
@@ -120,6 +132,9 @@ void snes_reset(Snes* snes, bool hard) {
   snes->inVblank = false;
   snes->autoJoyRead = false;
   snes->autoJoyTimer = 0;
+  snes->joypadStrobe = false;
+  snes->joypad1Index = snes->joypad2Index = 0;
+  snes->joypad1Latched = snes->joypad2Latched = 0;
   snes->ppuLatch = false;
   snes->multiplyA = 0xff;
   snes->multiplyResult = 0xfe01;
@@ -361,28 +376,8 @@ uint8_t snes_readReg(Snes* snes, uint16_t adr) {
       return snes->multiplyResult >> 8;
     case 0x4016:  /* JOYSER0 — manual joypad read for controller 1. */
     case 0x4017:  /* JOYSER1 — manual joypad read for controller 2. */
-      /* On real SNES, $4016/$4017 are the manual joypad-read serial
-       * shift registers. After a strobe write to $4016 (latch), 16
-       * sequential reads shift out the controller's 16-bit button
-       * state (LSB-first). After 16 reads, subsequent reads return
-       * bit 0 = 1 as the "controller present" signature for a
-       * standard pad. snes9x's S9xReadJOYSERn (controls.cpp:2917)
-       * implements this: in the no-latch state with read_idx>=16
-       * it returns `bits | 1`.
-       *
-       * Recomp's emulation core didn't handle these registers at
-       * all — the reads fell through to the default `return 0` path,
-       * which made SMW's CheckWhichControllersArePluggedIn at $00:9A74
-       * conclude "no controllers connected" and write $0DA0 = 0x00.
-       * That single byte then cascaded into ~250 downstream WRAM
-       * divergences over the attract demo, contributing to the
-       * koopa-stomp visible bug (Mario contacts the koopa from a
-       * different angle, dies instead of stomping).
-       *
-       * For correctness without full strobe-latch tracking, return
-       * 0x01 unconditionally — same effect as snes9x's post-latch
-       * read past 16 bits with a standard pad attached. */
-      return 0x01;
+      /* $4016 bit 0 latches both pads; reads shift B through R, then 1s. */
+      return joypad_read_serial(snes, adr - 0x4016);
     case 0x4218:
       return SwapInputBits(snes->input1_currentState) & 0xff;
     case 0x4219:
@@ -405,6 +400,9 @@ uint8_t snes_readReg(Snes* snes, uint16_t adr) {
 
 void snes_writeReg(Snes* snes, uint16_t adr, uint8_t val) {
   switch(adr) {
+    case 0x4016:
+      joypad_write_strobe(snes, val);
+      break;
     case 0x4200: {
       snes->autoJoyRead = val & 0x1;
       if(!snes->autoJoyRead) snes->autoJoyTimer = 0;
@@ -508,10 +506,8 @@ uint8_t snes_read(Snes* snes, uint32_t adr) {
     if(adr >= 0x2100 && adr < 0x2200) {
       return snes_readBBus(snes, adr & 0xff); // B-bus
     }
-    if (adr == 0x4016 || adr == 0x4017) {
-      // joypad read disabled
-      return 0;
-    }
+    if (adr == 0x4016 || adr == 0x4017)
+      return snes_readReg(snes, adr);
     if(adr >= 0x4200 && adr < 0x4220 || adr >= 0x4218 && adr < 0x4220) {
       return snes_readReg(snes, adr); // internal registers
     }
@@ -555,6 +551,9 @@ void snes_write(Snes* snes, uint32_t adr, uint8_t val) {
     }
     if(adr >= 0x4200 && adr < 0x4220) {
       snes_writeReg(snes, adr, val); // internal registers
+    }
+    if(adr == 0x4016) {
+      snes_writeReg(snes, adr, val); // manual joypad strobe
     }
     if(adr >= 0x4300 && adr < 0x4380) {
       dma_write(snes->dma, adr, val); // dma registers

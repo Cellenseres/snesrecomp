@@ -81,7 +81,7 @@ void cart_load(Cart* cart, int type, uint8_t* rom, int romSize, int ramSize) {
      * reports loudly on failure rather than computing on zeros. */
     (void)cx4_load_firmware(cart->cx4, NULL);
   }
-  if (type == CART_DSP1) {
+  if (type == CART_DSP1 || type == CART_DSP1_HIROM) {
     cart->dsp1 = dsp1_create();
     (void)dsp1_load_firmware(cart->dsp1, NULL);
   }
@@ -125,6 +125,15 @@ uint8_t *cart_getRomPtr(Cart *cart, uint8_t bank, uint16_t adr) {
       off = ((uint32_t)canonical << 15) | (adr & 0x7fff);
       break;
     }
+    case CART_DSP1_HIROM: {
+      if (cart_is_dsp1_window(cart, bank, adr) ||
+          (cart->ramSize > 0 && cart_is_dsp1_sram_window(cart, bank, adr)))
+        return NULL;
+      uint8_t canonical = bank & 0x7f;
+      if (adr < 0x8000 && canonical < 0x40) return NULL;
+      off = ((uint32_t)(canonical & 0x3f) << 16) | adr;
+      break;
+    }
     case CART_HIROM: {
       uint8_t canonical = bank & 0x7f;
       if (adr < 0x8000 && canonical < 0x40) return NULL;
@@ -154,12 +163,15 @@ uint8_t cart_read(Cart* cart, uint8_t bank, uint16_t adr) {
     case CART_LOROM: return cart_readLorom(cart, bank, adr);
     case CART_HIROM: return cart_readHirom(cart, bank, adr);
     case CART_DSP1:
+    case CART_DSP1_HIROM:
       cart_sync_coprocessors(cart, cart_master_clock(cart));
       if (cart_is_dsp1_window(cart, bank, adr))
-        return dsp1_read(cart->dsp1, adr & 0x0fff);
+        return dsp1_read(cart->dsp1, cart_dsp1_register(adr));
       if (cart->ramSize > 0 && cart_is_dsp1_sram_window(cart, bank, adr))
         return cart->ram[(adr & 0x1fff) & (cart->ramSize - 1)];
-      return cart_readLorom(cart, bank, adr);
+      return cart->type == CART_DSP1_HIROM
+          ? cart_readHirom(cart, bank, adr)
+          : cart_readLorom(cart, bank, adr);
     case CART_CX4:
       /* Catch the DSP up before observing it: unlike a command-level model,
        * an instruction-level Cx4 produces results as its clock advances. */
@@ -199,11 +211,14 @@ void cart_write(Cart* cart, uint8_t bank, uint16_t adr, uint8_t val) {
     case CART_LOROM: cart_writeLorom(cart, bank, adr, val); break;
     case CART_HIROM: cart_writeHirom(cart, bank, adr, val); break;
     case CART_DSP1:
+    case CART_DSP1_HIROM:
       cart_sync_coprocessors(cart, cart_master_clock(cart));
       if (cart_is_dsp1_window(cart, bank, adr))
-        dsp1_write(cart->dsp1, adr & 0x0fff, val);
+        dsp1_write(cart->dsp1, cart_dsp1_register(adr), val);
       else if (cart->ramSize > 0 && cart_is_dsp1_sram_window(cart, bank, adr))
         cart->ram[(adr & 0x1fff) & (cart->ramSize - 1)] = val;
+      else if (cart->type == CART_DSP1_HIROM)
+        cart_writeHirom(cart, bank, adr, val);
       else
         cart_writeLorom(cart, bank, adr, val);
       break;

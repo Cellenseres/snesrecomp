@@ -64,6 +64,14 @@ int main(void) {
   fails += check(loaded_ram_size == 0x800,
                  "SMK header declares 2 KiB SRAM");
 
+  make_lorom_header(rom, 0x31, 0x05);
+  fails += check(snes_loadRom(&snes, rom, sizeof rom),
+                 "title-gated SMK Fast HiROM conversion loads");
+  fails += check(loaded_type == CART_DSP1_HIROM,
+                 "SMK $31/$05 header selects HiROM DSP-1 mapping");
+  fails += check(loaded_ram_size == 0x800,
+                 "converted SMK keeps 2 KiB SRAM");
+
   loaded_type = 0;
   loaded_ram_size = -1;
   make_lorom_header(rom, 0x23, 0x00);

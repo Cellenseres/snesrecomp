@@ -54,6 +54,8 @@ struct Dsp1 {
   uint32_t frac;
   int64_t budget;
   uint64_t insns;
+  uint64_t host_reads;
+  uint64_t host_writes;
 };
 
 static uint16_t u16(unsigned v) { return (uint16_t)(v & 0xffffu); }
@@ -371,6 +373,7 @@ void dsp1_sync(Dsp1 *d, uint64_t master_clock) {
 
 uint8_t dsp1_read(Dsp1 *d, uint16_t addr) {
   if (!d) return 0;
+  d->host_reads++;
   if (addr & 1) return (uint8_t)(status_pack(&d->r.sr) >> 8);
   if (!d->r.sr.drc) {
     if (!d->r.sr.drs) {
@@ -387,6 +390,7 @@ uint8_t dsp1_read(Dsp1 *d, uint16_t addr) {
 
 void dsp1_write(Dsp1 *d, uint16_t addr, uint8_t value) {
   if (!d || (addr & 1)) return;
+  d->host_writes++;
   if (!d->r.sr.drc) {
     if (!d->r.sr.drs) {
       d->r.sr.drs = 1;
@@ -513,6 +517,8 @@ int dsp1_load_firmware(Dsp1 *d, const char *rom_path) {
 
 int dsp1_firmware_loaded(const Dsp1 *d) { return d ? d->firmware_ok : 0; }
 uint64_t dsp1_instructions_executed(const Dsp1 *d) { return d ? d->insns : 0; }
+uint64_t dsp1_host_reads(const Dsp1 *d) { return d ? d->host_reads : 0; }
+uint64_t dsp1_host_writes(const Dsp1 *d) { return d ? d->host_writes : 0; }
 
 void dsp1_saveload(Dsp1 *d, struct SaveLoadInfo *sli) {
   if (!d || !sli) return;

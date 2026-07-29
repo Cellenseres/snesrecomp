@@ -134,7 +134,9 @@ which is **ISC-licensed**.
 - SNES board mapping is wired through the existing cart layer instead of a BML
   mapper. Super Mario Kart's SHVC-1K1X-compatible windows are supported:
   DSP host port at `$00-$1F/$80-$9F:6000-$7FFF` and battery SRAM at
-  `$20-$3F/$A0-$BF:6000-$7FFF`. The uPD7725 data RAM remains internal.
+  `$20-$3F/$A0-$BF:6000-$7FFF`. The board mask reduces the host address so
+  `$6000-$6FFF` selects DR and `$7000-$7FFF` selects SR. The uPD7725 data RAM
+  remains internal.
 - The disassembler/debugger pieces were not ported.
 
 ### Firmware (NOT included, and not ours to ship)

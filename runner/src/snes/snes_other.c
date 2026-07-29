@@ -87,8 +87,16 @@ bool snes_loadRom(Snes* snes, const uint8_t* data, int length) {
   bool has_smk_dsp1_map = has_nec_dsp && headers[used].speed == 2 &&
                           headers[used].type == 0 &&
                           headers[used].chips == 3;
+  bool has_smk_title =
+      strcmp(headers[used].name, "SUPER MARIO KART     ") == 0;
+  bool has_smk_dsp1_hirom = has_nec_dsp && has_smk_title &&
+                            headers[used].speed == 3 &&
+                            headers[used].type == 1 &&
+                            headers[used].chips == 5;
   if (has_smk_dsp1_map)
     headers[used].cartType = CART_DSP1;
+  else if (has_smk_dsp1_hirom)
+    headers[used].cartType = CART_DSP1_HIROM;
   else if (has_nec_dsp) {
     printf("Failed to load rom: unsupported NEC DSP board "
            "(map=%x, cartridge type=%02x)\n",
@@ -96,7 +104,7 @@ bool snes_loadRom(Snes* snes, const uint8_t* data, int length) {
            (headers[used].coprocessor << 4) | headers[used].chips);
     return false;
   }
-  if(headers[used].cartType > CART_DSP1) {
+  if(headers[used].cartType > CART_DSP1_HIROM) {
     printf("Failed to load rom: unsupported type (%d)\n", headers[used].cartType);
     return false;
   }
@@ -138,7 +146,8 @@ bool snes_loadRom(Snes* snes, const uint8_t* data, int length) {
                                                  : 64 * 1024;
   else if (headers[used].cartType == CART_CX4)
     cart_ram_size = 0;
-  else if (headers[used].cartType == CART_DSP1)
+  else if (headers[used].cartType == CART_DSP1 ||
+           headers[used].cartType == CART_DSP1_HIROM)
     cart_ram_size = headers[used].ramSize > 1024 ? headers[used].ramSize : 0;
   else
     cart_ram_size = headers[used].chips > 0 ? headers[used].ramSize : 0;

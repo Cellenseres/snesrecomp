@@ -75,6 +75,14 @@ echo "=== DSP-1 bus/core shell ==="
     -o "$OUT/dsp1_firmware_test"
 "$OUT/dsp1_firmware_test"
 
+echo "=== manual joypad serial protocol ==="
+"$CC" -std=c11 -Wall -Wextra -Werror -O1 \
+    -I "$ROOT/runner/src" -I "$ROOT/runner/src/snes" \
+    "$ROOT/tests/joypad/manual_joypad_test.c" \
+    "$ROOT/runner/src/snes/joypad.c" \
+    -o "$OUT/manual_joypad_test"
+"$OUT/manual_joypad_test"
+
 echo "=== runtime dispatch ==="
 "$CC" -std=c11 -Wall -Wextra -ffunction-sections -fdata-sections \
     -I "$ROOT/runner/src" -I "$ROOT/runner/src/snes" \
