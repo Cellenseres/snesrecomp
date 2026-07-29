@@ -9,6 +9,15 @@ typedef struct Dsp1HleState {
   int16_t cos_aas;
   int16_t sin_azs;
   int16_t cos_azs;
+  int16_t nx;
+  int16_t ny;
+  int16_t nz;
+  int16_t gx;
+  int16_t gy;
+  int16_t gz;
+  int16_t les_coefficient;
+  int16_t les_exponent;
+  int16_t les;
   int16_t vplane_coefficient;
   int16_t vplane_exponent;
   int16_t v_offset;

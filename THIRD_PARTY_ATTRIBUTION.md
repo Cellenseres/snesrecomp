@@ -151,8 +151,9 @@ accepted.
 When no firmware is available, the independently derived
 `runner/src/snes/dsp1_hle.{c,h}` command model handles the firmware-verified
 SMK command set (`00`, `02`, `04`, `08`, `0a`, `0c`, `10`, `18`, `20`, and
-`80`). The runtime keeps LLE as the preferred backend and stops without
-fabricating output if HLE encounters an unverified command.
+`80`), including stateful projection command `06` and original-revision
+distance command `28`. The runtime keeps LLE as the preferred backend and
+stops without fabricating output if HLE encounters an unverified command.
 
 ## LakeSnes — 65816 CPU core
 

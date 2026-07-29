@@ -58,12 +58,33 @@ static void normalize(int16_t value, int16_t *coefficient, int16_t *exponent) {
   *exponent = (int16_t)(*exponent - (int16_t)shift);
 }
 
+static void normalize_double(int32_t value, int16_t *coefficient,
+                             int16_t *exponent) {
+  uint32_t bits = value < 0 ? ~(uint32_t)value : (uint32_t)value;
+  unsigned shift = 0;
+  while (shift < 30 && !(bits & (0x20000000u >> shift))) shift++;
+  *coefficient = (int16_t)((uint32_t)value << shift >> 15);
+  /* Original DSP-1 data ROM stores 0x0001 where this scale expects 0x0010. */
+  if (shift == 4) {
+    uint16_t low = (uint16_t)value & 0x7fffu;
+    *coefficient =
+        (int16_t)(*coefficient - (int16_t)(((uint32_t)low * 16u) >> 15));
+  }
+  *exponent = (int16_t)shift;
+}
+
+static int16_t shift_right(int16_t value, int16_t exponent) {
+  if (exponent <= 0) return q15_multiply(value, INT16_MAX);
+  if (exponent >= 16) return 0;
+  return (int16_t)(value >> exponent);
+}
+
 static int16_t truncate_coefficient(int16_t coefficient, int16_t exponent) {
   if (exponent > 0)
     return coefficient > 0 ? 32767 : coefficient < 0 ? -32767 : 0;
   if (exponent < 0) {
     unsigned shift = (unsigned)-exponent;
-    if (shift >= 16) return coefficient < 0 ? -1 : 0;
+    if (shift >= 16) return 0;
     return (int16_t)(coefficient >> shift);
   }
   return coefficient;
@@ -111,6 +132,33 @@ static void inverse(int16_t input_coefficient, int16_t input_exponent,
   *output_exponent = (int16_t)(1 - exponent);
 }
 
+static uint32_t integer_sqrt(uint64_t value) {
+  uint64_t bit = UINT64_C(1) << 62;
+  uint64_t result = 0;
+  while (bit > value) bit >>= 2;
+  while (bit) {
+    if (value >= result + bit) {
+      value -= result + bit;
+      result = (result >> 1) + bit;
+    } else {
+      result >>= 1;
+    }
+    bit >>= 2;
+  }
+  return (uint32_t)result;
+}
+
+static int16_t distance_node(unsigned position) {
+  /*
+   * The firmware nodes are the Q15 square roots for positions 16..64. The
+   * four-unit bias is the minimum integer quantization correction needed at
+   * the upper endpoint and avoids carrying a copied firmware lookup table.
+   */
+  uint64_t radicand =
+      (uint64_t)position * ((uint64_t)INT16_MAX * INT16_MAX + 4u);
+  return (int16_t)integer_sqrt(radicand / 64u);
+}
+
 void dsp1_hle_state_reset(Dsp1HleState *state) {
   if (!state) return;
   *state = (Dsp1HleState){0};
@@ -128,6 +176,14 @@ bool dsp1_hle_command_shape(uint8_t command, uint8_t *input_words,
     case 0x0a:
       inputs = 1;
       outputs = 4;
+      break;
+    case 0x06:
+      inputs = 3;
+      outputs = 3;
+      break;
+    case 0x28:
+      inputs = 3;
+      outputs = 1;
       break;
     case 0x00:
     case 0x20:
@@ -188,16 +244,26 @@ bool dsp1_hle_execute_state(Dsp1HleState *state, uint8_t command,
       state->sin_azs = dsp1_sin((uint16_t)input[6]);
       state->cos_azs = dsp1_cos((uint16_t)input[6]);
 
-      int16_t nx =
+      state->nx =
           q15_multiply(state->sin_azs, (int16_t)-(int32_t)state->sin_aas);
-      int16_t ny = q15_multiply(state->sin_azs, state->cos_aas);
-      int16_t nz = q15_multiply(state->cos_azs, 0x7fff);
+      state->ny = q15_multiply(state->sin_azs, state->cos_aas);
+      state->nz = q15_multiply(state->cos_azs, 0x7fff);
       int16_t center_x =
-          (int16_t)(input[0] + q15_multiply(input[3], nx));
+          (int16_t)(input[0] + q15_multiply(input[3], state->nx));
       int16_t center_y =
-          (int16_t)(input[1] + q15_multiply(input[3], ny));
+          (int16_t)(input[1] + q15_multiply(input[3], state->ny));
       int16_t center_z =
-          (int16_t)(input[2] + q15_multiply(input[3], nz));
+          (int16_t)(input[2] + q15_multiply(input[3], state->nz));
+
+      state->gx =
+          (int16_t)(center_x - q15_multiply(input[4], state->nx));
+      state->gy =
+          (int16_t)(center_y - q15_multiply(input[4], state->ny));
+      state->gz =
+          (int16_t)(center_z - q15_multiply(input[4], state->nz));
+      state->les = input[4];
+      state->les_exponent = 0;
+      normalize(input[4], &state->les_coefficient, &state->les_exponent);
 
       int16_t coefficient;
       int16_t exponent = 0;
@@ -233,6 +299,91 @@ bool dsp1_hle_execute_state(Dsp1HleState *state, uint8_t command,
       inverse(state->cos_azs, 0, &state->sec_azs_coefficient,
               &state->sec_azs_exponent);
       state->projection_valid = true;
+      break;
+    }
+    case 0x06: {
+      if (!state || !state->projection_valid) return false;
+      int16_t px, py, pz;
+      int16_t ex = 0, ey = 0, ez = 0;
+      normalize_double((int32_t)input[0] - state->gx, &px, &ex);
+      normalize_double((int32_t)input[1] - state->gy, &py, &ey);
+      normalize_double((int32_t)input[2] - state->gz, &pz, &ez);
+      px >>= 1;
+      py >>= 1;
+      pz >>= 1;
+      ex--;
+      ey--;
+      ez--;
+
+      int16_t reference_exponent = ey < ez ? ey : ez;
+      if (ex < reference_exponent) reference_exponent = ex;
+      px = shift_right(px, (int16_t)(ex - reference_exponent));
+      py = shift_right(py, (int16_t)(ey - reference_exponent));
+      pz = shift_right(pz, (int16_t)(ez - reference_exponent));
+
+      int16_t scalar = (int16_t)(
+          -(q15_multiply(px, state->nx)) -
+          q15_multiply(py, state->ny) -
+          q15_multiply(pz, state->nz));
+      int16_t denormalize_shift =
+          (int16_t)(16 - reference_exponent);
+      int64_t denormalized = scalar;
+      if (denormalize_shift >= 0)
+        denormalized *= INT64_C(1) << denormalize_shift;
+      else
+        denormalized >>= -denormalize_shift;
+      if (denormalized == -1) denormalized = 0;
+      denormalized >>= 1;
+      reference_exponent = denormalize_shift;
+
+      int32_t denominator =
+          (int32_t)(uint16_t)state->les + (int32_t)denormalized;
+      int16_t denominator_coefficient;
+      int16_t denominator_exponent;
+      normalize_double(denominator, &denominator_coefficient,
+                       &denominator_exponent);
+      denominator_exponent =
+          (int16_t)(15 - denominator_exponent);
+
+      int16_t inverse_coefficient;
+      int16_t inverse_exponent;
+      inverse(denominator_coefficient, 0, &inverse_coefficient,
+              &inverse_exponent);
+      int16_t scale =
+          q15_multiply(inverse_coefficient, state->les_coefficient);
+
+      int16_t horizontal = (int16_t)(
+          q15_multiply(px, q15_multiply(state->cos_aas, 0x7fff)) +
+          q15_multiply(py, q15_multiply(state->sin_aas, 0x7fff)));
+      int16_t coefficient = q15_multiply(horizontal, scale);
+      int16_t exponent = 0;
+      normalize(coefficient, &coefficient, &exponent);
+      output[0] = truncate_coefficient(
+          coefficient,
+          (int16_t)(state->les_exponent - denominator_exponent +
+                    reference_exponent + exponent));
+
+      int16_t vertical = (int16_t)(
+          q15_multiply(
+              px, q15_multiply(state->cos_azs,
+                               (int16_t)-(int32_t)state->sin_aas)) +
+          q15_multiply(py, q15_multiply(state->cos_azs, state->cos_aas)) +
+          q15_multiply(
+              pz, q15_multiply((int16_t)-(int32_t)state->sin_azs, 0x7fff)));
+      coefficient = q15_multiply(vertical, scale);
+      exponent = 0;
+      normalize(coefficient, &coefficient, &exponent);
+      output[1] = truncate_coefficient(
+          coefficient,
+          (int16_t)(state->les_exponent - denominator_exponent +
+                    reference_exponent + exponent));
+
+      coefficient = scale;
+      normalize(coefficient, &coefficient, &inverse_exponent);
+      output[2] = truncate_coefficient(
+          coefficient,
+          (int16_t)(inverse_exponent + state->les_exponent -
+                    denominator_exponent - 7));
       break;
     }
     case 0x0a: {
@@ -306,6 +457,32 @@ bool dsp1_hle_execute_state(Dsp1HleState *state, uint8_t command,
           (int64_t)input[0] * input[0] + (int64_t)input[1] * input[1] +
           (int64_t)input[2] * input[2] - (int64_t)input[3] * input[3];
       output[0] = (int16_t)(range >> 15);
+      break;
+    }
+    case 0x28: {
+      uint32_t radius =
+          (uint32_t)((int32_t)input[0] * input[0]) +
+          (uint32_t)((int32_t)input[1] * input[1]) +
+          (uint32_t)((int32_t)input[2] * input[2]);
+      if (!radius) {
+        output[0] = 0;
+        break;
+      }
+      int16_t coefficient;
+      int16_t exponent;
+      normalize_double((int32_t)radius, &coefficient, &exponent);
+      if (exponent & 1) coefficient = q15_multiply(coefficient, 0x4000);
+      unsigned position =
+          (unsigned)(((int32_t)coefficient * 0x40) >> 15);
+      if (position < 16 || position > 63) return false;
+      int16_t node1 = distance_node(position);
+      int16_t node2 = distance_node(position + 1);
+      int32_t interpolation =
+          ((int32_t)(node2 - node1) * (coefficient & 0x01ff)) >> 9;
+      int32_t distance = node1 + interpolation;
+      /* DSP-1 and DSP-1A apply this correction; DSP-1B removed it. */
+      if (position & 1u) distance -= node2 - node1;
+      output[0] = (int16_t)(distance >> (exponent >> 1));
       break;
     }
     case 0x80:

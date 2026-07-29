@@ -102,6 +102,16 @@ int main(void) {
                      projection_output[2] == 0x0000 &&
                      projection_output[3] == 0x14aa,
                  "SMK first raster result");
+  int16_t projected_point[3] = {0x0880, 0x27a0, 0x0000};
+  fails += check(dsp1_hle_execute_state(&state, 0x06, projected_point, 3,
+                                        projection_output, 4, &output_words) &&
+                     output_words == 3,
+                 "SMK project command is implemented");
+  int16_t distance_input[3] = {0x1000, 0x0000, 0x0000};
+  fails += check(dsp1_hle_execute(0x28, distance_input, 3, output, 2,
+                                  &output_words) &&
+                     output_words == 1 && output[0] == 0x0fff,
+                 "distance command uses firmware quantization");
   fails += check(!dsp1_hle_execute(0x02, projection, 7, projection_output, 4,
                                    &output_words),
                  "stateful projection rejects the stateless entry point");

@@ -66,6 +66,7 @@ static int compare_hle_state(Dsp1 *d, Dsp1HleState *state, uint8_t command,
   for (uint8_t i = 0; i < input_words; i++) {
     if (!write_word(d, (uint16_t)input[i])) return 0;
   }
+  int matches = 1;
   for (uint8_t i = 0; i < output_words; i++) {
     if (!read_word(d, &lle_output[i])) return 0;
     if (lle_output[i] != (uint16_t)hle_output[i]) {
@@ -77,10 +78,10 @@ static int compare_hle_state(Dsp1 *d, Dsp1HleState *state, uint8_t command,
               input_words > 2 ? (uint16_t)input[2] : 0, i, lle_output[i],
               (uint16_t)hle_output[i],
               (unsigned long long)dsp1_command_count(d, command));
-      return 0;
+      matches = 0;
     }
   }
-  return 1;
+  return matches;
 }
 
 static int compare_hle(Dsp1 *d, uint8_t command, const int16_t *input,
@@ -181,6 +182,10 @@ int main(void) {
                  "command-ready writes are counted by command ID");
   fails += check(dsp1_command_count(d, 0x40) == 0,
                  "16-bit parameter writes are not counted as commands");
+  const int16_t distance_regression[3] = {
+      0x2a8e, (int16_t)0xfd93, (int16_t)0xf633};
+  fails += check(compare_hle(d, 0x28, distance_regression, 3),
+                 "original DSP-1 distance correction matches firmware");
 
   Dsp1HleState hle_state;
   dsp1_hle_state_reset(&hle_state);
@@ -189,6 +194,14 @@ int main(void) {
         0x0880, 0x27a0, 0x0000, 0x0040, 0x0100, aas, 0x3400};
     fails += check(compare_hle_state(d, &hle_state, 0x02, projection, 7),
                    "SMK projection setup HLE matches firmware");
+    for (int16_t offset = -0x0200; offset <= 0x0200; offset += 0x0100) {
+      const int16_t point[3] = {
+          (int16_t)(projection[0] + offset),
+          (int16_t)(projection[1] - offset),
+          (int16_t)(projection[2] + offset)};
+      fails += check(compare_hle_state(d, &hle_state, 0x06, point, 3),
+                     "SMK project HLE matches firmware");
+    }
   }
 
   uint32_t random = 0x1badb002u;
@@ -208,12 +221,20 @@ int main(void) {
                    "random sin/cos HLE matches firmware");
     fails += check(compare_hle(d, 0x0c, input, 3),
                    "random 2D rotate HLE matches firmware");
+    fails += check(compare_hle_state(d, &hle_state, 0x06, input, 3),
+                   "random project HLE matches firmware");
     fails += check(compare_hle(d, 0x10, input, 2),
                    "random inverse HLE matches firmware");
     int16_t range_input[4] = {input[0], input[1], input[2],
                               (int16_t)(input[0] ^ input[2])};
     fails += check(compare_hle(d, 0x18, range_input, 4),
                    "random range HLE matches firmware");
+    int16_t distance_input[3] = {
+        (int16_t)(input[0] >> 1),
+        (int16_t)(input[1] >> 1),
+        (int16_t)(input[2] >> 1)};
+    fails += check(compare_hle(d, 0x28, distance_input, 3),
+                   "random distance HLE matches firmware");
   }
   int16_t projection[7] = {
       0x0880, 0x27a0, 0x0000, 0x0040, 0x0100, 0x0400, 0x3400};
