@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <string.h>
 
 #include "snes/snes.h"
 #include "snes/apu.h"
@@ -28,6 +29,7 @@
 #include "snes/ppu.h"
 #include "snes/dma.h"
 #include "snes/cart.h"
+#include "snes/dsp1.h"
 #include "snes/interp816.h"
 #include "types.h"
 #include "cosim.h"
@@ -43,6 +45,7 @@ uint64_t   g_ref_cycles;
 /* ── RTL glue the runner device sources call ─────────────────────────────── */
 void RtlApuLock(void)   {}
 void RtlApuUnlock(void) {}
+void rtl_sync_apu_to_cpu_locked(void) {}
 /* Accurate reference: latch the CPU->APU port immediately (hardware behaviour),
  * NOT the recomp's deferred sample-time scheduler. adr is $2140-$2143. */
 void RtlApuWrite(uint16 adr, uint8 val) { g_snes->apu->inPorts[adr & 3] = val; }
@@ -55,6 +58,7 @@ void debug_on_wram_write_word(uint32_t a, uint16_t o, uint16_t n) { (void)a;(voi
 
 /* Globals the device sources reference (normally owned by main.c / infra). */
 bool g_fail = false;
+uint8 g_snesrecomp_last_hdmaen;
 
 /* Observability / enhancement hooks the device sources call — no-ops in the ref
  * (not linking ppu_dma_trace.c / dsp_shadow.c / interp_bridge.c). */
@@ -134,7 +138,7 @@ static void handle_pos_stuff(Snes *snes) {
 }
 
 /* ── one guest frame: interp opcodes interleaved with H/V + accurate APU ─── */
-static void run_one_frame(void) {
+static bool run_one_frame(void) {
     Snes *snes = g_snes;
     Interp816 *cpu = g_ref_cpu;
     uint64_t target = s_frames + 1;
@@ -155,6 +159,7 @@ static void run_one_frame(void) {
         snes->apuCatchupCycles += (double)master * kApuCyclesPerMaster;
         snes_catchupApu(snes);
     }
+    return guard > 0;
 }
 
 static uint8_t *read_file(const char *path, uint32_t *size_out) {
@@ -171,11 +176,21 @@ static uint8_t *read_file(const char *path, uint32_t *size_out) {
 
 int main(int argc, char **argv) {
     const char *rom = (argc > 1) ? argv[1] : "smw.sfc";
+    uint64_t standalone_frames = 0;
+    for (int i = 2; i < argc; i++) {
+        if (!strcmp(argv[i], "--frames") && i + 1 < argc) {
+            standalone_frames = strtoull(argv[++i], NULL, 0);
+        } else {
+            fprintf(stderr, "usage: %s [rom] [--frames count]\n", argv[0]);
+            return 2;
+        }
+    }
     uint32_t size = 0;
     uint8_t *data = read_file(rom, &size);
     if (!data) { fprintf(stderr, "ref: cannot read ROM '%s'\n", rom); return 1; }
 
     g_snes = snes_init(g_ram);
+    cart_set_master_clock_source(g_snes->cart, &g_ref_master_cycles);
     g_ppu = g_snes->ppu;
     if (!snes_loadRom(g_snes, data, (int)size)) { fprintf(stderr, "ref: loadRom failed\n"); return 1; }
     snes_reset(g_snes, true);
@@ -185,9 +200,14 @@ int main(int argc, char **argv) {
     interp816_reset(g_ref_cpu);
 
     fprintf(stderr, "ref: interp816 + runner devices, headless attract\n");
-    cosim_init();                 /* connect the coordinator before frame 1 */
+    if (!standalone_frames)
+        cosim_init();             /* connect the coordinator before frame 1 */
     for (;;) {
-        run_one_frame();
+        if (!run_one_frame()) {
+            fprintf(stderr, "ref: opcode guard tripped at frame %llu\n",
+                    (unsigned long long)s_frames);
+            return 1;
+        }
         /* Deterministic audio consumer: drain one frame's worth so the DSP ring
          * keeps flowing (else it fills to DSP_SAMPLE_RING and all further samples
          * drop — the ref would look silent). Matches the A-side consumer rate so
@@ -202,8 +222,30 @@ int main(int argc, char **argv) {
                 want -= c;
             }
         }
-        cosim_frame();
+        if (standalone_frames) {
+            if (s_frames >= standalone_frames) break;
+        } else {
+            cosim_frame();
+        }
     }
+
+    if (g_snes->cart->type == CART_DSP1) {
+        if (!dsp1_firmware_loaded(g_snes->cart->dsp1)) {
+            fprintf(stderr, "ref: DSP-1 cartridge ran without firmware\n");
+            return 1;
+        }
+        if (dsp1_instructions_executed(g_snes->cart->dsp1) == 0) {
+            fprintf(stderr, "ref: DSP-1 firmware executed zero instructions\n");
+            return 1;
+        }
+    }
+    fprintf(stderr,
+            "ref: PASS frames=%llu master=%llu audio_samples=%u dsp1_insns=%llu\n",
+            (unsigned long long)s_frames,
+            (unsigned long long)g_ref_master_cycles,
+            g_snes->apu->dsp->sampleWrite,
+            (unsigned long long)(g_snes->cart->dsp1
+                ? dsp1_instructions_executed(g_snes->cart->dsp1) : 0));
     return 0;
 }
 

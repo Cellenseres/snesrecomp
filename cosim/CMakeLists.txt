@@ -11,6 +11,8 @@
 cmake_minimum_required(VERSION 3.16)
 project(smw_cosim C)
 set(CMAKE_C_STANDARD 11)
+option(SNES_COSIM_REF_ONLY
+    "Configure only the game-neutral interpreter reference target" OFF)
 
 # The worktree engine (this file lives in <worktree>/cosim) and the SMW game repo.
 get_filename_component(SNESRECOMP_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/.. ABSOLUTE)
@@ -23,6 +25,7 @@ set(MMX_ROOT "${SNESRECOMP_ROOT}/../MegamanXRecomp" CACHE PATH "MMX game repo (c
 set(SNES_COSIM ON CACHE BOOL "" FORCE)          # pull cosim.c/cosim_state.c + ws2_32
 include(${SNESRECOMP_ROOT}/runner/runner.cmake)
 
+if(NOT SNES_COSIM_REF_ONLY)
 file(GLOB SMW_GEN CONFIGURE_DEPENDS ${SMW_ROOT}/src/gen/*.c)
 file(GLOB SMW_OVERRIDES CONFIGURE_DEPENDS ${SMW_ROOT}/overrides/*/*.c)
 if(NOT SMW_GEN)
@@ -76,6 +79,7 @@ target_link_libraries(smw_cosim PRIVATE ${SNESRECOMP_RUNNER_LIBRARIES} m)
 if(WIN32)
     target_link_libraries(smw_cosim PRIVATE ws2_32)
 endif()
+endif()
 
 # ── Track A B-side: interp816 reference (smw_cosim_ref) ─────────────────────
 # Explicit source list = runner DEVICE sources + interp816 + cosim + a headless
@@ -94,14 +98,18 @@ add_executable(smw_cosim_ref
     ${RUNSNES}/util.c
     ${RUNSNES}/snes/apu.c
     ${RUNSNES}/snes/cart.c
+    ${RUNSNES}/snes/cx4.c
     ${RUNSNES}/snes/cpu.c
     ${RUNSNES}/snes/dma.c
     ${RUNSNES}/snes/dsp.c
+    ${RUNSNES}/snes/dsp1.c
     ${RUNSNES}/snes/ppu.c
     ${RUNSNES}/snes/ppu_legacy.c
     ${RUNSNES}/snes/snes.c
     ${RUNSNES}/snes/snes_other.c
     ${RUNSNES}/snes/spc.c
+    ${RUNSNES}/snes/superfx.c
+    ${RUNSNES}/snes/ws_shadow.c
     ${RUNSNES}/snes/interp816.c
     ${RUNSNES}/snes/color_lut.c
 )
@@ -120,6 +128,7 @@ endif()
 # runtime with NO SDL/GL/host-audio (reuses the game-neutral harness_smw.c,
 # which references the shared kSmwGameInfo / SmwSpcPlayer_Create symbols that the
 # MMX repo also defines) + the cosim engine. DEV/DIAGNOSTICS ONLY.
+if(NOT SNES_COSIM_REF_ONLY)
 file(GLOB MMX_GEN CONFIGURE_DEPENDS ${MMX_ROOT}/src/gen/*.c)
 if(NOT MMX_GEN)
     message(FATAL_ERROR "no generated banks at ${MMX_ROOT}/src/gen — regen MMX first")
@@ -260,4 +269,5 @@ endif()
 target_link_libraries(zelda_cosim PRIVATE ${SNESRECOMP_RUNNER_LIBRARIES} m)
 if(WIN32)
     target_link_libraries(zelda_cosim PRIVATE ws2_32)
+endif()
 endif()

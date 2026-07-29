@@ -161,6 +161,32 @@ int main(void) {
     fails += check(cart_getRomPtr(&cart, 0x00, 0x8000) == g_test_rom,
                    "LoROM pointer preserves historical half-bank mapping");
 
+    cart.type = CART_DSP1;
+    cart.ramSize = 0x800;
+    g_sram_size = 0x800;
+    sram[0x0123] = 0x78;
+    sram[0x0124] = 0x56;
+    fails += check(cpu_read16(&cpu, 0x20, 0x6123) == 0x5678,
+                   "SHVC-1K1X SRAM uses the $20-$3F:$6000 window");
+    fails += check(cpu_read16(&cpu, 0xa0, 0x6923) == 0x5678,
+                   "SHVC-1K1X SRAM mirrors by address and bank");
+    cart_write(&cart, 0x3f, 0x67ff, 0xa5);
+    fails += check(cart_read(&cart, 0xbf, 0x6fff) == 0xa5,
+                   "cart bus mirrors SHVC-1K1X SRAM");
+    fails += check(cart_getRomPtr(&cart, 0x00, 0x6000) == NULL,
+                   "DSP-1 host-port window is not a ROM pointer");
+    fails += check(cart_getRomPtr(&cart, 0x20, 0x6000) == NULL,
+                   "SHVC-1K1X SRAM window is not a ROM pointer");
+    fails += check(cart_getRomPtr(&cart, 0x20, 0x8000) ==
+                       g_test_rom + 0x100000,
+                   "SHVC-1K1X upper half-bank remains ROM");
+    fails += check(cart_is_dsp1_window(&cart, 0x00, 0x6000),
+                   "DSP-1 host-port decode");
+    fails += check(cart_is_dsp1_sram_window(&cart, 0x20, 0x6000),
+                   "SHVC-1K1X SRAM decode");
+    fails += check(!cart_is_dsp1_window(&cart, 0x20, 0x8000),
+                   "SHVC-1K1X ROM is not mistaken for a DSP port");
+
     cpu_state_init(&cpu, ram);
     cpu.S = 0x01f0;
     cpu.emulation = false;

@@ -218,6 +218,10 @@ static int cpu_sram_offset(uint8 bank, uint16 addr) {
         && addr < 0x8000) {
         return (int)((((bank & 0xF) << 15) | addr) & (g_sram_size - 1));
     }
+    /* Super Mario Kart's SHVC-1K1X SRAM window. */
+    if (g_snes && cart_is_dsp1_sram_window(g_snes->cart, bank, addr)) {
+        return (int)((addr & 0x1FFF) & (g_sram_size - 1));
+    }
     /* HiROM SRAM: banks $00-$3F + $80-$BF, addr $6000-$7FFF. */
     if (cart_type == CART_HIROM &&
         (bank < 0x40 || (bank >= 0x80 && bank < 0xC0))
@@ -322,6 +326,8 @@ uint8 cpu_read8(CpuState *cpu, uint8 bank, uint16 addr) {
      * through to RomPtr and trip the off-rails detector. */
     if (g_snes && cart_is_cx4_window(g_snes->cart, bank, addr))
         return cart_read(g_snes->cart, bank, addr);
+    if (g_snes && cart_is_dsp1_window(g_snes->cart, bank, addr))
+        return cart_read(g_snes->cart, bank, addr);
     int sram = cpu_sram_offset(bank, addr);
     if (sram >= 0) return g_sram[sram];
     /* ROM read. RomPtr requires the global g_rom pointer to be live. */
@@ -352,6 +358,13 @@ uint16 cpu_read16(CpuState *cpu, uint8 bank, uint16 addr) {
     if (g_snes && cart_is_cx4_window(g_snes->cart, bank, addr)) {
         uint16 hi_addr = (uint16)(addr + 1);
         uint8 hi = cart_is_cx4_window(g_snes->cart, bank, hi_addr)
+            ? cart_read(g_snes->cart, bank, hi_addr)
+            : cpu_read8(cpu, bank, hi_addr);
+        return (uint16)cart_read(g_snes->cart, bank, addr) | ((uint16)hi << 8);
+    }
+    if (g_snes && cart_is_dsp1_window(g_snes->cart, bank, addr)) {
+        uint16 hi_addr = (uint16)(addr + 1);
+        uint8 hi = cart_is_dsp1_window(g_snes->cart, bank, hi_addr)
             ? cart_read(g_snes->cart, bank, hi_addr)
             : cpu_read8(cpu, bank, hi_addr);
         return (uint16)cart_read(g_snes->cart, bank, addr) | ((uint16)hi << 8);
@@ -435,6 +448,9 @@ void cpu_write8(CpuState *cpu, uint8 bank, uint16 addr, uint8 v) {
     if (g_snes && cart_is_cx4_window(g_snes->cart, bank, addr)) {
         cart_write(g_snes->cart, bank, addr, v); return;
     }
+    if (g_snes && cart_is_dsp1_window(g_snes->cart, bank, addr)) {
+        cart_write(g_snes->cart, bank, addr, v); return;
+    }
     int sram = cpu_sram_offset(bank, addr);
     if (sram >= 0) { g_sram[sram] = v; return; }
     /* ROM / unmapped write: drop. */
@@ -510,6 +526,15 @@ void cpu_write16(CpuState *cpu, uint8 bank, uint16 addr, uint16 v) {
         cart_write(g_snes->cart, bank, addr, (uint8)v);
         uint16 hi_addr = (uint16)(addr + 1);
         if (cart_is_cx4_window(g_snes->cart, bank, hi_addr))
+            cart_write(g_snes->cart, bank, hi_addr, (uint8)(v >> 8));
+        else
+            cpu_write8(cpu, bank, hi_addr, (uint8)(v >> 8));
+        return;
+    }
+    if (g_snes && cart_is_dsp1_window(g_snes->cart, bank, addr)) {
+        cart_write(g_snes->cart, bank, addr, (uint8)v);
+        uint16 hi_addr = (uint16)(addr + 1);
+        if (cart_is_dsp1_window(g_snes->cart, bank, hi_addr))
             cart_write(g_snes->cart, bank, hi_addr, (uint8)(v >> 8));
         else
             cpu_write8(cpu, bank, hi_addr, (uint8)(v >> 8));

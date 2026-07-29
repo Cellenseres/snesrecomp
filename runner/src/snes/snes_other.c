@@ -78,7 +78,25 @@ bool snes_loadRom(Snes* snes, const uint8_t* data, int length) {
    * sub-types (SPC7110, ST010/011/018) are still unsupported. */
   if (headers[used].coprocessor == 0xf && headers[used].exCoprocessor == 0x10)
     headers[used].cartType = CART_CX4;
-  if(headers[used].cartType > CART_CX4) {
+  /* The high cartridge-type nibble identifies the NEC DSP family, not the
+   * firmware. Keep this mapper deliberately scoped to the $20/$03 signature
+   * used by Super Mario Kart's SHVC-1K1X board; DSP-2/3/4 use related header
+   * encodings but different firmware and/or maps. */
+  bool has_nec_dsp = headers[used].coprocessor == 0 &&
+                     (headers[used].chips == 3 || headers[used].chips == 5);
+  bool has_smk_dsp1_map = has_nec_dsp && headers[used].speed == 2 &&
+                          headers[used].type == 0 &&
+                          headers[used].chips == 3;
+  if (has_smk_dsp1_map)
+    headers[used].cartType = CART_DSP1;
+  else if (has_nec_dsp) {
+    printf("Failed to load rom: unsupported NEC DSP board "
+           "(map=%x, cartridge type=%02x)\n",
+           (headers[used].speed << 4) | headers[used].type,
+           (headers[used].coprocessor << 4) | headers[used].chips);
+    return false;
+  }
+  if(headers[used].cartType > CART_DSP1) {
     printf("Failed to load rom: unsupported type (%d)\n", headers[used].cartType);
     return false;
   }
@@ -120,6 +138,8 @@ bool snes_loadRom(Snes* snes, const uint8_t* data, int length) {
                                                  : 64 * 1024;
   else if (headers[used].cartType == CART_CX4)
     cart_ram_size = 0;
+  else if (headers[used].cartType == CART_DSP1)
+    cart_ram_size = headers[used].ramSize > 1024 ? headers[used].ramSize : 0;
   else
     cart_ram_size = headers[used].chips > 0 ? headers[used].ramSize : 0;
 

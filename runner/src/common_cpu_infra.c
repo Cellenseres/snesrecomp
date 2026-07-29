@@ -635,6 +635,7 @@ void WatchdogCheck(void) {
 
 Snes *SnesInit(const uint8 *data, int data_size) {
   g_snes = snes_init(g_ram);
+  cart_set_master_clock_source(g_snes->cart, &g_cpu.master_cycles);
   g_snes_cpu = g_snes->cpu;
   g_dma = g_snes->dma;
   g_ppu = g_snes->ppu;

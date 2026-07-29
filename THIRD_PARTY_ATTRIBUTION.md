@@ -107,6 +107,45 @@ ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 ```
 
+## ares — Nintendo DSP-1 / NEC uPD7725 coprocessor
+
+`runner/src/snes/dsp1.{c,h}` is an instruction-level emulation of the NEC
+uPD7725 DSP as used by Nintendo DSP-1/DSP-1B cartridges, ported from **ares**,
+which is **ISC-licensed**.
+
+- Upstream: https://github.com/ares-emulator/ares
+- Files of origin: `ares/component/processor/upd96050/*` (shared uPD7725 /
+  uPD96050 core: registers, data-register protocol, instruction decode, and
+  instruction semantics) and `ares/sfc/coprocessor/necdsp/memory.cpp`
+  (SNES-side host port behavior)
+- License: ISC (see the ares license text above)
+
+### Derivation / modifications
+
+- C++/nall bit-precise integer types were rewritten as C11 with explicit
+  masking for the uPD7725 register widths: 11-bit PC, 10-bit RP, 8-bit DP, and
+  4-bit stack pointer.
+- The uPD96050-only geometry was omitted. The runner core models the uPD7725
+  shape used by DSP-1/DSP-1B: 2048 x 24-bit program ROM, 1024 x 16-bit data
+  ROM, and 256 x 16-bit data RAM.
+- ares' scheduler-thread model is a pull model here: `dsp1_sync(master_clock)`
+  converts elapsed SNES master cycles into 7.6 MHz DSP cycles and executes the
+  firmware until the budget is spent.
+- SNES board mapping is wired through the existing cart layer instead of a BML
+  mapper. Super Mario Kart's SHVC-1K1X-compatible windows are supported:
+  DSP host port at `$00-$1F/$80-$9F:6000-$7FFF` and battery SRAM at
+  `$20-$3F/$A0-$BF:6000-$7FFF`. The uPD7725 data RAM remains internal.
+- The disassembler/debugger pieces were not ported.
+
+### Firmware (NOT included, and not ours to ship)
+
+DSP-1/DSP-1B firmware is required for the LLE core. It is Nintendo/NEC data;
+this project does not redistribute it. `dsp1_load_firmware()` searches
+`$SNESRECOMP_DSP1_ROM`, `./dsp1b.rom`, `./dsp1.rom`, `./dsp1.bin`,
+`./firmware/dsp1b.rom`, `./firmware/dsp1.rom`, and `./firmware/dsp1.bin`.
+Both ares-style firmware layout and common word-reversed `.bin` dumps are
+accepted.
+
 ## LakeSnes — 65816 CPU core
 
 `runner/src/snes/interp816.{c,h}`, the 65816 interpreter backing the

@@ -69,3 +69,8 @@ runner/src/snes/*.reference
 cx4.rom
 cx4.data.rom
 hg51bs169.data.rom
+
+# DSP-1 / DSP-1B firmware: Nintendo/NEC firmware, user-supplied. Never commit.
+dsp1.rom
+dsp1b.rom
+dsp1.bin

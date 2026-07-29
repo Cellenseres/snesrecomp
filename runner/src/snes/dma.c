@@ -221,7 +221,8 @@ void dma_doDma(Dma* dma) {
    * is usually not ROM. HiROM maps banks $C0-$FF across the full address
    * range, so sources such as DKC2's $F8:0FA6 are ordinary cartridge data. */
   if (!dma->channel[i].fromB && dma->snes && dma->snes->cart &&
-      dma->snes->cart->type == CART_LOROM &&
+      (dma->snes->cart->type == CART_LOROM ||
+       dma->snes->cart->type == CART_DSP1) &&
       (dma->channel[i].aBank & 0x80) &&
       !(dma->channel[i].aAdr & 0x8000) && !g_fail) {
     printf("Warning! DMA from addr 0x%x\n", dma->channel[i].aBank << 16 | dma->channel[i].aAdr);

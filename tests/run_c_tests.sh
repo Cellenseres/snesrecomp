@@ -17,6 +17,9 @@ echo "=== launcher ==="
     -D_POSIX_C_SOURCE=200809L -I "$ROOT/runner/src" \
     "$ROOT/tests/launcher/launcher_test.c" \
     "$ROOT/runner/src/launcher.c" \
+    "$ROOT/runner/src/launcher_cache.c" \
+    "$ROOT/runner/src/launcher_picker.c" \
+    "$ROOT/runner/src/rom_image_verify.c" \
     "$ROOT/runner/src/host_paths.c" \
     "$ROOT/runner/src/crc32.c" \
     "$ROOT/runner/src/sha256.c" \
@@ -50,6 +53,28 @@ echo "=== interpreter and bridge ==="
     -lm -o "$OUT/bridge_test"
 "$OUT/bridge_test"
 
+echo "=== DSP-1 bus/core shell ==="
+"$CC" -std=c11 -Wall -Wextra -Werror -O1 \
+    -I "$ROOT/runner/src" -I "$ROOT/runner/src/snes" \
+    "$ROOT/tests/dsp1/dsp1_header_test.c" \
+    "$ROOT/runner/src/snes/snes_other.c" \
+    -o "$OUT/dsp1_header_test"
+"$OUT/dsp1_header_test"
+
+"$CC" -std=c11 -Wall -Wextra -Werror -O1 \
+    -I "$ROOT/runner/src" -I "$ROOT/runner/src/snes" \
+    "$ROOT/tests/dsp1/dsp1_test.c" \
+    "$ROOT/runner/src/snes/dsp1.c" \
+    -o "$OUT/dsp1_test"
+"$OUT/dsp1_test"
+
+"$CC" -std=c11 -Wall -Wextra -Werror -O1 \
+    -I "$ROOT/runner/src" -I "$ROOT/runner/src/snes" \
+    "$ROOT/tests/dsp1/dsp1_firmware_test.c" \
+    "$ROOT/runner/src/snes/dsp1.c" \
+    -o "$OUT/dsp1_firmware_test"
+"$OUT/dsp1_firmware_test"
+
 echo "=== runtime dispatch ==="
 "$CC" -std=c11 -Wall -Wextra -ffunction-sections -fdata-sections \
     -I "$ROOT/runner/src" -I "$ROOT/runner/src/snes" \
@@ -57,6 +82,7 @@ echo "=== runtime dispatch ==="
     "$ROOT/runner/src/cpu_state.c" \
     "$ROOT/runner/src/snes/cart.c" \
     "$ROOT/runner/src/snes/cx4.c" \
+    "$ROOT/runner/src/snes/dsp1.c" \
     -Wl,--gc-sections -lm -o "$OUT/known_lle_entry_test"
 "$OUT/known_lle_entry_test"
 
