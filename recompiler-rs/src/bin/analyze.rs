@@ -431,6 +431,14 @@ fn target_key(site: u32, raw: u32, kind: Option<&str>, m: u8, x: u8) -> VariantK
     VariantKey::new(pc24, m, x)
 }
 
+fn has_truncated_call_continuation(graph: &FunctionDecodeGraph) -> bool {
+    graph.insns().iter().any(|decoded| {
+        matches!(decoded.insn.mnem, "JSR" | "JSL")
+            && !decoded.insn.terminal_jsr
+            && decoded.successors.is_empty()
+    })
+}
+
 fn summarize(
     key: VariantKey,
     graph: &FunctionDecodeGraph,
@@ -623,10 +631,14 @@ fn summarize(
     if unstable {
         reasons.insert("unstable_exit_fact".to_string());
     }
+    if has_truncated_call_continuation(graph) {
+        reasons.insert("truncated_call_continuation".to_string());
+    }
 
     let disposition = if reasons.contains("structural_poison")
         || reasons.contains("unproven_callee_exit")
         || reasons.contains("unstable_exit_fact")
+        || reasons.contains("truncated_call_continuation")
     {
         "lle_only"
     } else {
@@ -1291,6 +1303,7 @@ fn analyze(
         let recursive_solutions =
             solve_exit_equation_sccs(&round_equations, &active_exact, &active_sets);
         let mut recursive_solution_keys = HashSet::new();
+        let mut recursive_nonempty_solution_keys = HashSet::new();
         for (key, modes) in recursive_solutions {
             let fact_key = (key.pc24, key.m, key.x);
             if inputs.declared_exit_modes.contains_key(&fact_key)
@@ -1300,6 +1313,9 @@ fn analyze(
                 continue;
             }
             recursive_solution_keys.insert(fact_key);
+            if !modes.is_empty() {
+                recursive_nonempty_solution_keys.insert(fact_key);
+            }
             if modes.len() == 1 {
                 round_exact
                     .entry(fact_key)
@@ -1380,12 +1396,17 @@ fn analyze(
         // authoritative and are intentionally retained.
         for (node_key, node) in &nodes {
             let fact_key = (node_key.pc24, node_key.m, node_key.x);
+            let truncated = node
+                .reasons
+                .iter()
+                .any(|reason| reason == "truncated_call_continuation");
+            let unresolved = node
+                .reasons
+                .iter()
+                .any(|reason| reason == "unproven_callee_exit" || reason == "structural_poison");
             if !inputs.declared_exit_modes.contains_key(&fact_key)
-                && !recursive_solution_keys.contains(&fact_key)
-                && node
-                    .reasons
-                    .iter()
-                    .any(|reason| reason == "unproven_callee_exit" || reason == "structural_poison")
+                && ((truncated && !recursive_nonempty_solution_keys.contains(&fact_key))
+                    || (unresolved && !recursive_solution_keys.contains(&fact_key)))
             {
                 next_exact.remove(&fact_key);
                 next_sets.remove(&fact_key);
@@ -1531,6 +1552,39 @@ fn parse_root(value: &str) -> Result<VariantKey, String> {
         return Err(format!("root M/X must be 0 or 1: {value:?}"));
     }
     Ok(VariantKey::new(pc24, m, x))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nonterminal_call_leaf_is_not_aot_safe() {
+        let mut rom = vec![0u8; 0x8000];
+        rom[..4].copy_from_slice(&[0x20, 0x00, 0x90, 0x00]);
+        let exit_sets = HashMap::from([((0x009000, 1, 1), Vec::new())]);
+        let env = DecodeEnv {
+            callee_exit_mx_modes: Some(&exit_sets),
+            stop_on_unknown_callee_exit: true,
+            ..DecodeEnv::default()
+        };
+        let graph = decode_function(&rom, 0, 0x8000, 1, 1, None, &env);
+        assert!(has_truncated_call_continuation(&graph));
+    }
+
+    #[test]
+    fn declared_terminal_call_is_not_a_truncated_continuation() {
+        let mut rom = vec![0u8; 0x8000];
+        rom[..4].copy_from_slice(&[0x20, 0x00, 0x90, 0x00]);
+        let terminal_sites = BTreeSet::from([0x008000]);
+        let env = DecodeEnv {
+            terminal_jsr_sites: Some(&terminal_sites),
+            stop_on_unknown_callee_exit: true,
+            ..DecodeEnv::default()
+        };
+        let graph = decode_function(&rom, 0, 0x8000, 1, 1, None, &env);
+        assert!(!has_truncated_call_continuation(&graph));
+    }
 }
 
 fn main() {

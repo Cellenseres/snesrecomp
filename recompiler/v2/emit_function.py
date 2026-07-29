@@ -1993,6 +1993,16 @@ def emit_function(rom: bytes, bank: int, start: int,
     # Trace ring: function entry (carries name hash) — first entry per call.
     fn_entry_pc = (bank << 16) | (start & 0xFFFF)
     src.append(f'  cpu_trace_func_entry(cpu, 0x{fn_entry_pc:06X}, "{func_name}");')
+    # A profile-promoted AOT call tree can stay native across enough guest
+    # calls to cross an event-driven host's frame deadline. Yield before
+    # entering the next architectural callee so the owning interpreter can
+    # deliver NMI/IRQ without discarding the already-pushed guest return frame.
+    src.append('  if (interp_bridge_lle_master_deadline_reached(cpu)) {')
+    src.append('    RecompStackPop();')
+    src.append(
+        f'    return interp_bridge_lle_yield_unwind(cpu, 0x{fn_entry_pc:06X}u);'
+    )
+    src.append('  }')
     if has_lle_memory_poll:
         src.append('  if (interp_bridge_in_lle_scheduler()) {')
         src.append('    RecompStackPop();')
@@ -2078,6 +2088,17 @@ def emit_function(rom: bytes, bank: int, start: int,
         # Cheap (counter bump + branch); v1 emitted at loop headers, v2
         # gets it at every block since we don't yet identify back-edges.
         src.append(f'    WatchdogCheck();')
+        # Profile-guided AOT may keep the CPU inside one generated function
+        # across a frame boundary. Every CFG block starts at an architectural
+        # instruction boundary, so it is safe to unwind here and resume this
+        # exact PC through the owning interpreter after host events run.
+        src.append(
+            f'    if (interp_bridge_lle_master_deadline_reached(cpu)) {{')
+        src.append('      RecompStackPop();')
+        src.append(
+            f'      return interp_bridge_lle_yield_unwind('
+            f'cpu, 0x{block_pc24:06X}u);')
+        src.append('    }')
         # Axis-2: charge this block's static 65816 CPU cycles as one constant
         # add (recompiler/snes_cycles.py). Near-free. Runtime-only modifiers
         # (D.l/page-cross/branch-taken) are charged dynamically in block_lines.

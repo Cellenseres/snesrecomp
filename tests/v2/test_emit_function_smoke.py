@@ -162,6 +162,38 @@ def test_wai_bounce_unwind_pops_generated_diagnostic_frame():
     assert before.rstrip().endswith("RecompStackPop();"), src
 
 
+def test_function_entry_yields_when_lle_frame_deadline_is_reached():
+    """Profile-promoted call trees must remain interruptible by the host."""
+    rom = make_lorom_bank0({0x8000: bytes([0x60])})
+    src = emit_function(rom, bank=0, start=0x8000,
+                        entry_m=1, entry_x=1)
+    check = "if (interp_bridge_lle_master_deadline_reached(cpu)) {"
+    unwind = "return interp_bridge_lle_yield_unwind(cpu, 0x008000u);"
+    assert check in src, src
+    assert unwind in src, src
+    before = src[:src.index(unwind)]
+    assert before.rstrip().endswith("RecompStackPop();"), src
+
+
+def test_cfg_block_yields_at_an_architectural_resume_pc():
+    """AOT loops must not run atomically across host frame deadlines."""
+    rom = make_lorom_bank0({
+        0x8000: bytes([
+            0xB0, 0x02,  # BCS $8004
+            0xEA,        # NOP
+            0x60,        # RTS
+            0xEA,        # NOP at $8004
+            0x60,        # RTS
+        ]),
+    })
+    src = emit_function(rom, bank=0, start=0x8000,
+                        entry_m=1, entry_x=1)
+    unwind = "return interp_bridge_lle_yield_unwind(cpu, 0x008004u);"
+    assert unwind in src, src
+    before = src[:src.index(unwind)]
+    assert before.rstrip().endswith("RecompStackPop();"), src
+
+
 if __name__ == '__main__':
     import sys, traceback
     failed = 0
