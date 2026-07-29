@@ -49,8 +49,10 @@ typedef struct SnesLobbyMatchCaps {
     int  widescreen;       /* 0/1 */
     int  widescreen_hud;   /* 0/1 */
     int  ignore_aspect;    /* 0/1 */
-    int  input_delay;      /* recomp-net delay frames (0-16, default 2) */
+    int  input_delay;      /* recomp-net delay frames (2-20 typical; default 2) */
     int  ws_extra;         /* widescreen margin; 0 = game default / env force */
+    int  force_turn;       /* 0/1 — host: ICE relay-only (TURN) for all peers */
+    int  force_input_relay; /* 0/1 — lobby-server UDP input relay */
 } SnesLobbyMatchCaps;
 
 typedef struct SnesLobbyJoinInfo {
@@ -74,6 +76,8 @@ const char *snes_lobby_default_url(void);
 int  snes_lobby_connect(const char *ws_url); /* 0 ok */
 void snes_lobby_disconnect(void);
 int  snes_lobby_connected(void);
+/* Current WS URL when connected (else empty string). */
+const char *snes_lobby_url(void);
 
 void snes_lobby_set_display_name(const char *name);
 const char *snes_lobby_display_name(void);
@@ -100,7 +104,8 @@ int  snes_lobby_list_get(int index, SnesLobbyRow *out);
 int  snes_lobby_create(const char *name, const char *game_name,
                       const char *game_version, const char *password,
                       const char *host_bind,
-                      const SnesLobbyMatchCaps *match_caps);
+                      const SnesLobbyMatchCaps *match_caps,
+                      int max_slots);
 
 /* Join lobby. guest_bind may be NULL/empty/"host:0" — the client always
  * advertises a concrete UDP bind (prefers 7778..) so server-hosted launches
@@ -133,6 +138,11 @@ int  snes_lobby_set_match_caps(const SnesLobbyMatchCaps *caps);
 /* Live member table from lobby_update (and create/join). */
 int  snes_lobby_member_count(void);
 int  snes_lobby_member_get(int index, SnesLobbyMember *out);
+
+/* Waiting-room RTT to the lobby host in ms for `slot`, or -1 if unknown.
+ * Host's own seat is always -1. Guests measure via signal ping; hosts learn
+ * guest RTT from peer reports. */
+int  snes_lobby_member_latency_ms(int slot);
 
 /* True when member.player_id matches snes_lobby_host_player_id().
  * Prefer this over `slot == 0` — seats can move. */
@@ -173,6 +183,28 @@ int  snes_lobby_try_fill_launch(SnesLobbyJoinInfo *out);
  */
 int  snes_lobby_send_signal(int type, int flag, const char *text);
 int  snes_lobby_poll_signal(int *type, int *flag, char *text, size_t text_cap);
+
+/*
+ * Coturn / ICE credentials minted by the WS lobby
+ * (`get_turn_credentials` → `turn_credentials`). Valid until disconnect or TTL.
+ * Strings are stable until the next successful mint or disconnect — safe to
+ * pass into RNetIceConfig for juice_create.
+ */
+typedef struct SnesLobbyTurnCredentials {
+    int      valid; /* 1 when ok mint cached and not expired */
+    char     stun_host[128];
+    int      stun_port;
+    char     turn_host[128];
+    int      turn_port;
+    char     username[192];
+    char     password[128];
+    uint32_t ttl_secs;
+} SnesLobbyTurnCredentials;
+
+/* Queue WS get_turn_credentials. Returns 0 if sent/queued. */
+int  snes_lobby_request_turn_credentials(void);
+/* Non-NULL; valid==0 when unavailable / expired / STUN-only. */
+const SnesLobbyTurnCredentials *snes_lobby_turn_credentials(void);
 
 #ifdef __cplusplus
 }

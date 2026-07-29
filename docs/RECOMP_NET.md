@@ -78,23 +78,125 @@ strncpy(cfg.peer_hostport, launch.peer_hostport, sizeof(cfg.peer_hostport) - 1);
 snes_netplay_start(&cfg);
 
 for (;;) {
-    /* Stage exclusive local P1 (or input_player device); library maps → local_slot. */
-    if (snes_netplay_needs_local_sample())
+    /* Prefer snes_host_barrier_admit (single-shot) + pad/event hooks.
+     * On admit failure: present the held framebuffer (no RtlRunFrame /
+     * draw_ppu_frame), then wall-clock pace — do not spin without present.
+     * On admit success: RtlRunFrame + finish_frame; optionally burst up to
+     * snes_host_catchup_budget() extra sim ticks (default 0 — resume 1:1 and
+     * rebuild remote_lead toward D), then one full present.
+     *
+     * `snes_host_barrier_admit` latches delay-sync starvation after sustained
+     * admit misses, keeps `snes_netplay_pump` (retransmit) while holding,
+     * clears when `remote_lead >= D` for a few frames. Env:
+     * `SNES_NET_STARVATION_ENTER_FRAMES`, `EXIT_FRAMES`, `EXIT_HR_LEAD`,
+     * `SNES_NET_CATCHUP_CAP`, `SNES_NET_STARVATION_RECOVERY_BURST` (both
+     * default 0). Does not invent inputs. */
+    if (!snes_host_barrier_admit(from_lobby, &running, &hooks)) {
+        if (!running)
+            break;
+        PresentHeldNetplayFrame(); /* game: SDL/GL re-present last texture */
+        /* pace ~16ms; do not RtlRunFrame */
+        continue;
+    }
+    for (int burst = 0;;) {
+        RtlRunFrame(snes_netplay_published_inputs() | snes_netplay_active_mask());
+        snes_netplay_finish_frame();
+        if (burst >= snes_host_catchup_budget())
+            break;
         snes_netplay_stage_local(local_device_buttons_12bit);
-    if (!snes_netplay_poll_admit())
-        continue; /* stall until INPUT_CONFIRM hash agrees — do not RtlRunFrame */
-    RtlRunFrame(snes_netplay_published_inputs() | snes_netplay_active_mask());
-    snes_netplay_finish_frame();
+        if (!snes_netplay_poll_admit())
+            break;
+        burst++;
+    }
+    DrawPpuFrameWithPerf(); /* title-specific full present after sim */
 }
 ```
 
 Transport selection (`cfg.transport` / `SNES_NET_TRANSPORT`):
 
-- **LAN** — `rnet_session_start_lan` using lobby-rewritten bind/peer hostports.
-- **ICE** — `rnet_session_start_ice` + MotK lobby `op:signal` relay
+- **LAN** — `rnet_session_start_lan` (LAN file-registry / `SNES_NET_TRANSPORT=lan`).
+  Waiting-room **Join Direct** uses UDP seat-claim (`rnet_lan_direct_*`) to the
+  typed host IP:port so cross-subnet / port-forwarded peers can join; the file
+  registry remains for same-machine discovery.
+- **ICE** — `rnet_session_start_ice` + WS lobby `op:signal` relay
   (`snes_lobby_send_signal` / `snes_lobby_poll_signal`). Requires
   `SNESRECOMP_NET_ICE=ON` and a live lobby WebSocket (launcher keeps it across
-  Launch). Auto picks ICE when the peer hostport is not private/loopback.
+  Launch).
+
+**Auto policy:** a seated online WS lobby room **always** uses ICE — even when
+the lobby rewrites `0.0.0.0` binds to a private TCP peer IP. That rewrite is
+often wrong on hairpinned LAN paths (e.g. router `.1` instead of the peer NIC)
+and must not demote hosted play to direct UDP. Pure LAN file-registry (no WS
+seat) stays on LAN.
+
+**STUN / TURN:** `snes_netplay_start` fills `RNetIceConfig` before gather:
+
+1. Defaults: Google STUN (`stun.l.google.com:19302`).
+2. WS lobby mint: after connect, client sends `get_turn_credentials`; server
+   replies with Coturn STUN/TURN hosts + time-limited user/pass (see
+   recomp-net-server `docs/WS_LOBBY.md` / `docs/COTURN.md`). Prefer Coturn
+   STUN when present.
+3. Env overrides: `SNES_NET_TURN_HOST` / `SNES_NET_TURN_USER` /
+   `SNES_NET_TURN_PASS` (optional `SNES_NET_TURN_PORT`, `SNES_NET_STUN_HOST`,
+   `SNES_NET_STUN_PORT`).
+4. If no TURN: log **STUN-only** and continue (remote NAT may hang after a few
+   frames).
+
+ICE still ranks **host > srflx > relay** — TURN is configured up front so
+libjuice can fall back to relay when hole punch is unstable. Logs include
+selected candidates/addresses when ICE connects, and a concrete local IPv4
+bind when `rnet_ipv4_enumerate` finds one.
+
+**Auto TURN fallback** (recomp-net; no game change): if TURN credentials are
+present and ICE was not already `force_relay`, the session restarts gather
+once with relay-only candidates when:
+- ICE state becomes `FAILED`, or
+- ICE stays non-completed for ~12s (`RNET_ICE_RELAY_FALLBACK_MS`), or
+- ICE completes on a non-relay path but no session packets arrive for ~6s
+  (`RNET_ICE_RELAY_DEAD_MS`).
+
+Peer ICE restart offers also rebuild the local agent and adopt `force_relay`
+when TURN is available. Opt out: `RNET_ICE_NO_RELAY_FALLBACK=1`.
+
+**Force TURN / relay-only ICE** (hosted server lobbies; host sets for all peers):
+
+- **UI:** waiting-room **Lobby Settings** (under Input Delay) →
+  **Force TURN / UDP Relay** (off by default). Published in lobby
+  `match_caps.force_turn` so every peer applies the same ICE relay policy on
+  launch. Disabled for LAN/Direct IP.
+- **Env:** `SNES_NET_FORCE_TURN=1` still forces relay for this process
+  (debug/override; prefer the host toggle for normal play).
+- **Build (optional):** `-DSNESRECOMP_NET_FORCE_TURN=ON` forces relay for all
+  ICE sessions in that binary.
+
+Requires working Coturn mint (or `SNES_NET_TURN_*`). Refuses STUN-only ICE
+start when force-TURN is on, and filters candidates to `typ relay` at runtime
+(`RNetIceConfig.force_relay`) so host/srflx cannot short-circuit.
+
+**libjuice bundling:** with `SNESRECOMP_NET_ICE=ON`, recomp-net defaults to
+`RNET_ICE_BUNDLE_STATIC=ON` (FetchContent static juice linked into
+`recomp_net`) so Linux game binaries do not need a distro `libjuice.so`.
+
+### Netplay diagnostics (JSONL)
+
+Set `SNES_NET_DIAG=1` to write `saves/netplay/net_diag.jsonl`
+(rate: `SNES_NET_DIAG_HZ`, default 2; truncated each match). Line 1 is a
+`type:"summary"` object with match mode (`hosted_lobby` / `direct_ip`),
+lobby server URL, lobby id, input delay, TURN configured vs nominated ICE
+NAT path (`ice_nat`: `host` / `stun` / `turn` / `lan`, from `ice_path`
+`host|srflx|prflx|relay`), and selected addresses (`ice_local` /
+`ice_remote`). Later lines are timed samples: ICE path, admit stall reason
+(`wait_remote_input`, `wait_confirm`, `not_running`, …), stall wait ms,
+`frames_finished` (admitted `RtlRunFrame` count), remote ring lead, peer RX
+age, packet/input counters. Sampling runs inside `snes_netplay_poll_admit`
+(no game-side hook required). Sample field `turn` is 1 only when the
+nominated path is `relay` (not merely “TURN credentials configured”).
+
+Input bundles must cover the full delay prefix on start (`delay+1` wire
+ticks including tick 0). `RNET_MAX_BUNDLE` is 21 (max delay 20 + 1);
+`send_input_bundle` also splits across multiple INPUT packets if the
+window exceeds one packet — never truncate the low end of the window
+(that deadlocks admit at `sim_tick==0` with `wait_remote_input`).
 
 Rules that matter for SNES recomp hosts:
 
@@ -140,8 +242,12 @@ Rules that matter for SNES recomp hosts:
   widescreen for traditional split-screen local multiplayer. Lobby
   `match_caps` carry 71; the launcher hides the Widescreen toggle.
 - Lobby `match_caps` (host-authoritative): create/start carry
-  `{widescreen,widescreen_hud,ignore_aspect,input_delay,ws_extra}`; guests
-  apply on launch. See `recomp-net-server/docs/WS_LOBBY.md`.
+  `{widescreen,widescreen_hud,ignore_aspect,input_delay,ws_extra,force_turn,force_input_relay}`; guests
+  apply on launch and `fill_launch` fails closed online when caps are missing.
+  LAN/Direct IP carries `input_delay` via the file registry (`RNET_LAN_LOBBY_2`)
+  and Direct IP `START`/`CAPS` datagrams (`force_input_relay` stays 0 offline).
+  Before RUNNING, recomp-net guests adopt the host's HELLO delay (slot 0).
+  See `recomp-net-server/docs/WS_LOBBY.md`.
 - Metal Warriors soft-return rematch: `MwSessionReset()` clears the LLE resume
   latch (`s_lle_did_reset` / resume PC / `g_cpu`) before `SnesInit`. Without
   that, rematch resumes a stale WAI on a wiped chip (`nmiEn=0`, blank).
@@ -221,7 +327,10 @@ Rules that matter for SNES recomp hosts:
     guest catches up; save does not stall the sim.
   - **Guest** redirects `RtlSaveRoot()` to `saves/netplay/` so host-driven
     mirrors never overwrite personal `saves/save.srm` / `saveN.sav`. On
-    session end the sandbox is flushed and the personal root is restored.
+    session end the sandbox is flushed, `g_sram` is cleared, then personal
+    SRAM is re-read (missing file → blank cart RAM). That prevents a later
+    `RtlWriteSram()` under `saves/` from leaking host progress into offline
+    storage when the guest had no prior save file.
   - On match start the host syncs live battery SRAM so both peers share the
     same cart RAM for the session.
 
@@ -246,6 +355,74 @@ SnesLobbyJoinInfo join;
 if (!snes_lobby_try_fill_launch(&join)) return 0;
 /* copy join.bind_hostport / peer_hostport / session_id / local_slot → out */
 ```
+
+## Engine host scaffold (`snes_host_*`)
+
+Shared MotK + LAN lobby + rematch primitives live in the runner (linked by
+`snesrecomp_enable_recomp_net`). Games should **not** copy lobby callback
+tables or soft-return glue.
+
+| API | Role |
+|-----|------|
+| `snes_host_lobby_init` / `snes_host_lobby_callbacks` | MotK WS + LAN file-registry adapter for `RecompLauncherCGameInfo.netplay` |
+| `snes_host_lobby_prepare_rematch` / `snes_host_app_begin_soft_return` | Soft-return waiting-room prep |
+| `snes_host_lobby_set_runtime_error` | Waiting-room error string after a failed session |
+| `snes_host_app_apply_launch` | Map `RecompLauncherCNetplayLaunch` → `SnesNetplayConfig` |
+| `snes_host_ensure_sdl` / `snes_host_session_reset` | Rematch SDL + `RtlGameInfo.session_reset` |
+| `snes_netplay_soft_exit_to_lobby` | Escape / peer BYE → lobby |
+| `snes_host_barrier_admit` | Shared MotK admit loop (pad / SDL poll / modal remain game hooks) |
+| `snes_netplay_connect_wait_*` | Session-scoped connect-wait clock (reset on start / shutdown / soft-exit) |
+
+Minimal game wiring:
+
+```c
+SnesHostLobbyIdentity id = {
+  .game_name = "My Game",
+  .game_version = SNES_GAME_VERSION,
+  .lan_registry_path = "netplay_lan_lobby.txt",
+};
+SnesHostLobbyOpts opts = { .rematch_set_ready = 1, .fill_match_caps = MyCaps };
+snes_host_lobby_init(&id, &opts);
+gi.netplay = snes_host_lobby_callbacks();
+
+/* session_reboot: */
+snes_host_ensure_sdl();
+snes_host_session_reset(); /* → RtlGameInfo.session_reset */
+
+/* after match soft-return: */
+snes_host_app_begin_soft_return(&gi, /*set_resume_room=*/1);
+/* recomp_launcher_run_window(...); then snes_host_app_apply_launch(...) */
+```
+
+Reference consumers:
+- MetalWarriorsSNESRecomp `src/main.c` (lobby table removed)
+- SuperMarioWorldRecomp Co-op `src/smw_netplay_lobby.c` (thin identity + AutoLaunch only)
+
+### Per-game patches that stay in the title (checklist)
+
+Bump snesrecomp + recomp-ui first. Then each netplay host still needs these
+**small** game-side pieces — document new items here rather than growing
+another lobby copy:
+
+| Patch | Where | Notes |
+|-------|--------|-------|
+| `snes_host_lobby_init` identity | Game once | `game_name`, `game_version`, LAN path, `default_lobby_name` |
+| `SnesHostLobbyOpts` | Game once | `auto_ready_guests` (SMW=1), `rematch_set_ready` (MW=1 / SMW=0), `fill_match_caps` |
+| `fill_match_caps` | Game | Widescreen / `ws_extra` / delay policy (MW `ws_extra=71`; SMW forces WS off) |
+| `gi.netplay = snes_host_lobby_callbacks()` | Launcher open + soft-return | Prefer engine table; thin wrappers OK |
+| Soft-return reopen | After match | `snes_host_app_begin_soft_return(&gi, 1)` then `recomp_launcher_run_window` |
+| Rematch `session_reboot` | Host loop | `snes_host_ensure_sdl()` + `snes_host_session_reset()` |
+| `RtlGameInfo.session_reset` | CPU infra / RTL | Clear sticky LLE / frame gates / rematch latches (`MwSessionReset`, `SmwSessionReset`) |
+| Pad sample + `RtlRunFrame` gate | Host loop | Prefer `snes_host_barrier_admit` (single-shot) + pad/event hooks — stall → held present; admit → sim (+ optional `snes_host_catchup_budget`, default 0) — do not copy admit loops |
+| Connect-timeout modal | Host hook | `on_connect_timeout` only (message/UI). Clock is engine-owned — never a game `static` timer |
+| Runtime error into waiting room | Optional | `snes_host_lobby_set_runtime_error` (SMW uses this) |
+| ROM keep vs reload | Host loop | Title policy (free/`kRom` rematch path, CRC/SHA checks) |
+| Offline Play after soft-return | Host loop | `LAUNCH && !net.enabled` → disconnect + `session_reboot` |
+| Game CMake feature flag | CMake | e.g. `SMW_COOP_BUILD`, `snesrecomp_enable_recomp_net` |
+| Self-test AutoLaunch | Optional | `snes_host_lobby_auto_launch` (thin game wrapper OK) |
+
+Do **not** re-copy MotK create/join/`fill_launch` / LAN file-registry glue into
+games — that lives in `snes_host_lobby.c`.
 
 ## Layering policy (prefer engine / UI over game trees)
 
@@ -328,9 +505,14 @@ Member rows: use `snes_lobby_member_is_host(&member)` (not `slot == 0`).
 snes_netplay_soft_exit_to_lobby("peer_disconnect", /*from_lobby=*/1);
 ```
 
-Same path as Escape / `SDL_QUIT`. Do **not** show
-`SDL_ShowSimpleMessageBox` for mid-match peer loss. Keep modals for
-**connect timeouts** (firewall / ICE hints).
+Same path as Escape / `SDL_QUIT` (via `snes_host_barrier_admit` hooks).
+Do **not** show `SDL_ShowSimpleMessageBox` for mid-match peer loss. Keep
+modals for **connect timeouts** (`on_connect_timeout` only).
+
+Connect-wait time lives in `snes_netplay_connect_timed_out` and is reset on
+`snes_netplay_start` / `shutdown` / soft-exit. Games must **not** keep a
+`static` wait clock across rematch — that caused instant false
+`connect_timeout_lan` after Escape → soft-return → Play.
 
 ### 3. Re-init SDL + session_reset on rematch
 
@@ -375,7 +557,7 @@ clear `g_netplay_pending`, and `goto session_reboot`. Do **not** treat
 
 | Title | Soft-return + rematch |
 |-------|------------------------|
-| MetalWarriorsSNESRecomp | `session_reboot` + `MwSessionReset` via `RtlGameInfo` |
-| SuperMarioWorldRecomp (`SMW_COOP_BUILD`) | same pattern + `SmwSessionReset` |
+| MetalWarriorsSNESRecomp | `snes_host_lobby_*` + `session_reboot` + `MwSessionReset` |
+| SuperMarioWorldRecomp (`SMW_COOP_BUILD`) | thin `smw_netplay_lobby.c` → same helpers + `SmwSessionReset` |
 
 Also see `docs/LAUNCHER_DESIGN.md` and recomp-ui `docs/HOST_NETPLAY.md`.

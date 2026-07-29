@@ -47,6 +47,11 @@ typedef struct SnesNetplayConfig {
     /* 0 = auto (private/loopback peer → LAN, else ICE when lobby+ICE built),
      * 1 = force ICE, 2 = force LAN. Env SNES_NET_TRANSPORT=lan|ice overrides. */
     int         transport;
+    /* Host match_caps / UI: force ICE typ relay (TURN). Env SNES_NET_FORCE_TURN
+     * still overrides when set. */
+    int         force_turn;
+    /* 1 = lobby-server UDP input relay (match_caps.force_input_relay). */
+    int         force_input_relay;
 } SnesNetplayConfig;
 
 void snes_netplay_config_defaults(SnesNetplayConfig *cfg);
@@ -65,13 +70,29 @@ int  snes_netplay_active(void);
 int  snes_netplay_is_running(void);
 /* "ice", "lan", or "none"; useful for user-facing connection diagnostics. */
 const char *snes_netplay_transport_name(void);
+/* 1 when ICE transport reached FAILED (STUN/TURN path dead). */
+int  snes_netplay_ice_failed(void);
 int  snes_netplay_local_slot(void);
 /* Resolved host device index (0/1) used for local capture. */
 int  snes_netplay_input_player(void);
 uint32_t snes_netplay_sim_tick(void);
+/* Admitted RtlRunFrame + finish_frame count for this session (0 if inactive). */
+uint32_t snes_netplay_frames_finished(void);
 
 int  snes_netplay_start(const SnesNetplayConfig *cfg);
 void snes_netplay_shutdown(void);
+
+/*
+ * Connect-wait clock (session-scoped). Reset on start / shutdown so rematch
+ * after Escape / soft-return cannot inherit a stale 30s timer from a prior
+ * wait. Used by snes_host_barrier_admit; games should not keep their own.
+ *
+ * snes_netplay_connect_timed_out: while active and transport not running,
+ * starts/continues the wait; returns 1 when timeout_ms elapsed (0 disables).
+ * Clears automatically once snes_netplay_is_running() is true.
+ */
+void snes_netplay_connect_wait_reset(void);
+int  snes_netplay_connect_timed_out(uint32_t timeout_ms);
 
 /* Stage local pad bits (12 SNES buttons) for the current sim tick. */
 void snes_netplay_stage_local(uint16_t buttons);
@@ -79,6 +100,12 @@ void snes_netplay_stage_local(uint16_t buttons);
 int  snes_netplay_needs_local_sample(void);
 int  snes_netplay_input_desync(uint32_t *tick, uint32_t *local_hash, uint32_t *remote_hash);
 int  snes_netplay_peer_disconnected(uint32_t timeout_ms);
+
+/*
+ * Ingress / lobby / INPUT retransmit without try_admit. Used by the host
+ * starvation latch while waiting for remote runway to refill.
+ */
+void snes_netplay_pump(void);
 
 /*
  * Pump + try_admit. On success, published pads are ready via
@@ -89,6 +116,11 @@ int  snes_netplay_poll_admit(void);
 
 /* Call after RtlRunFrame for an admitted tick. */
 void snes_netplay_finish_frame(void);
+
+/* highest_remote_wire - sim_tick (0 if inactive; can be negative). */
+int  snes_netplay_remote_lead(void);
+/* Session input delay frames (default 2 when inactive). */
+int  snes_netplay_input_delay(void);
 
 /* Re-apply the last slot-0 game sync bytes (normally done inside poll_admit). */
 void snes_netplay_apply_host_sync(void);
@@ -115,6 +147,15 @@ void snes_netplay_clear_return_to_lobby(void);
 int  snes_netplay_is_host(void);
 int  snes_netplay_request_save(int slot);
 int  snes_netplay_request_load(int slot);
+
+/*
+ * Netplay diagnostics JSONL dump (saves/netplay/net_diag_slot{N}.jsonl).
+ * Enabled when SNES_NET_DIAG=1 (or non-empty / non-zero). Optional
+ * SNES_NET_DIAG_HZ (default 2, clamp 1..30) controls sample rate.
+ * First line is a match summary; samples follow. Safe to call every
+ * poll_admit / frame; rate-limited internally.
+ */
+void snes_netplay_diag_tick(void);
 
 #ifdef __cplusplus
 }
