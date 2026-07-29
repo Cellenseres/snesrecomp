@@ -80,10 +80,38 @@ int main(void) {
   fails += check(dsp1_hle_execute(0x80, NULL, 0, NULL, 0, &output_words) &&
                      output_words == 0,
                  "stream terminator is a supported no-op");
-  fails += check(!dsp1_hle_execute(0x02, input, 3, output, 2, &output_words),
-                 "projection command remains unavailable until verified");
+  int16_t projection[7] = {
+      0x0880, 0x27a0, 0x0000, 0x0040, 0x0100, 0x0000, 0x3400};
+  int16_t projection_output[4] = {0};
+  Dsp1HleState state;
+  dsp1_hle_state_reset(&state);
+  fails += check(dsp1_hle_execute_state(&state, 0x02, projection, 7,
+                                        projection_output, 4, &output_words),
+                 "SMK projection setup is implemented");
+  fails += check(output_words == 4 && projection_output[0] == 0x0000 &&
+                     projection_output[1] == (int16_t)0xffb2 &&
+                     projection_output[2] == 0x0880 &&
+                     projection_output[3] == 0x27a3,
+                 "SMK projection setup result");
+  int16_t raster_input = (int16_t)0xffb6;
+  fails += check(dsp1_hle_execute_state(&state, 0x0a, &raster_input, 1,
+                                        projection_output, 4, &output_words),
+                 "SMK raster command is implemented");
+  fails += check(output_words == 4 && projection_output[0] == 0x05ff &&
+                     projection_output[1] == 0x0000 &&
+                     projection_output[2] == 0x0000 &&
+                     projection_output[3] == 0x14aa,
+                 "SMK first raster result");
+  fails += check(!dsp1_hle_execute(0x02, projection, 7, projection_output, 4,
+                                   &output_words),
+                 "stateful projection rejects the stateless entry point");
   fails += check(output_words == 0,
                  "failed command clears the reported output size");
+  projection[6] = 0x3900;
+  fails += check(!dsp1_hle_execute_state(&state, 0x02, projection, 7,
+                                         projection_output, 4, &output_words) &&
+                     !state.projection_valid,
+                 "unsupported projection invalidates prior raster state");
   fails += check(!dsp1_hle_execute(0x08, input, 2, output, 2, &output_words),
                  "incorrect input size is rejected");
 

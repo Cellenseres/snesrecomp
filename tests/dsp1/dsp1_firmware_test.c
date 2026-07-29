@@ -54,13 +54,13 @@ static int read_word(Dsp1 *d, uint16_t *value) {
   return 1;
 }
 
-static int compare_hle(Dsp1 *d, uint8_t command, const int16_t *input,
-                       uint8_t input_words) {
+static int compare_hle_state(Dsp1 *d, Dsp1HleState *state, uint8_t command,
+                             const int16_t *input, uint8_t input_words) {
   int16_t hle_output[4] = {0};
   uint16_t lle_output[4] = {0};
   uint8_t output_words = 0;
-  if (!dsp1_hle_execute(command, input, input_words, hle_output, 4,
-                        &output_words) ||
+  if (!dsp1_hle_execute_state(state, command, input, input_words, hle_output,
+                              4, &output_words) ||
       !write_command(d, command))
     return 0;
   for (uint8_t i = 0; i < input_words; i++) {
@@ -77,6 +77,33 @@ static int compare_hle(Dsp1 *d, uint8_t command, const int16_t *input,
               input_words > 2 ? (uint16_t)input[2] : 0, i, lle_output[i],
               (uint16_t)hle_output[i],
               (unsigned long long)dsp1_command_count(d, command));
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int compare_hle(Dsp1 *d, uint8_t command, const int16_t *input,
+                       uint8_t input_words) {
+  return compare_hle_state(d, NULL, command, input, input_words);
+}
+
+static int compare_raster_continuation(Dsp1 *d, Dsp1HleState *state,
+                                       int16_t raster) {
+  int16_t hle_output[4] = {0};
+  uint8_t output_words = 0;
+  if (!dsp1_hle_execute_state(state, 0x0a, &raster, 1, hle_output, 4,
+                              &output_words) ||
+      output_words != 4)
+    return 0;
+  for (unsigned word = 0; word < 4; word++) {
+    uint16_t lle_output;
+    if (!read_word(d, &lle_output)) return 0;
+    if (lle_output != (uint16_t)hle_output[word]) {
+      fprintf(stderr,
+              "dsp1_hle raster mismatch: raster=%04x word=%u "
+              "lle=%04x hle=%04x\n",
+              (uint16_t)raster, word, lle_output, (uint16_t)hle_output[word]);
       return 0;
     }
   }
@@ -154,6 +181,15 @@ int main(void) {
   fails += check(dsp1_command_count(d, 0x40) == 0,
                  "16-bit parameter writes are not counted as commands");
 
+  Dsp1HleState hle_state;
+  dsp1_hle_state_reset(&hle_state);
+  for (int16_t aas = 0; aas <= 0x0400; aas += 0x0100) {
+    const int16_t projection[7] = {
+        0x0880, 0x27a0, 0x0000, 0x0040, 0x0100, aas, 0x3400};
+    fails += check(compare_hle_state(d, &hle_state, 0x02, projection, 7),
+                   "SMK projection setup HLE matches firmware");
+  }
+
   uint32_t random = 0x1badb002u;
   for (unsigned i = 0; i < 512 && !fails; i++) {
     int16_t input[3];
@@ -177,6 +213,18 @@ int main(void) {
                               (int16_t)(input[0] ^ input[2])};
     fails += check(compare_hle(d, 0x18, range_input, 4),
                    "random range HLE matches firmware");
+  }
+  int16_t projection[7] = {
+      0x0880, 0x27a0, 0x0000, 0x0040, 0x0100, 0x0400, 0x3400};
+  int16_t raster_start = (int16_t)0xffb6;
+  fails += check(compare_hle_state(d, &hle_state, 0x02, projection, 7),
+                 "final SMK projection setup HLE matches firmware");
+  fails += check(compare_hle_state(d, &hle_state, 0x0a, &raster_start, 1),
+                 "SMK first raster HLE matches firmware");
+  for (unsigned line = 1; line < 224 && !fails; line++) {
+    int16_t raster = (int16_t)(raster_start + (int16_t)line);
+    fails += check(compare_raster_continuation(d, &hle_state, raster),
+                   "SMK continuous raster HLE matches firmware");
   }
   fails += check(dsp1_instructions_executed(d) > 0,
                  "firmware executed instructions");
