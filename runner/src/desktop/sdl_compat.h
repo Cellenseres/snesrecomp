@@ -261,4 +261,43 @@ static inline const uint8_t *snesrecomp_sdl_get_keyboard_state(void) {
 #endif
 }
 
+/* SDL3 dropped the desktop/exclusive fullscreen flag split; both map to
+ * SDL_WINDOW_FULLSCREEN and SDL_SetWindowFullscreen(window, bool). */
+#if SNESRECOMP_SDL3
+#define SNESRECOMP_SDL_WINDOW_FULLSCREEN_DESKTOP SDL_WINDOW_FULLSCREEN
+#else
+#define SNESRECOMP_SDL_WINDOW_FULLSCREEN_DESKTOP SDL_WINDOW_FULLSCREEN_DESKTOP
+#endif
+
+static inline void snesrecomp_sdl_pause_audio_device(SDL_AudioDeviceID id,
+                                                    bool pause) {
+#if SNESRECOMP_SDL3
+  if (pause)
+    SDL_PauseAudioDevice(id);
+  else
+    SDL_ResumeAudioDevice(id);
+#else
+  SDL_PauseAudioDevice(id, pause ? 1 : 0);
+#endif
+}
+
+/* volume_0_128 matches the historical SDL2 mixer scale (max 128). */
+static inline void snesrecomp_sdl_mix_audio(Uint8 *dst, const Uint8 *src,
+                                           int len, int volume_0_128) {
+#if SNESRECOMP_SDL3
+  SDL_MixAudio(dst, src, SDL_AUDIO_S16, (Uint32)len,
+               (float)volume_0_128 / (float)SNESRECOMP_SDL_MIX_MAXVOLUME);
+#else
+  SDL_MixAudioFormat(dst, src, AUDIO_S16, len, volume_0_128);
+#endif
+}
+
+static inline void snesrecomp_sdl_fill_rect(SDL_Renderer *renderer) {
+#if SNESRECOMP_SDL3
+  SDL_RenderFillRect(renderer, NULL);
+#else
+  SDL_RenderFillRect(renderer, NULL);
+#endif
+}
+
 #endif

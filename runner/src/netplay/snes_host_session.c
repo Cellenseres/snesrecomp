@@ -3,17 +3,16 @@
 #include <stdio.h>
 
 #include "common_cpu_infra.h"
+#include "desktop/sdl_compat.h"
 #include "snes_netplay.h"
-
-#include <SDL.h>
 
 int snes_host_ensure_sdl(void)
 {
     if (SDL_WasInit(SDL_INIT_VIDEO) && SDL_WasInit(SDL_INIT_AUDIO) &&
         SDL_WasInit(SDL_INIT_GAMECONTROLLER))
         return 0;
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) !=
-        0) {
+    if (!snesrecomp_sdl_init(SDL_INIT_VIDEO | SDL_INIT_AUDIO |
+                             SDL_INIT_GAMECONTROLLER)) {
         fprintf(stderr, "snes_host: SDL_Init (session) FAILED: %s\n",
                 SDL_GetError());
         return -1;

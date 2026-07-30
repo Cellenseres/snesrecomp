@@ -16,7 +16,7 @@
 #if defined(SNES_HAS_LOBBY_CLIENT)
 #include "snes_lobby_client.h"
 #endif
-#include <SDL.h>
+#include "desktop/sdl_compat.h"
 #endif
 
 void snes_netplay_config_defaults(SnesNetplayConfig *cfg)

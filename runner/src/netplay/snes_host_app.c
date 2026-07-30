@@ -4,7 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <SDL.h>
+#include "desktop/sdl_compat.h"
 
 #if defined(RECOMP_LAUNCHER) || defined(SNES_HOST_HAS_RECOMP_UI)
 
