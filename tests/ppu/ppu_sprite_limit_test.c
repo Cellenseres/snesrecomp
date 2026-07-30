@@ -9,11 +9,6 @@
 
 Snes *g_snes;
 
-void ppu_draw_whole_line_legacy(Ppu *ppu, int line) {
-    (void)ppu;
-    (void)line;
-}
-
 uint16_t WsShadowTile(int layer, int screen_x, uint32_t wrapped_y,
                       uint16_t real_tile) {
     (void)layer;
@@ -147,6 +142,49 @@ int main(void) {
         failures += check(wide_pixels[kExtra + 16] != 0 &&
                               wide_pixels[kExtra + 239] != 0,
                           "explicit BG1 viewport inset retains visible span");
+    }
+
+    /* The parity renderer is also SMK's widescreen Mode 7 path. Live margins
+     * must sample real map coordinates, while centered extra space remains
+     * an exact native-width presentation for menus. */
+    {
+        enum { kExtra = 8, kWidePixels = kPpuXPixels + kExtra * 2 };
+        uint32_t wide_pixels[kWidePixels];
+
+        ppu_reset(ppu);
+        memset(wide_pixels, 0, sizeof wide_pixels);
+        PpuBeginDrawing(ppu, (uint8_t *)wide_pixels,
+                        sizeof(uint32_t) * kWidePixels, 0);
+        PpuSetExtraSpace(ppu, kExtra);
+        ppu->inidisp = 0x0f;
+        ppu->bgmode = 7;
+        ppu->screenEnabled[0] = 1;
+        ppu->m7matrix[0] = 0x0100;
+        ppu->m7matrix[3] = 0x0100;
+        for (size_t i = 0; i < sizeof ppu->vram / sizeof ppu->vram[0]; i++)
+            ppu->vram[i] = 0x0101;
+        ppu->cgram[1] = 0x7fff;
+
+        ppu_runLine(ppu, 0);
+        ppu_runLine(ppu, 1);
+        failures += check(wide_pixels[0] != 0 &&
+                              wide_pixels[kExtra - 1] != 0 &&
+                              wide_pixels[kExtra + kPpuXPixels] != 0 &&
+                              wide_pixels[kWidePixels - 1] != 0,
+                          "legacy Mode 7 renders live side margins");
+
+        memset(wide_pixels, 0, sizeof wide_pixels);
+        PpuSetExtraSpaceCentered(ppu, kExtra);
+        ppu_runLine(ppu, 0);
+        ppu_runLine(ppu, 1);
+        failures += check(wide_pixels[0] == 0 &&
+                              wide_pixels[kExtra - 1] == 0 &&
+                              wide_pixels[kExtra + kPpuXPixels] == 0 &&
+                              wide_pixels[kWidePixels - 1] == 0,
+                          "legacy Mode 7 preserves centered margins");
+        failures += check(wide_pixels[kExtra] != 0 &&
+                              wide_pixels[kExtra + kPpuXPixels - 1] != 0,
+                          "legacy Mode 7 retains centered native columns");
     }
 
     ppu_free(ppu);

@@ -67,7 +67,9 @@ void ppu_draw_whole_line_legacy(Ppu *ppu, int line) {
   // actual line
   if (PPU_mode(ppu) == 7)
     ppu_prepare_mode7(ppu, line);
-  for (int x = 0; x < 256; x++) {
+  int left = -ppu->extraLeftCur;
+  int right = 256 + ppu->extraRightCur;
+  for (int x = left; x < right; x++) {
     ppu_render_pixel(ppu, x, line);
   }
 }
@@ -333,7 +335,7 @@ static void ppu_prepare_mode7(Ppu *ppu, int y) {
 }
 
 static int ppu_sample_mode7(Ppu *ppu, int x, int layer, bool priority) {
-  uint8_t rx = PPU_m7xFlip(ppu) ? 255 - x : x;
+  int rx = PPU_m7xFlip(ppu) ? 255 - x : x;
   int xPos = (ppu->m7startX + ppu->m7matrix[0] * rx) >> 8;
   int yPos = (ppu->m7startY + ppu->m7matrix[2] * rx) >> 8;
   bool outsideMap = xPos < 0 || xPos >= 1024 || yPos < 0 || yPos >= 1024;

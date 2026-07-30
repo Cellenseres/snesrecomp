@@ -8,6 +8,7 @@ $args = @(
     "-I$root\runner\src", "-I$root\runner\src\snes",
     "$root\tests\ppu\ppu_sprite_limit_test.c",
     "$root\runner\src\snes\ppu.c",
+    "$root\runner\src\snes\ppu_legacy.c",
     "-o", $out
 )
 
