@@ -319,6 +319,11 @@ static uint64_t s_lle_master_deadline = 0;
  * owning interpreter's guest call chain. */
 static int      s_interp_bridge_depth = 0;
 static int      s_interp_bounce_owner_depth = 0;
+/* Architectural stack boundary of the currently active interpreter frame.
+ * A rewritten AOT return that has already popped above this boundary belongs
+ * to a compiled ancestor, not to this interpreter's guest call chain. */
+static uint16_t s_interp_owner_exit_s = 0;
+static int      s_interp_owner_exit_valid = 0;
 /* Recomp-stack depth immediately before any interpreter frame bounces into a
  * paired AOT root. A rewritten return in that root belongs directly to the
  * interpreter; one reached below that root belongs to a compiled ancestor
@@ -611,17 +616,27 @@ static int _interp_run_core(CpuState *cpu, uint32_t entry_pc24,
 
     /* Focused bridge trace: SNESRECOMP_IBRWATCH="lo-hi" (hex pc24). When the
      * bridge entry_pc24 is in range, log every call/ret with sp + the AOT-bounce
-     * return value, to localize a tail-dispatch over-pop step by step. */
+     * return value, to localize a tail-dispatch over-pop step by step.
+     * SNESRECOMP_IBRWATCH_FRAME optionally restricts it to one host frame. */
     int _ibrw = 0;
     {
-        static int _iw_init = 0; static long _iw_lo = -1, _iw_hi = -1;
+        extern int snes_frame_counter;
+        static int _iw_init = 0;
+        static long _iw_lo = -1, _iw_hi = -1, _iw_frame = -1;
         if (!_iw_init) { _iw_init = 1;
             const char *_e = getenv("SNESRECOMP_IBRWATCH");
-            if (_e) sscanf(_e, "%lx-%lx", &_iw_lo, &_iw_hi); }
-        if (_iw_lo >= 0 && (long)entry_pc24 >= _iw_lo && (long)entry_pc24 <= _iw_hi) {
+            const char *_f = getenv("SNESRECOMP_IBRWATCH_FRAME");
+            if (_e) sscanf(_e, "%lx-%lx", &_iw_lo, &_iw_hi);
+            if (_f && *_f) _iw_frame = strtol(_f, NULL, 0);
+        }
+        if (_iw_lo >= 0 && (long)entry_pc24 >= _iw_lo &&
+            (long)entry_pc24 <= _iw_hi &&
+            (_iw_frame < 0 || snes_frame_counter == _iw_frame)) {
             _ibrw = 1;
-            fprintf(stderr, "[ibr] ENTER pc=$%06X s_exit=$%04X cpu->S=$%04X\n",
-                    (unsigned)entry_pc24, (unsigned)s_exit, (unsigned)cpu->S);
+            fprintf(stderr,
+                    "[ibr] ENTER frame=%d pc=$%06X s_exit=$%04X cpu->S=$%04X\n",
+                    snes_frame_counter, (unsigned)entry_pc24,
+                    (unsigned)s_exit, (unsigned)cpu->S);
         }
     }
 
@@ -1249,6 +1264,13 @@ static int _interp_run_core(CpuState *cpu, uint32_t entry_pc24,
                         }
                     }
                     sync_interp_to_cpu(&in, cpu);
+                    /* A nested non-scheduler tier run belongs to a compiled
+                     * caller. Preserve SKIP_N so that caller can unwind the
+                     * host frame whose guest epilogue was already consumed.
+                     * Top-level scheduler runs retain their contained boolean
+                     * completion contract. */
+                    if (!yield_pc && s_interp_bridge_depth > 1)
+                        return (int)_air + 2;
                     return 1;
                 }
                 const uint32_t ret =
@@ -1348,6 +1370,10 @@ static int interp_bridge_run_ex2(CpuState *cpu, uint32_t entry_pc24,
 #endif
     g_interp_apu_driving = 1;
     if (yield_pc) s_lle_sched_depth++;
+    const uint16_t _saved_owner_exit_s = s_interp_owner_exit_s;
+    const int _saved_owner_exit_valid = s_interp_owner_exit_valid;
+    s_interp_owner_exit_s = s_exit;
+    s_interp_owner_exit_valid = 1;
     s_interp_bridge_depth++;
     int _r = _interp_run_core(cpu, entry_pc24, s_exit, out_landing,
                               out_return_pc, yield_pc,
@@ -1355,6 +1381,8 @@ static int interp_bridge_run_ex2(CpuState *cpu, uint32_t entry_pc24,
                               reset_cap_on_bounce, stop_pcs, n_stop,
                               stop_on_rti);
     s_interp_bridge_depth--;
+    s_interp_owner_exit_s = _saved_owner_exit_s;
+    s_interp_owner_exit_valid = _saved_owner_exit_valid;
     if (yield_pc) {
         s_lle_sched_depth--;
         /* A pending yield unwind must have been consumed by this frame's
@@ -1634,6 +1662,12 @@ static uint8_t tier2_entry_mx(const CpuState *cpu) {
     return (uint8_t)(((cpu->m_flag & 1) << 1) | (cpu->x_flag & 1));
 }
 
+static int interp_run_propagated_return(int result, RecompReturn *out) {
+    if (result <= 1) return 0;
+    if (out) *out = (RecompReturn)(result - 2);
+    return 1;
+}
+
 RecompReturn interp_tier_dispatch(CpuState *cpu, uint32_t target_pc24) {
     interp_tier_note(target_pc24);
     const uint8_t mx = tier2_entry_mx(cpu);
@@ -1649,6 +1683,9 @@ RecompReturn interp_tier_dispatch(CpuState *cpu, uint32_t target_pc24) {
                  TIER2_KIND_DISPATCH, ok);
     if (s_lle_unwind_active)   /* yield unwound through this nested frame */
         return (RecompReturn)RECOMP_RETURN_LLE_UNWIND_BASE;
+    RecompReturn propagated;
+    if (interp_run_propagated_return(ok, &propagated))
+        return propagated;
     return RECOMP_RETURN_NORMAL;
 }
 
@@ -1665,6 +1702,7 @@ RecompReturn interp_tier_dispatch_interrupt(CpuState *cpu,
     RecompReturn result = s_lle_unwind_active
         ? (RecompReturn)RECOMP_RETURN_LLE_UNWIND_BASE
         : RECOMP_RETURN_NORMAL;
+    (void)interp_run_propagated_return(ok, &result);
     cpu_interrupt_context_leave();
     return result;
 }
@@ -1733,6 +1771,9 @@ RecompReturn interp_tier_dispatch_balanced(CpuState *cpu, uint32_t target_pc24,
     tier2_record(site_pc24 & 0xFFFFFF, rec_target, mx, kind, ok);
     if (s_lle_unwind_active)   /* yield unwound through this nested frame */
         return (RecompReturn)RECOMP_RETURN_LLE_UNWIND_BASE;
+    RecompReturn propagated;
+    if (interp_run_propagated_return(ok, &propagated))
+        return propagated;
     if (ok) {
         /* A shared suffix may perform a guest non-local return (for example,
          * PLA; PLA; RTS) after an AOT function tails into LLE past its static
@@ -1780,6 +1821,9 @@ RecompReturn interp_tier_dispatch_popped_return(CpuState *cpu,
     tier2_record(site_pc24, target_pc24, mx, TIER2_KIND_DISPATCH, ok);
     if (s_lle_unwind_active)
         return (RecompReturn)RECOMP_RETURN_LLE_UNWIND_BASE;
+    RecompReturn propagated;
+    if (interp_run_propagated_return(ok, &propagated))
+        return propagated;
     if (!ok)
         cpu->S = miss_restore_s;
     return RECOMP_RETURN_NORMAL;
@@ -1805,8 +1849,19 @@ RecompReturn interp_tier_dispatch_rewritten_return(CpuState *cpu,
      * live scheduler after SpawnHardcodedPlm skipped its four inline bytes and
      * immediately corrupted S.  This branch is context/ABI based, not tied to
      * that function or address. */
-    if (interp_bridge_has_direct_paired_bounce())
-        return interp_bridge_lle_yield_unwind(cpu, target_pc24);
+    if (interp_bridge_has_direct_paired_bounce()) {
+        /* If S crossed above this interpreter's entry watermark, the rewrite
+         * landed in a compiled ancestor. Let the nested tier below consume
+         * that ancestor continuation and return the matching SKIP_N. */
+        const uint16_t owner_delta =
+            (uint16_t)(cpu->S - s_interp_owner_exit_s);
+        const int crossed_into_compiled_ancestor =
+            s_interp_bounce_recomp_base > 0 &&
+            s_interp_owner_exit_valid &&
+            owner_delta != 0 && owner_delta < 0x8000u;
+        if (!crossed_into_compiled_ancestor)
+            return interp_bridge_lle_yield_unwind(cpu, target_pc24);
+    }
 
     interp_tier_note(target_pc24);
     const uint8_t mx = tier2_entry_mx(cpu);
@@ -1817,6 +1872,9 @@ RecompReturn interp_tier_dispatch_rewritten_return(CpuState *cpu,
     tier2_record(site_pc24, target_pc24, mx, TIER2_KIND_DISPATCH, ok);
     if (s_lle_unwind_active)
         return (RecompReturn)RECOMP_RETURN_LLE_UNWIND_BASE;
+    RecompReturn propagated;
+    if (interp_run_propagated_return(ok, &propagated))
+        return propagated;
     if (!ok) {
         cpu->S = post_pop_s;
         return RECOMP_RETURN_NORMAL;
@@ -1861,6 +1919,9 @@ RecompReturn interp_tier_run_call_frame(CpuState *cpu, uint32_t target_pc24,
     tier2_record(source_pc24, target_pc24, mx, TIER2_KIND_DISPATCH, ok);
     if (s_lle_unwind_active)   /* yield unwound through this nested frame */
         return (RecompReturn)RECOMP_RETURN_LLE_UNWIND_BASE;
+    RecompReturn propagated;
+    if (interp_run_propagated_return(ok, &propagated))
+        return propagated;
     if (!ok)
         cpu->S = post_call;  /* bail: discard the unconsumed JSR frame */
     return RECOMP_RETURN_NORMAL;
@@ -1887,6 +1948,9 @@ RecompReturn interp_tier_dispatch_bank_miss(CpuState *cpu, uint32_t addr_pc24,
     tier2_record(addr_pc24, addr_pc24, mx, TIER2_KIND_BANK_MISS, ok);
     if (s_lle_unwind_active)   /* yield unwound through this nested frame */
         return (RecompReturn)RECOMP_RETURN_LLE_UNWIND_BASE;
+    RecompReturn propagated;
+    if (interp_run_propagated_return(ok, &propagated))
+        return propagated;
     if (ok)
         return RECOMP_RETURN_NORMAL;
     return cpu_unresolved_abandon_balanced(cpu, addr_pc24, entry_s, hrv);

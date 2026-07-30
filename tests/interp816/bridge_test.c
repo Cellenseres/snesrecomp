@@ -31,6 +31,7 @@ static int      g_aot_rewrites_return;
 static int      g_aot_nested_rewrite;
 static int      g_aot_interp_nlr;
 static int      g_aot_double_rewrite;
+static int      g_aot_crosses_interp_owner;
 static int      g_aot_tail_chain_probe;
 static int      g_tail_chain_direct;
 static int      g_nested_chain_direct;
@@ -89,7 +90,9 @@ uint8 cpu_dispatch_inline_arg_bytes(uint32 pc24) {
 int cpu_dispatch_has_entry(CpuState *cpu, uint32 pc24) {
     (void)cpu;
     pc24 &= 0xFFFFFF;
-    return pc24 == FAKE_AOT || (g_aot_double_rewrite && pc24 == FAKE_AOT_2);
+    return pc24 == FAKE_AOT ||
+           ((g_aot_double_rewrite || g_aot_crosses_interp_owner) &&
+            pc24 == FAKE_AOT_2);
 }
 static int g_abandon_called;
 static int g_post_return_skip;
@@ -183,6 +186,35 @@ RecompReturn cpu_dispatch_pc_paired(CpuState *cpu, uint32 pc24,
         cpu->S = (uint16)(cpu->S + frame_size); /* root returns to bridge */
         g_recomp_stack_top--;
         return RECOMP_RETURN_NORMAL;
+    }
+    if (g_aot_crosses_interp_owner &&
+        (pc24 & 0xFFFFFF) == FAKE_AOT) {
+        /* Compiled root calls an untranslated routine, creating a nested
+         * interpreter below the root's live host frame. */
+        g_aot_called++;
+        g_recomp_stack_top++;
+        g_cpu_entry_s[g_recomp_stack_top - 1] = cpu->S;
+        cpu_write8(cpu, 0, cpu->S, 0x81); cpu->S--;
+        cpu_write8(cpu, 0, cpu->S, 0x7F); cpu->S--;
+        RecompReturn r = interp_tier_run_call_frame(
+            cpu, 0x008400, 0x0081F0, 2, NULL);
+        g_recomp_stack_top--;
+        if (r == RECOMP_RETURN_SKIP_1)
+            return RECOMP_RETURN_NORMAL;
+        return r;
+    }
+    if (g_aot_crosses_interp_owner &&
+        (pc24 & 0xFFFFFF) == FAKE_AOT_2) {
+        /* Consume this call frame and the nested interpreter owner's frame,
+         * leaving the rewritten continuation in the compiled root. */
+        g_aot_called++;
+        g_recomp_stack_top++;
+        g_cpu_entry_s[g_recomp_stack_top - 1] = cpu->S;
+        cpu->S = (uint16)(cpu->S + frame_size + 2);
+        RecompReturn r = interp_tier_dispatch_rewritten_return(
+            cpu, 0x008200, 0x0082FE);
+        g_recomp_stack_top--;
+        return r;
     }
     if (g_aot_rewrites_return && (pc24 & 0xFFFFFF) == FAKE_AOT) {
         g_aot_called++;
@@ -448,6 +480,30 @@ int main(void) {
       CHECK(g_c.S == 0x01FF, "S=%04X exp 01FF (all guest frames balanced)", g_c.S);
       CHECK(g_recomp_stack_top == 0, "recomp depth=%d exp 0", g_recomp_stack_top);
       g_aot_nested_rewrite = 0; }
+
+    /* S9b: a direct nested bounce can rewrite past the interpreter owner's
+     * stack boundary into a compiled ancestor. That ancestor epilogue must
+     * execute in a nested tier and propagate SKIP_1, rather than being resumed
+     * by both the interpreter and its compiled host frame. */
+    { memset(RAM, 0, MEMSZ); init_cpu(); g_aot_called = 0;
+      g_aot_crosses_interp_owner = 1;
+      g_post_return_skip = 1;
+      uint8_t caller[] = {0x20,0x00,0x81, 0xA9,0x5A, 0x60};
+      uint8_t ancestor_epilogue[] = {0x60};
+      uint8_t nested[] = {0x20,0x00,0x82, 0xA9,0xEE, 0x60};
+      load(0x8000, caller, sizeof caller);
+      load(0x8200, ancestor_epilogue, sizeof ancestor_epilogue);
+      load(0x8400, nested, sizeof nested);
+      cpu_push_jsr_return_frame(&g_c);
+      int rc = interp_bridge_run(&g_c, 0x008000);
+      printf("S9b rewritten return crossing interpreter owner skips ancestor\n");
+      CHECK(rc == 1, "rc=%d exp 1", rc);
+      CHECK(g_aot_called == 2, "aot_called=%d exp 2", g_aot_called);
+      CHECK((g_c.A & 0xFF) == 0x5A,
+            "A.lo=%02X exp 5A (compiled root consumed once)", g_c.A & 0xFF);
+      CHECK(g_c.S == 0x01FF, "S=%04X exp 01FF (ancestor consumed once)", g_c.S);
+      CHECK(g_recomp_stack_top == 0, "recomp depth=%d exp 0", g_recomp_stack_top);
+      g_aot_crosses_interp_owner = 0; }
 
     /* S10: a synchronous message box waits for fresh automatic-joypad data
      * by polling $4218/$4219. With no input it must yield to the host and
