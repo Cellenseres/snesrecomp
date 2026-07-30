@@ -36,6 +36,8 @@ enum {
   kPpuExtraLeftRight = 96,
   // Full internal width of the priority buffers (logical 256 + both borders).
   kPpuBufWidth = kPpuXPixels + kPpuExtraLeftRight * 2,
+  // Split-screen games can assign distinct anchor layouts to each viewport.
+  kPpuWsAnchorBands = 2,
 };
 
 typedef uint16_t PpuZbufType;
@@ -214,8 +216,10 @@ struct Ppu {
   uint8_t wsStretchY0[4], wsStretchY1[4];
   // Optional scanline bands: anchor a layer's left/right chunks to the
   // expanded viewport edges while retaining its middle chunk at native x.
-  uint8_t wsAnchorY0[4], wsAnchorY1[4];
-  uint8_t wsAnchorLeftEnd[4], wsAnchorRightStart[4];
+  uint8_t wsAnchorY0[kPpuWsAnchorBands][4];
+  uint8_t wsAnchorY1[kPpuWsAnchorBands][4];
+  uint8_t wsAnchorLeftEnd[kPpuWsAnchorBands][4];
+  uint8_t wsAnchorRightStart[kPpuWsAnchorBands][4];
   // Skip offscreen staging columns before sampling a layer's side margins.
   uint8_t wsMarginGapL[4], wsMarginGapR[4];
   // Treat [left_px, 256-right_px) as a layer's authentic visible viewport
@@ -529,6 +533,11 @@ void PpuSetWidescreenLayerStretchBand(Ppu *ppu, uint8_t layer, uint8_t y0,
 void PpuSetWidescreenLayerAnchorBand(Ppu *ppu, uint8_t layer, uint8_t y0,
                                      uint8_t y1, uint8_t left_end,
                                      uint8_t right_start);
+// Configure one of the two independent bands available to split-screen
+// layouts. Slot 0 is the same band set by the convenience function above.
+void PpuSetWidescreenLayerAnchorBandSlot(
+    Ppu *ppu, uint8_t slot, uint8_t layer, uint8_t y0, uint8_t y1,
+    uint8_t left_end, uint8_t right_start);
 
 // Skip left_px/right_px offscreen tilemap pixels before sampling the margins
 // of BG(layer+1). This hides UI staging columns that hardware never displays.

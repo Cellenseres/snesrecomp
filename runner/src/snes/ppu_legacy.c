@@ -15,6 +15,8 @@ static void ppu_apply_offset_per_tile(Ppu *ppu, int layer, int *lx, int *ly);
 static void ppu_prepare_mode7(Ppu *ppu, int y);
 static int ppu_sample_mode7(Ppu *ppu, int x, int layer, bool priority);
 static bool ppu_window_contains(Ppu *ppu, int layer, int x);
+static bool ppu_apply_layer_anchor(Ppu *ppu, int layer, int y, bool sub,
+                                   int *x);
 
 // array for layer definitions per mode:
 //   0-7: mode 0-7; 8: mode 1 + l3prio; 9: mode 7 + extbg
@@ -154,6 +156,8 @@ static int ppu_resolve_pixel(Ppu *ppu, int x, int y, bool sub,
         // bg layer
         int lx = x;
         int ly = y;
+        if (!ppu_apply_layer_anchor(ppu, curLayer, y, sub, &lx))
+          continue;
         if (PPU_mosaicEnabled(ppu, curLayer) && PPU_mosaicSize(ppu) > 1) {
           lx -= lx % PPU_mosaicSize(ppu);
           ly -= (ly - ppu->mosaicStartLine) % PPU_mosaicSize(ppu);
@@ -204,6 +208,40 @@ static int ppu_resolve_pixel(Ppu *ppu, int x, int y, bool sub,
   }
   if (layer == 4 && pixel < 0xc0) layer = 6; // sprites with palette color < 0xc0
   return layer;
+}
+
+static bool ppu_apply_layer_anchor(Ppu *ppu, int layer, int y, bool sub,
+                                   int *x) {
+  if (PPU_mode(ppu) == 7 ||
+      !(ppu->extraLeftCur | ppu->extraRightCur) ||
+      IS_SCREEN_WINDOWED(ppu, sub, layer))
+    return true;
+
+  int left_end = 0;
+  int right_start = 0;
+  for (int slot = 0; slot < kPpuWsAnchorBands; slot++) {
+    if (y >= ppu->wsAnchorY0[slot][layer] &&
+        y < ppu->wsAnchorY1[slot][layer]) {
+      left_end = ppu->wsAnchorLeftEnd[slot][layer];
+      right_start = ppu->wsAnchorRightStart[slot][layer];
+      break;
+    }
+  }
+  if (left_end == 0 || left_end >= right_start)
+    return true;
+
+  if (*x < left_end - ppu->extraLeftCur) {
+    *x += ppu->extraLeftCur;
+  } else if (*x < left_end) {
+    return false;
+  } else if (*x < right_start) {
+    return true;
+  } else if (*x < right_start + ppu->extraRightCur) {
+    return false;
+  } else {
+    *x -= ppu->extraRightCur;
+  }
+  return true;
 }
 
 static void ppu_apply_offset_per_tile(Ppu *ppu, int layer, int *lx, int *ly) {

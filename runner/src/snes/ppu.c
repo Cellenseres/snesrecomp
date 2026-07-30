@@ -309,15 +309,22 @@ void PpuSetWidescreenLayerStretchBand(Ppu *ppu, uint8_t layer, uint8_t y0,
 void PpuSetWidescreenLayerAnchorBand(Ppu *ppu, uint8_t layer, uint8_t y0,
                                      uint8_t y1, uint8_t left_end,
                                      uint8_t right_start) {
-  if (layer >= 4)
+  PpuSetWidescreenLayerAnchorBandSlot(
+      ppu, 0, layer, y0, y1, left_end, right_start);
+}
+
+void PpuSetWidescreenLayerAnchorBandSlot(
+    Ppu *ppu, uint8_t slot, uint8_t layer, uint8_t y0, uint8_t y1,
+    uint8_t left_end, uint8_t right_start) {
+  if (slot >= kPpuWsAnchorBands || layer >= 4)
     return;
   if (y1 <= y0 || left_end == 0 || left_end >= right_start) {
     y0 = y1 = left_end = right_start = 0;
   }
-  ppu->wsAnchorY0[layer] = y0;
-  ppu->wsAnchorY1[layer] = y1;
-  ppu->wsAnchorLeftEnd[layer] = left_end;
-  ppu->wsAnchorRightStart[layer] = right_start;
+  ppu->wsAnchorY0[slot][layer] = y0;
+  ppu->wsAnchorY1[slot][layer] = y1;
+  ppu->wsAnchorLeftEnd[slot][layer] = left_end;
+  ppu->wsAnchorRightStart[slot][layer] = right_start;
 }
 
 void PpuSetWidescreenLayerMarginGap(Ppu *ppu, uint8_t layer, uint8_t left_px,
@@ -527,12 +534,19 @@ static void PpuWindowsSplit(PpuWindows *win, int16 *bias, int xpos) {
 
 static bool PpuApplyLayerAnchorBand(Ppu *ppu, uint layer, uint y,
                                     PpuWindows *win, int16 *bias) {
-  if (y < ppu->wsAnchorY0[layer] || y >= ppu->wsAnchorY1[layer] ||
-      !(ppu->extraLeftCur | ppu->extraRightCur) ||
+  if (!(ppu->extraLeftCur | ppu->extraRightCur) ||
       win->nr != 1 || win->bits != 0)
     return false;
-  int left_end = ppu->wsAnchorLeftEnd[layer];
-  int right_start = ppu->wsAnchorRightStart[layer];
+  int left_end = 0;
+  int right_start = 0;
+  for (uint slot = 0; slot < kPpuWsAnchorBands; slot++) {
+    if (y >= ppu->wsAnchorY0[slot][layer] &&
+        y < ppu->wsAnchorY1[slot][layer]) {
+      left_end = ppu->wsAnchorLeftEnd[slot][layer];
+      right_start = ppu->wsAnchorRightStart[slot][layer];
+      break;
+    }
+  }
   if (left_end == 0 || left_end >= right_start)
     return false;
 
