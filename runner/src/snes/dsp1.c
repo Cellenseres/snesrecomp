@@ -61,7 +61,22 @@ typedef struct Dsp1HleHost {
   uint8_t output_byte;
   uint8_t output_discarded;
   uint8_t failed_command;
+  uint32_t delay_cycles;
+  int16_t timing_projection[7];
+  uint64_t last_access_master;
+  uint8_t have_last_access;
 } Dsp1HleHost;
+
+typedef struct Dsp1HostTrace {
+  uint64_t master_clock;
+  uint8_t value;
+  uint8_t write;
+  uint8_t status;
+  uint8_t phase;
+  uint8_t command;
+  uint8_t input_byte;
+  uint8_t output_byte;
+} Dsp1HostTrace;
 
 struct Dsp1 {
   uint32_t programROM[kProgramWords];
@@ -80,6 +95,13 @@ struct Dsp1 {
   uint64_t host_reads;
   uint64_t host_writes;
   uint64_t command_count[256];
+  uint64_t trace_fall_insns;
+  uint8_t trace_command;
+  uint16_t trace_stage;
+  uint16_t trace_input[7];
+  uint8_t trace_input_words;
+  Dsp1HostTrace host_trace[32];
+  uint64_t host_trace_index;
   Dsp1HleHost hle;
 };
 
@@ -341,6 +363,23 @@ static void dsp1_exec(Dsp1 *d) {
   d->insns++;
 }
 
+static int dsp1_timing_trace_enabled(void) {
+  static int initialized;
+  static int enabled;
+  if (!initialized) {
+    const char *value = getenv("SNESRECOMP_DSP1_TIMING_TRACE");
+    enabled = value && value[0] == '1';
+    initialized = 1;
+  }
+  return enabled;
+}
+
+static void dsp1_trace_rqm_fall(Dsp1 *d) {
+  if (!dsp1_timing_trace_enabled()) return;
+  d->trace_stage++;
+  d->trace_fall_insns = d->insns;
+}
+
 static void dsp1_hle_command_ready(Dsp1 *d) {
   d->hle.phase = kHlePhaseCommand;
   d->hle.command = 0;
@@ -360,12 +399,141 @@ static void dsp1_hle_host_reset(Dsp1 *d) {
   dsp1_hle_command_ready(d);
 }
 
+static void dsp1_hle_schedule(Dsp1 *d, uint32_t cycles) {
+  d->hle.delay_cycles = cycles;
+  d->r.sr.rqm = 0;
+}
+
+static void dsp1_hle_account_aot_access_spacing(Dsp1 *d) {
+  /*
+   * Generated blocks charge master time at block granularity. Consecutive
+   * DSP data accesses can therefore carry one timestamp even though each
+   * 65C816 access took time. Consume the omitted minimum spacing only from
+   * the HLE readiness delay; the block still owns the architectural clock.
+   */
+  if (d->hle.have_last_access &&
+      d->hle.last_access_master == d->last_master &&
+      d->hle.delay_cycles) {
+    const uint32_t master_clocks = 16;
+    const uint32_t dsp_cycles =
+        (master_clocks * kDsp1Hz + kSnesMasterHz - 1u) / kSnesMasterHz;
+    if (dsp_cycles >= d->hle.delay_cycles) {
+      d->hle.delay_cycles = 0;
+      d->r.sr.rqm = 1;
+    } else {
+      d->hle.delay_cycles -= dsp_cycles;
+    }
+  }
+  d->hle.last_access_master = d->last_master;
+  d->hle.have_last_access = 1;
+}
+
+static void dsp1_hle_trace_host(Dsp1 *d, int write, uint8_t value) {
+  const unsigned capacity =
+      sizeof(d->host_trace) / sizeof(d->host_trace[0]);
+  Dsp1HostTrace *trace =
+      &d->host_trace[(unsigned)(d->host_trace_index++ % capacity)];
+  trace->master_clock = d->last_master;
+  trace->value = value;
+  trace->write = (uint8_t)write;
+  trace->status = (uint8_t)((d->r.sr.rqm << 7) | (d->r.sr.drs << 4) |
+                            (d->r.sr.drc << 2));
+  trace->phase = (uint8_t)d->hle.phase;
+  trace->command = d->hle.command;
+  trace->input_byte = d->hle.input_byte;
+  trace->output_byte = d->hle.output_byte;
+}
+
+static void dsp1_hle_dump_host_trace(const Dsp1 *d) {
+  const unsigned capacity =
+      sizeof(d->host_trace) / sizeof(d->host_trace[0]);
+  const unsigned count = d->host_trace_index < capacity
+                             ? (unsigned)d->host_trace_index
+                             : capacity;
+  const uint64_t start = d->host_trace_index - count;
+  for (unsigned i = 0; i < count; i++) {
+    const Dsp1HostTrace *trace =
+        &d->host_trace[(unsigned)((start + i) % capacity)];
+    fprintf(stderr,
+            "[dsp1-host] master=%llu %c=%02x sr=%02x phase=%u "
+            "command=%02x input_byte=%u output_byte=%u\n",
+            (unsigned long long)trace->master_clock,
+            trace->write ? 'W' : 'R', trace->value, trace->status,
+            trace->phase, trace->command, trace->input_byte,
+            trace->output_byte);
+  }
+}
+
+/* Delays measured from LLE firmware RQM transitions during SMK gameplay. */
+static uint32_t dsp1_hle_project_cycles(const Dsp1 *d) {
+  uint16_t fx = (uint16_t)d->hle.timing_projection[0];
+  uint16_t aas = (uint16_t)d->hle.timing_projection[5];
+  uint16_t x = (uint16_t)d->hle.input[0];
+  uint16_t y = (uint16_t)d->hle.input[1];
+
+  if (fx == 0x0800)
+    return y >= 0x0b10 ? 334 : 336;
+  if (fx != 0x0ee0)
+    return 338;
+
+  if (x <= 0x0430)
+    return aas == 0x00c0 ? 327 : (aas == 0x8000 ? 339 : 334);
+  if (x == 0x0e60)
+    return aas == 0x00c0 ? (uint32_t)(353 - ((y >> 6) & 2u))
+                         : (aas == 0x8000 ? 353 : 356);
+  if (x == 0x0ee0) {
+    if (aas == 0x00c0) {
+      if (y == 0x0bd0) return 346;
+      if (y == 0x0b10) return 346;
+      if (y == 0x0a50) return 342;
+      return 344;
+    }
+    if (aas == 0x8000)
+      return 321;
+    return y == 0x0bd0 ? 298 : 338;
+  }
+  return 338;
+}
+
+static uint32_t dsp1_hle_command_cycles(const Dsp1 *d) {
+  switch (d->hle.command) {
+    case 0x00:
+    case 0x04:
+    case 0x0c:
+    case 0x20:
+      return 4;
+    case 0x08:
+    case 0x18:
+      return 6;
+    case 0x10:
+      return 40;
+    case 0x28:
+      return 65;
+    case 0x02: {
+      uint16_t fx = (uint16_t)d->hle.input[0];
+      uint16_t aas = (uint16_t)d->hle.input[5];
+      if (fx == 0x0880) return 529;
+      if (fx == 0x0800) return 483;
+      if (fx == 0x0ee0)
+        return aas == 0x8000 ? 505 : (aas == 0x00c0 ? 517 : 521);
+      return 503;
+    }
+    case 0x06:
+      return dsp1_hle_project_cycles(d);
+    case 0x0a:
+      return 130;
+    default:
+      return 2;
+  }
+}
+
 static void dsp1_hle_fail(Dsp1 *d, uint8_t command) {
   d->hle.phase = kHlePhaseFailed;
   d->hle.failed_command = command;
   d->r.sr.drc = 1;
   d->r.sr.drs = 0;
   d->r.sr.rqm = 0;
+  dsp1_hle_dump_host_trace(d);
   fprintf(stderr,
           "[dsp1] HLE stopped on unsupported or invalid command %02x; "
           "provide DSP-1 firmware to continue\n",
@@ -374,6 +542,9 @@ static void dsp1_hle_fail(Dsp1 *d, uint8_t command) {
 
 static int dsp1_hle_run_command(Dsp1 *d) {
   uint8_t output_words = 0;
+  if (d->hle.command == 0x02)
+    memcpy(d->hle.timing_projection, d->hle.input,
+           sizeof(d->hle.timing_projection));
   if (!dsp1_hle_execute_state(
           &d->hle.model, d->hle.command, d->hle.input, d->hle.input_words,
           d->hle.output, (uint8_t)(sizeof(d->hle.output) /
@@ -413,22 +584,25 @@ static void dsp1_hle_begin_command(Dsp1 *d, uint8_t command) {
   memset(d->hle.input, 0, sizeof(d->hle.input));
   if (!input_words) {
     (void)dsp1_hle_run_command(d);
+    if (d->hle.phase != kHlePhaseFailed) dsp1_hle_schedule(d, 2);
     return;
   }
   d->hle.phase = kHlePhaseInput;
   d->r.sr.drc = 0;
   d->r.sr.drs = 0;
   d->r.sr.rqm = 1;
+  dsp1_hle_schedule(d, 2);
 }
 
-static void dsp1_hle_finish_output(Dsp1 *d) {
+static int dsp1_hle_finish_output(Dsp1 *d) {
   if (d->hle.command != 0x0a || d->hle.output_discarded) {
     dsp1_hle_command_ready(d);
-    return;
+    return 0;
   }
   d->hle.input[0] =
       (int16_t)(uint16_t)((uint16_t)d->hle.input[0] + 1u);
   (void)dsp1_hle_run_command(d);
+  return 1;
 }
 
 static uint8_t dsp1_hle_read_data(Dsp1 *d) {
@@ -438,8 +612,15 @@ static uint8_t dsp1_hle_read_data(Dsp1 *d) {
   uint8_t value = (byte & 1) ? (uint8_t)(word >> 8) : (uint8_t)word;
   d->hle.output_byte++;
   d->r.sr.drs = (uint8_t)(d->hle.output_byte & 1u);
-  if (d->hle.output_byte == (uint8_t)(d->hle.output_words * 2u))
-    dsp1_hle_finish_output(d);
+  if (!(d->hle.output_byte & 1u)) {
+    if (d->hle.output_byte == (uint8_t)(d->hle.output_words * 2u)) {
+      int continued = dsp1_hle_finish_output(d);
+      if (d->hle.phase != kHlePhaseFailed)
+        dsp1_hle_schedule(d, continued ? 121 : 3);
+    } else {
+      dsp1_hle_schedule(d, 2);
+    }
+  }
   return value;
 }
 
@@ -457,16 +638,27 @@ static void dsp1_hle_write_data(Dsp1 *d, uint8_t value) {
     d->hle.input[byte >> 1] = (int16_t)word;
     d->hle.input_byte++;
     d->r.sr.drs = (uint8_t)(d->hle.input_byte & 1u);
-    if (d->hle.input_byte == (uint8_t)(d->hle.input_words * 2u))
+    if (d->hle.input_byte == (uint8_t)(d->hle.input_words * 2u)) {
       (void)dsp1_hle_run_command(d);
+      if (d->hle.phase != kHlePhaseFailed)
+        dsp1_hle_schedule(d, dsp1_hle_command_cycles(d));
+    } else if (!(d->hle.input_byte & 1u)) {
+      dsp1_hle_schedule(d, 2);
+    }
     return;
   }
   if (d->hle.phase == kHlePhaseOutput) {
     d->hle.output_discarded = 1;
     d->hle.output_byte++;
     d->r.sr.drs = (uint8_t)(d->hle.output_byte & 1u);
-    if (d->hle.output_byte == (uint8_t)(d->hle.output_words * 2u))
-      dsp1_hle_finish_output(d);
+    if (!(d->hle.output_byte & 1u)) {
+      if (d->hle.output_byte == (uint8_t)(d->hle.output_words * 2u)) {
+        (void)dsp1_hle_finish_output(d);
+        if (d->hle.phase != kHlePhaseFailed) dsp1_hle_schedule(d, 3);
+      } else {
+        dsp1_hle_schedule(d, 2);
+      }
+    }
   }
 }
 
@@ -494,7 +686,23 @@ void dsp1_reset(Dsp1 *d) {
 void dsp1_sync(Dsp1 *d, uint64_t master_clock) {
   if (!d || d->in_dsp) return;
   if (d->hle_active) {
+    if (master_clock <= d->last_master) {
+      d->last_master = master_clock;
+      return;
+    }
+    uint64_t delta = master_clock - d->last_master;
     d->last_master = master_clock;
+    uint64_t num = delta * (uint64_t)kDsp1Hz + d->frac;
+    uint64_t cycles = num / (uint64_t)kSnesMasterHz;
+    d->frac = (uint32_t)(num % (uint64_t)kSnesMasterHz);
+    if (d->hle.delay_cycles) {
+      if (cycles >= d->hle.delay_cycles) {
+        d->hle.delay_cycles = 0;
+        d->r.sr.rqm = 1;
+      } else {
+        d->hle.delay_cycles -= (uint32_t)cycles;
+      }
+    }
     return;
   }
   if (master_clock <= d->last_master) { d->last_master = master_clock; return; }
@@ -518,7 +726,24 @@ void dsp1_sync(Dsp1 *d, uint64_t master_clock) {
       d->budget = 0;
       break;
     }
+    uint8_t previous_rqm = d->r.sr.rqm;
     dsp1_exec(d);
+    if (!previous_rqm && d->r.sr.rqm && dsp1_timing_trace_enabled()) {
+      fprintf(stderr,
+              "[dsp1-timing] command=%02x stage=%u dsp_cycles=%llu\n",
+              d->trace_command, (unsigned)d->trace_stage,
+              (unsigned long long)(d->insns - d->trace_fall_insns));
+      uint8_t input_words = 0;
+      if (dsp1_hle_command_shape(d->trace_command, &input_words, NULL) &&
+          d->trace_stage == (uint16_t)input_words + 1u) {
+        fprintf(stderr, "[dsp1-compute] command=%02x input=",
+                d->trace_command);
+        for (uint8_t i = 0; i < d->trace_input_words; i++)
+          fprintf(stderr, "%s%04x", i ? "," : "", d->trace_input[i]);
+        fprintf(stderr, " dsp_cycles=%llu\n",
+                (unsigned long long)(d->insns - d->trace_fall_insns));
+      }
+    }
     d->budget--;
   }
   if (guard <= 0) {
@@ -534,7 +759,12 @@ uint8_t dsp1_read(Dsp1 *d, uint16_t addr) {
   if (!d) return 0;
   d->host_reads++;
   if (addr & 1) return (uint8_t)(status_pack(&d->r.sr) >> 8);
-  if (d->hle_active) return dsp1_hle_read_data(d);
+  if (d->hle_active) {
+    dsp1_hle_account_aot_access_spacing(d);
+    uint8_t value = dsp1_hle_read_data(d);
+    dsp1_hle_trace_host(d, 0, value);
+    return value;
+  }
   if (!d->r.sr.drc) {
     if (!d->r.sr.drs) {
       d->r.sr.drs = 1;
@@ -542,6 +772,7 @@ uint8_t dsp1_read(Dsp1 *d, uint16_t addr) {
     }
     d->r.sr.rqm = 0;
     d->r.sr.drs = 0;
+    dsp1_trace_rqm_fall(d);
     return (uint8_t)(d->r.dr >> 8);
   }
   d->r.sr.rqm = 0;
@@ -552,11 +783,18 @@ void dsp1_write(Dsp1 *d, uint16_t addr, uint8_t value) {
   if (!d || (addr & 1)) return;
   d->host_writes++;
   if (d->hle_active) {
+    dsp1_hle_account_aot_access_spacing(d);
+    dsp1_hle_trace_host(d, 1, value);
     dsp1_hle_write_data(d, value);
     return;
   }
   if (d->r.sr.drc && d->r.sr.rqm)
     d->command_count[value]++;
+  if (d->r.sr.drc && d->r.sr.rqm) {
+    d->trace_command = value;
+    d->trace_stage = 0;
+    d->trace_input_words = 0;
+  }
   if (!d->r.sr.drc) {
     if (!d->r.sr.drs) {
       d->r.sr.drs = 1;
@@ -565,10 +803,16 @@ void dsp1_write(Dsp1 *d, uint16_t addr, uint8_t value) {
       d->r.sr.rqm = 0;
       d->r.sr.drs = 0;
       d->r.dr = (uint16_t)(((uint16_t)value << 8) | (d->r.dr & 0x00ffu));
+      if (dsp1_timing_trace_enabled() &&
+          d->trace_input_words <
+              sizeof(d->trace_input) / sizeof(d->trace_input[0]))
+        d->trace_input[d->trace_input_words++] = d->r.dr;
+      dsp1_trace_rqm_fall(d);
     }
   } else {
     d->r.sr.rqm = 0;
     d->r.dr = (uint16_t)((d->r.dr & 0xff00u) | value);
+    dsp1_trace_rqm_fall(d);
   }
 }
 

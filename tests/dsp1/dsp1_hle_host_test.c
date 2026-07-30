@@ -39,9 +39,21 @@ static int check(int condition, const char *message) {
   return 1;
 }
 
+static uint64_t master_clock;
+
 static uint8_t status(Dsp1 *d) { return dsp1_read(d, 1); }
 
+static int wait_rqm(Dsp1 *d) {
+  for (unsigned i = 0; i < 100000; i++) {
+    if (status(d) & kRqm) return 1;
+    master_clock += 16;
+    dsp1_sync(d, master_clock);
+  }
+  return 0;
+}
+
 static int write_command(Dsp1 *d, uint8_t command) {
+  if (!wait_rqm(d)) return 0;
   uint8_t sr = status(d);
   if ((sr & (kRqm | kDrc)) != (kRqm | kDrc)) return 0;
   dsp1_write(d, 0, command);
@@ -49,6 +61,7 @@ static int write_command(Dsp1 *d, uint8_t command) {
 }
 
 static int write_word(Dsp1 *d, uint16_t value) {
+  if (!wait_rqm(d)) return 0;
   uint8_t sr = status(d);
   if (!(sr & kRqm) || (sr & kDrc)) return 0;
   dsp1_write(d, 0, (uint8_t)value);
@@ -58,6 +71,7 @@ static int write_word(Dsp1 *d, uint16_t value) {
 }
 
 static int read_word(Dsp1 *d, uint16_t *value) {
+  if (!wait_rqm(d)) return 0;
   uint8_t sr = status(d);
   if (!(sr & kRqm) || (sr & kDrc)) return 0;
   uint8_t low = dsp1_read(d, 0);
@@ -84,6 +98,7 @@ int main(void) {
 
   fails += check(write_command(source, 0x00), "submit multiply command");
   fails += check(write_word(source, 0x4000), "submit first multiply word");
+  fails += check(wait_rqm(source), "wait for second multiply parameter");
   dsp1_write(source, 0, 0x00);
   fails += check((status(source) & kDrs) != 0,
                  "partial parameter word sets byte phase");
@@ -97,11 +112,30 @@ int main(void) {
   fails += check(!memory.failed, "restore in-flight HLE command");
 
   dsp1_write(restored, 0, 0x40);
+  fails += check(!(status(restored) & kRqm),
+                 "HLE compute keeps RQM low until its delay expires");
   uint16_t result = 0;
   fails += check(read_word(restored, &result) && result == 0x2000,
                  "restored multiply completes exactly");
-  fails += check((status(restored) & (kRqm | kDrc)) == (kRqm | kDrc),
+  fails += check(wait_rqm(restored) &&
+                     (status(restored) & (kRqm | kDrc)) ==
+                         (kRqm | kDrc),
                  "ordinary output returns to command mode");
+
+  fails += check(write_command(restored, 0x00),
+                 "submit same-timestamp multiply command");
+  dsp1_write(restored, 0, 0x00);
+  dsp1_write(restored, 0, 0x40);
+  dsp1_write(restored, 0, 0x00);
+  dsp1_write(restored, 0, 0x40);
+  fails += check(!(status(restored) & kRqm),
+                 "same-timestamp multiply still schedules compute delay");
+  uint8_t direct_low = dsp1_read(restored, 0);
+  uint8_t direct_high = dsp1_read(restored, 0);
+  fails += check((uint16_t)(direct_low | ((uint16_t)direct_high << 8)) ==
+                     0x2000,
+                 "AOT access spacing makes direct result reads coherent");
+  fails += check(wait_rqm(restored), "finish direct multiply output");
 
   const uint16_t projection[7] = {
       0x0880, 0x27a0, 0x0000, 0x0040, 0x0100, 0x0000, 0x3400};
@@ -130,9 +164,14 @@ int main(void) {
                        result == raster_expected[i],
                    "read first raster matrix");
   }
-  for (unsigned byte = 0; byte < 8; byte++)
+  for (unsigned byte = 0; byte < 8; byte++) {
+    if (!(byte & 1u))
+      fails += check(wait_rqm(restored), "wait to discard raster word");
     dsp1_write(restored, 0, 0x80);
-  fails += check((status(restored) & (kRqm | kDrc)) == (kRqm | kDrc),
+  }
+  fails += check(wait_rqm(restored) &&
+                     (status(restored) & (kRqm | kDrc)) ==
+                         (kRqm | kDrc),
                  "eight writes terminate continuous raster output");
   fails += check(dsp1_command_count(restored, 0x0a) == 1 &&
                      dsp1_command_count(restored, 0x80) == 0,
