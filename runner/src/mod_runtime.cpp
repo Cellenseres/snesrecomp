@@ -560,8 +560,9 @@ bool feature_enabled(Runtime& runtime, const Package& package,
                      const Feature& feature) {
     PackageSelection& package_state = package_selection(runtime, package);
     FeatureSelection& selection = package_state.features[feature.id];
-    return selection.has_enabled ? selection.enabled :
-                                   feature.default_enabled;
+    if (!selection.has_enabled)
+        selection.enabled = feature.default_enabled;
+    return selection.enabled;
 }
 
 std::string option_value(Runtime& runtime, const Package& package,
