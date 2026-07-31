@@ -21,6 +21,7 @@
 #include <string.h>
 #include "interp_bridge.h"   /* -> cpu_state.h (types, inline frame helpers) */
 #include "snes.h"            /* Snes storage for the bridge's APU clock hook */
+#include "sa1.h"
 
 CpuState g_cpu;
 
@@ -46,6 +47,8 @@ static Snes g_test_snes;
 Snes *g_snes = &g_test_snes;
 uint64_t g_apu_last_sync_master;
 int g_interp_apu_driving;
+bool rtl_apu_frame_timeline_active(void) { return false; }
+bool sa1_cpu_irq_pending(const Sa1 *sa1) { (void)sa1; return false; }
 int g_recomp_stack_top;
 uint16_t g_cpu_entry_s[64];
 uint8 g_memsel;

@@ -115,6 +115,7 @@ set(SNESRECOMP_RUNNER_SOURCES
     ${SNESRECOMP_RUNNER_ROOT}/src/snes/color_lut.c
     ${SNESRECOMP_RUNNER_ROOT}/src/snes/ppu.c
     ${SNESRECOMP_RUNNER_ROOT}/src/snes/ppu_legacy.c
+    ${SNESRECOMP_RUNNER_ROOT}/src/snes/sa1.c
     ${SNESRECOMP_RUNNER_ROOT}/src/snes/ws_shadow.c
     ${SNESRECOMP_RUNNER_ROOT}/src/snes/snes.c
     ${SNESRECOMP_RUNNER_ROOT}/src/snes/snes_other.c

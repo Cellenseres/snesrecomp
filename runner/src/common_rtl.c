@@ -17,6 +17,7 @@
 #include "snes/apu.h"
 #include "snes/cart.h"
 #include "snes/cx4.h"
+#include "snes/sa1.h"
 #include "snes/msu1.h"
 #include "snes/ws_shadow.h"
 #include "cpu_state.h"
@@ -112,6 +113,10 @@ uint64_t g_apu_last_sync_master = 0;
 #define RTL_APU_CYCLES_PER_FRAME     17088ull
 static uint64_t g_apu_frame_start_master;
 static bool g_apu_frame_time_valid;
+
+bool rtl_apu_frame_timeline_active(void) {
+  return g_apu_frame_time_valid;
+}
 
 /* Fast-forward advances the real SPC/DSP state faster than the host device can
  * play it. On the transition back to realtime, buffered PCM represents stale
@@ -727,6 +732,14 @@ void WriteReg(uint16 reg, uint8 value) {
   // Direct dispatch — bypass emulator bus
   // MSU-1 ($2000-$2007). Inert unless a pack is armed, so the open-bus
   // default (no-op + log) is preserved byte-for-byte when disabled.
+  if (g_snes && cart_has_sa1(g_snes->cart) &&
+      ((reg >= 0x2200 && reg < 0x2400) ||
+       (reg >= 0x3000 && reg < 0x3800))) {
+    cart_sync_coprocessors(g_snes->cart, g_cpu.master_cycles);
+    cart_write(g_snes->cart, 0, reg, value);
+    debug_server_on_reg_write(reg, value);
+    return;
+  }
   if (reg >= 0x2000 && reg < 0x2008) {
     if (msu1_enabled()) msu1_write(reg, value);
     debug_server_on_reg_write(reg, value);
@@ -760,6 +773,12 @@ void WriteReg(uint16 reg, uint8 value) {
 uint8 ReadRegOpenBus(uint16 reg, uint8 open_bus) {
   // Direct dispatch — bypass emulator bus
   // MSU-1 ($2000-$2007). An absent device leaves the data bus undriven.
+  if (g_snes && cart_has_sa1(g_snes->cart) &&
+      ((reg >= 0x2200 && reg < 0x2400) ||
+       (reg >= 0x3000 && reg < 0x3800))) {
+    cart_sync_coprocessors(g_snes->cart, g_cpu.master_cycles);
+    return sa1_cpu_read(g_snes->cart->sa1, 0, reg, open_bus);
+  }
   if (reg >= 0x2000 && reg < 0x2008) {
     return msu1_enabled() ? msu1_read(reg) : open_bus;
   }

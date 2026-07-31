@@ -7,8 +7,8 @@
  *
  * snesrecomp adaptation: Interp816 / interp816_ namespace; caller-supplied
  * callback memory bus (no direct snes_cpuRead/Write); debug instrumentation
- * (pc_hist / DumpCpuHistory / top-of-doOpcode assert) stripped; BRK routed
- * to interp816_opcode_hook(), the interp<->AOT bridge seam. See
+ * (pc_hist / DumpCpuHistory / top-of-doOpcode assert) stripped; BRK can use
+ * historical fallback-tier marker behavior or architectural vectoring. See
  * docs/MULTI_TIER.md.
  */
 #include <stdlib.h>
@@ -72,6 +72,7 @@ Interp816* interp816_init(void* mem, Interp816ReadHandler read, Interp816WriteHa
   cpu->mem = mem;
   cpu->read = read;
   cpu->write = write;
+  cpu->brkHookEnabled = true;
   return cpu;
 }
 
@@ -102,6 +103,10 @@ void interp816_reset(Interp816* cpu) {
   cpu->waiting = false;
   cpu->stopped = false;
   cpu->cyclesUsed = 0;
+}
+
+void interp816_set_brk_hook_enabled(Interp816 *cpu, bool enabled) {
+  if (cpu) cpu->brkHookEnabled = enabled;
 }
 
 void interp816_saveload(Interp816 *cpu, SaveLoadInfo *sli) {
@@ -798,26 +803,28 @@ static void interp816_trb(Interp816* cpu, uint32_t low, uint32_t high) {
 }
 
 
-extern int interp816_opcode_hook(uint32_t addr);
-
 static void interp816_doOpcode(Interp816* cpu, uint8_t opcode) {
-restart:
   switch(opcode) {
     case 0x00: { // brk imp
-      uint32_t addr = (cpu->k << 16) | cpu->pc;
-      switch (opcode = interp816_opcode_hook(addr - 1)) {
-      case 0:
+      if(cpu->brkHookEnabled) {
+        /* Historical main-CPU bridge marker. Current AOT bounces are selected
+         * before opcode execution, so the marker itself is an inert one-byte
+         * trap. Keep that ABI for the fallback tier without imposing a global
+         * callback symbol on independent coprocessor users. */
         break;
-      case 1: // rts
-        cpu->pc = interp816_pullWord(cpu) + 1;
-        break;
-      case 2: // rtl
-        cpu->pc = interp816_pullWord(cpu) + 1;
-        /* Keep full PB — bit 7 selects FastROM / $80-$BF reg mirrors. */
-        cpu->k = interp816_pullByte(cpu);
-        break;
-      default:
-        goto restart;
+      } else {
+        /* BRK is a two-byte instruction. The signature byte is fetched before
+         * the return address is stacked. */
+        interp816_readOpcode(cpu);
+        if(!cpu->e) interp816_pushByte(cpu, cpu->k);
+        interp816_pushWord(cpu, cpu->pc);
+        interp816_pushByte(cpu, interp816_getFlags(cpu) | (cpu->e ? 0x10 : 0));
+        cpu->i = true;
+        cpu->d = false;
+        cpu->k = 0;
+        cpu->pc = cpu->e
+            ? interp816_readWord(cpu, 0xfffe, 0xffff)
+            : interp816_readWord(cpu, 0xffe6, 0xffe7);
       }
       break;
     }

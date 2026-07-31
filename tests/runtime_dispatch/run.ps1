@@ -11,6 +11,8 @@ $args = @(
     "$root\runner\src\snes\cx4.c",
     "$root\runner\src\snes\dsp1.c",
     "$root\runner\src\snes\dsp1_hle.c",
+    "$root\runner\src\snes\sa1.c",
+    "$root\runner\src\snes\interp816.c",
     "-Wl,--gc-sections", "-lm", "-o", $out
 )
 

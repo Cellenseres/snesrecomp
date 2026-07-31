@@ -326,6 +326,8 @@ static uint16 cpu_latch_read16(CpuState *cpu, uint16 value) {
 }
 
 uint8 cpu_read8(CpuState *cpu, uint8 bank, uint16 addr) {
+    if (g_snes && g_snes->cart)
+        cart_note_cpu_bus(g_snes->cart, bank, addr);
     int off = cpu_wram_offset(bank, addr);
     if (off >= 0) return cpu_latch_read8(cpu, cpu->ram[off]);
     if (is_hw_reg(bank, addr)) {
@@ -334,6 +336,8 @@ uint8 cpu_read8(CpuState *cpu, uint8 bank, uint16 addr) {
         return cpu_latch_read8(cpu, ReadRegOpenBus(addr, cpu->open_bus));
     }
     if (g_snes && g_snes->cart && g_snes->cart->type == CART_SUPERFX)
+        return cpu_latch_read8(cpu, cart_read(g_snes->cart, bank, addr));
+    if (g_snes && g_snes->cart && g_snes->cart->type == CART_SA1)
         return cpu_latch_read8(cpu, cart_read(g_snes->cart, bank, addr));
     /* Cx4 coprocessor window ($00-$3F/$80-$BF:$6000-$7FFF). is_hw_reg stops at
      * $6000 and there is no SRAM here, so without this the read would fall
@@ -349,6 +353,8 @@ uint8 cpu_read8(CpuState *cpu, uint8 bank, uint16 addr) {
 }
 
 uint16 cpu_read16(CpuState *cpu, uint8 bank, uint16 addr) {
+    if (g_snes && g_snes->cart)
+        cart_note_cpu_bus(g_snes->cart, bank, addr);
     int off = cpu_wram_offset(bank, addr);
     if (off >= 0) {
         /* A 16-bit guest access wraps its high-byte address within the same
@@ -377,6 +383,12 @@ uint16 cpu_read16(CpuState *cpu, uint8 bank, uint16 addr) {
         return cpu_latch_read16(cpu, (uint16)lo | ((uint16)hi << 8));
     }
     if (g_snes && g_snes->cart && g_snes->cart->type == CART_SUPERFX) {
+        uint8 lo = cart_read(g_snes->cart, bank, addr);
+        cpu->open_bus = lo;
+        uint8 hi = cart_read(g_snes->cart, bank, (uint16)(addr + 1));
+        return cpu_latch_read16(cpu, (uint16)lo | ((uint16)hi << 8));
+    }
+    if (g_snes && g_snes->cart && g_snes->cart->type == CART_SA1) {
         uint8 lo = cart_read(g_snes->cart, bank, addr);
         cpu->open_bus = lo;
         uint8 hi = cart_read(g_snes->cart, bank, (uint16)(addr + 1));
@@ -423,6 +435,8 @@ uint16 cpu_read16(CpuState *cpu, uint8 bank, uint16 addr) {
 }
 
 void cpu_write8(CpuState *cpu, uint8 bank, uint16 addr, uint8 v) {
+    if (g_snes && g_snes->cart)
+        cart_note_cpu_bus(g_snes->cart, bank, addr);
     cpu->open_bus = v;
     if (g_wlog_active) wlog_note(bank, addr, v, 1);
     wlog_addr_note(bank, addr, v, 1);
@@ -479,6 +493,9 @@ void cpu_write8(CpuState *cpu, uint8 bank, uint16 addr, uint8 v) {
     if (g_snes && g_snes->cart && g_snes->cart->type == CART_SUPERFX) {
         cart_write(g_snes->cart, bank, addr, v); return;
     }
+    if (g_snes && g_snes->cart && g_snes->cart->type == CART_SA1) {
+        cart_write(g_snes->cart, bank, addr, v); return;
+    }
     /* Cx4 coprocessor window. Must run BEFORE the drop-through below, or the
      * command register write that triggers every Cx4 operation is silently
      * discarded and the game spins on the status register forever. */
@@ -494,6 +511,8 @@ void cpu_write8(CpuState *cpu, uint8 bank, uint16 addr, uint8 v) {
 }
 
 void cpu_write16(CpuState *cpu, uint8 bank, uint16 addr, uint16 v) {
+    if (g_snes && g_snes->cart)
+        cart_note_cpu_bus(g_snes->cart, bank, addr);
     cpu->open_bus = (uint8)v;
     if (g_wlog_active) wlog_note(bank, addr, v, 2);
     wlog_addr_note(bank, addr, v, 2);
@@ -560,6 +579,12 @@ void cpu_write16(CpuState *cpu, uint8 bank, uint16 addr, uint16 v) {
         return;
     }
     if (g_snes && g_snes->cart && g_snes->cart->type == CART_SUPERFX) {
+        cart_write(g_snes->cart, bank, addr, (uint8)v);
+        cart_write(g_snes->cart, bank, (uint16)(addr + 1), (uint8)(v >> 8));
+        cpu->open_bus = (uint8)(v >> 8);
+        return;
+    }
+    if (g_snes && g_snes->cart && g_snes->cart->type == CART_SA1) {
         cart_write(g_snes->cart, bank, addr, (uint8)v);
         cart_write(g_snes->cart, bank, (uint16)(addr + 1), (uint8)(v >> 8));
         cpu->open_bus = (uint8)(v >> 8);

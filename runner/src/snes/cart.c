@@ -9,6 +9,7 @@
 #include "superfx.h"
 #include "cx4.h"
 #include "dsp1.h"
+#include "sa1.h"
 
 static uint8_t cart_readLorom(Cart* cart, uint8_t bank, uint16_t adr);
 static void cart_writeLorom(Cart* cart, uint8_t bank, uint16_t adr, uint8_t val);
@@ -31,6 +32,7 @@ void cart_free(Cart* cart) {
   superfx_destroy(cart->superfx);
   cx4_destroy(cart->cx4);
   dsp1_destroy(cart->dsp1);
+  sa1_destroy(cart->sa1);
   free(cart->rom);
   free(cart->ram);
   free(cart);
@@ -41,6 +43,7 @@ void cart_reset(Cart* cart) {
   if (cart->superfx) superfx_reset(cart->superfx);
   if (cart->cx4) cx4_reset(cart->cx4);
   if (cart->dsp1) dsp1_reset(cart->dsp1);
+  if (cart->sa1) sa1_reset(cart->sa1);
 }
 
 void cart_saveload(Cart *cart, SaveLoadInfo *sli) {
@@ -50,6 +53,10 @@ void cart_saveload(Cart *cart, SaveLoadInfo *sli) {
    * mid-game state must carry. */
   if (cart->cx4) cx4_saveload(cart->cx4, sli);
   if (cart->dsp1) dsp1_saveload(cart->dsp1, sli);
+  if (cart->sa1) {
+    sli->func(sli, &cart->cpuBusAddress, sizeof(cart->cpuBusAddress));
+    sa1_saveload(cart->sa1, sli);
+  }
 }
 
 void cart_load(Cart* cart, int type, uint8_t* rom, int romSize, int ramSize) {
@@ -59,6 +66,8 @@ void cart_load(Cart* cart, int type, uint8_t* rom, int romSize, int ramSize) {
   cart->cx4 = NULL;
   dsp1_destroy(cart->dsp1);
   cart->dsp1 = NULL;
+  sa1_destroy(cart->sa1);
+  cart->sa1 = NULL;
   cart->type = type;
   if(cart->rom != NULL) free(cart->rom);
   if(cart->ram != NULL) free(cart->ram);
@@ -85,6 +94,9 @@ void cart_load(Cart* cart, int type, uint8_t* rom, int romSize, int ramSize) {
     cart->dsp1 = dsp1_create();
     (void)dsp1_load_firmware(cart->dsp1, NULL);
   }
+  if (type == CART_SA1)
+    cart->sa1 = sa1_create(cart->rom, cart->romSize,
+                           cart->ram, cart->ramSize);
 }
 
 void cart_sync_coprocessors(Cart *cart, uint64_t master_clock) {
@@ -93,10 +105,19 @@ void cart_sync_coprocessors(Cart *cart, uint64_t master_clock) {
    * up to the CPU's clock before anything observes its state. */
   if (cart && cart->cx4) cx4_sync(cart->cx4, master_clock);
   if (cart && cart->dsp1) dsp1_sync(cart->dsp1, master_clock);
+  if (cart && cart->sa1) {
+    sa1_set_cpu_bus_address(cart->sa1, cart->cpuBusAddress);
+    sa1_sync(cart->sa1, master_clock);
+  }
 }
 
 void cart_set_master_clock_source(Cart *cart, const uint64_t *master_clock) {
   if (cart) cart->masterClock = master_clock;
+}
+
+void cart_note_cpu_bus(Cart *cart, uint8_t bank, uint16_t address) {
+  if (cart)
+    cart->cpuBusAddress = ((uint32_t)bank << 16) | address;
 }
 
 static uint64_t cart_master_clock(const Cart *cart) {
@@ -149,6 +170,8 @@ uint8_t *cart_getRomPtr(Cart *cart, uint8_t bank, uint16_t adr) {
       off = ((uint32_t)canonical << 15) | (adr & 0x7fff);
       break;
     }
+    case CART_SA1:
+      return sa1_cpu_memory_ptr(cart->sa1, bank, adr);
     default:
       return NULL;
   }
@@ -200,6 +223,9 @@ uint8_t cart_read(Cart* cart, uint8_t bank, uint16_t adr) {
         return superfx_cpu_read_rom(cart->superfx, off, 0);
       }
       return 0;
+    case CART_SA1:
+      cart_sync_coprocessors(cart, cart_master_clock(cart));
+      return sa1_cpu_read(cart->sa1, bank, adr, 0xff);
   }
   assert(0);
   return 0;
@@ -236,6 +262,10 @@ void cart_write(Cart* cart, uint8_t bank, uint16_t adr, uint8_t val) {
       else if (bank == 0x70 || bank == 0x71 || bank == 0xf0 || bank == 0xf1)
         superfx_cpu_write_ram(cart->superfx,
                               ((uint32_t)(bank & 1) << 16) | adr, val);
+      break;
+    case CART_SA1:
+      cart_sync_coprocessors(cart, cart_master_clock(cart));
+      sa1_cpu_write(cart->sa1, bank, adr, val);
       break;
   }
 }

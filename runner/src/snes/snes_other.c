@@ -73,6 +73,10 @@ bool snes_loadRom(Snes* snes, const uint8_t* data, int length) {
   // check if we can load it
   if (headers[used].coprocessor == 1)
     headers[used].cartType = CART_SUPERFX;
+  /* Nintendo SA-1 boards use coprocessor id $3. Their map modes are in the
+   * $2x LoROM family (Super Mario RPG is $23/$35). */
+  if (headers[used].coprocessor == 3)
+    headers[used].cartType = CART_SA1;
   /* Coprocessor id $F means "see the $FFBF sub-type byte"; $10 there is
    * Capcom's Cx4 (Mega Man X2 / X3 — the only two Cx4 titles). The other $F
    * sub-types (SPC7110, ST010/011/018) are still unsupported. */
@@ -104,7 +108,7 @@ bool snes_loadRom(Snes* snes, const uint8_t* data, int length) {
            (headers[used].coprocessor << 4) | headers[used].chips);
     return false;
   }
-  if(headers[used].cartType > CART_DSP1_HIROM) {
+  if(headers[used].cartType > CART_SA1) {
     printf("Failed to load rom: unsupported type (%d)\n", headers[used].cartType);
     return false;
   }
@@ -148,6 +152,8 @@ bool snes_loadRom(Snes* snes, const uint8_t* data, int length) {
     cart_ram_size = 0;
   else if (headers[used].cartType == CART_DSP1 ||
            headers[used].cartType == CART_DSP1_HIROM)
+    cart_ram_size = headers[used].ramSize > 1024 ? headers[used].ramSize : 0;
+  else if (headers[used].cartType == CART_SA1)
     cart_ram_size = headers[used].ramSize > 1024 ? headers[used].ramSize : 0;
   else
     cart_ram_size = headers[used].chips > 0 ? headers[used].ramSize : 0;

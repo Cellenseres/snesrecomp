@@ -12,6 +12,7 @@ typedef struct Cart Cart;
 typedef struct SuperFx SuperFx;
 typedef struct Cx4 Cx4;
 typedef struct Dsp1 Dsp1;
+typedef struct Sa1 Sa1;
 
 #include "snes.h"
 
@@ -24,9 +25,11 @@ struct Cart {
   uint8_t* ram;
   uint32_t ramSize;
   const uint64_t* masterClock;
+  uint32_t cpuBusAddress;
   SuperFx* superfx;
   Cx4* cx4;
   Dsp1* dsp1;
+  Sa1* sa1;
 };
 
 enum {
@@ -35,8 +38,13 @@ enum {
   CART_SUPERFX = 3,
   CART_CX4 = 4,
   CART_DSP1 = 5,
-  CART_DSP1_HIROM = 6
+  CART_DSP1_HIROM = 6,
+  CART_SA1 = 7
 };
+
+static inline bool cart_has_sa1(const Cart *cart) {
+  return cart && cart->type == CART_SA1 && cart->sa1;
+}
 
 static inline bool cart_has_dsp1(const Cart* cart) {
   return cart &&
@@ -77,6 +85,7 @@ static inline bool cart_is_dsp1_sram_window(const Cart* cart, uint8_t bank,
 
 void cart_sync_coprocessors(Cart *cart, uint64_t master_clock);
 void cart_set_master_clock_source(Cart *cart, const uint64_t *master_clock);
+void cart_note_cpu_bus(Cart *cart, uint8_t bank, uint16_t address);
 
 // TODO: how to handle reset & load? (especially where to init ram)
 
@@ -87,7 +96,8 @@ void cart_load(Cart* cart, int type, uint8_t* rom, int romSize, int ramSize); //
 uint8_t cart_read(Cart* cart, uint8_t bank, uint16_t adr);
 void cart_write(Cart* cart, uint8_t bank, uint16_t adr, uint8_t val);
 void cart_saveload(Cart *cart, SaveLoadInfo *sli);
-// Resolve a CPU-visible ROM address to stable cart storage. Returns NULL for
-// WRAM, I/O, SRAM, or another non-ROM window.
+// Resolve a CPU-visible address to stable cartridge storage. Standard carts
+// return ROM only; SA-1 may also return its I-RAM or BW-RAM backing. Returns
+// NULL for I/O and switched-vector bytes.
 uint8_t *cart_getRomPtr(Cart *cart, uint8_t bank, uint16_t adr);
 #endif

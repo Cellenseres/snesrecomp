@@ -10,7 +10,9 @@
 #include "snes.h"   /* Snes, apuCatchupCycles, snes_catchupApu */
 #include "superfx.h"
 #include "cx4.h"
+#include "sa1.h"
 #include "debug_server.h"
+#include "common_rtl.h"
 #include "cosim.h"  /* cosim_insn — instruction-granular lockstep (no-op unless SNES_COSIM) */
 #include "common_cpu_infra.h"  /* cpu_take_tailcall_return_context — swallow a stale
                                 * tail-armed context on the LLE yield unwind */
@@ -61,6 +63,16 @@ static uint64_t bridge_bounce_flush_thresh(void) {
 }
 static void bridge_apu_flush(CpuState *cpu) {
     if (!s_apu_pending_master) return;
+    /* RtlRunFrame's absolute guest-cycle clock and this legacy relative
+     * catch-up describe the same elapsed time. Running both made interpreted
+     * SPC handshakes complete at about twice hardware speed (first exposed by
+     * Super Mario RPG's long boot upload). Port accesses and the frame-boundary
+     * sync already advance the SPC to the exact absolute timestamp. */
+    if (rtl_apu_frame_timeline_active()) {
+        s_apu_pending_master = 0;
+        g_apu_last_sync_master = cpu->master_cycles;
+        return;
+    }
     RtlApuLock();
     g_snes->apuCatchupCycles += (double)s_apu_pending_master * kInterpApuPerMaster;
     g_apu_last_sync_master = cpu->master_cycles;
@@ -604,6 +616,7 @@ static int _interp_run_core(CpuState *cpu, uint32_t entry_pc24,
     in.write = bridge_bus_write;
     in.read_word = bridge_bus_read_word;
     in.write_word = bridge_bus_write_word;
+    in.brkHookEnabled = true;
     const int wlog_state_sync = getenv("SNESRECOMP_WLOG_STATE") != NULL;
 
     sync_cpu_to_interp(cpu, &in);
@@ -689,7 +702,9 @@ static int _interp_run_core(CpuState *cpu, uint32_t entry_pc24,
               * interrupts enabled ($7F51 bit 0 clear). Same shape as the GSU
               * line above; omitting it would starve the handler. */
              (g_snes->cart && g_snes->cart->cx4 &&
-              cx4_irq_pending(g_snes->cart->cx4)))) {
+              cx4_irq_pending(g_snes->cart->cx4)) ||
+             (g_snes->cart && g_snes->cart->sa1 &&
+              sa1_cpu_irq_pending(g_snes->cart->sa1)))) {
             s_lle_resume_pc24=pc_before;
             sync_interp_to_cpu(&in,cpu);
             bridge_apu_flush(cpu);
@@ -1071,8 +1086,10 @@ static int _interp_run_core(CpuState *cpu, uint32_t entry_pc24,
             {
                 /* Guest-time APU, batched (see bridge_apu_flush): accumulate;
                  * convert on APU-port access / ~4096 master / exits. */
-                s_apu_pending_master += _master;
-                if (s_apu_pending_master >= 4096) bridge_apu_flush(cpu);
+                if (!rtl_apu_frame_timeline_active()) {
+                    s_apu_pending_master += _master;
+                    if (s_apu_pending_master >= 4096) bridge_apu_flush(cpu);
+                }
             }
         }
 

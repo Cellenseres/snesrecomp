@@ -349,7 +349,13 @@ uint8_t snes_readReg(Snes* snes, uint16_t adr) {
       // hPos by a fixed step. Calibrated so a typical busy-wait crosses
       // both edges in ~10-20 reads. Bit 6 = hblank (dots ~1024..1364 of
       // a 1364-dot scanline). See docs/VIRTUAL_HW_CONTRACT.md.
-      snes_advance_beam(snes, 64, false);
+      /* Whole-program interpreter runs already advance the beam from every
+       * opcode's measured master clocks. Applying the legacy static-recomp
+       * polling tick as well doubles time in $4212 wait loops (SMRPG's boot
+       * fades completed in half the reference frame count). */
+      extern int g_interp_apu_driving;
+      if (!g_interp_apu_driving)
+        snes_advance_beam(snes, 64, false);
       // Bit 7 = vblank. The real frame loop drives vblank via inNmi, not
       // inVblank (inVblank is never set true), so on the static-recomp
       // path bit 7 must be SYNTHESIZED the same way bit 6 is — otherwise a

@@ -43,6 +43,10 @@ extern uint64_t g_apu_last_sync_cycles;
 // FastROM bit (g_memsel) is declared in cpu_state.h so generated blocks can see
 // it; it's defined alongside the pacing state in common_rtl.c.
 extern uint64_t g_apu_last_sync_master;
+/* True while RtlRunFrame's absolute guest-frame clock owns SPC progression.
+ * Interpreter fallback must not also add its legacy relative catch-up for the
+ * same elapsed master cycles. */
+bool rtl_apu_frame_timeline_active(void);
 void rtl_accumulate_apu_catchup(void);
 /* Caller holds RtlApuLock. Before the first frame, retain bootstrap synthetic
  * pacing; afterward synchronize reads to the authoritative guest timestamp. */

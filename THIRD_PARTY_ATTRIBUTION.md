@@ -211,6 +211,33 @@ SMK command set (`00`, `02`, `04`, `08`, `0a`, `0c`, `10`, `18`, `20`, and
 distance command `28`. The runtime keeps LLE as the preferred backend and
 stops without fabricating output if HLE encounters an unverified command.
 
+## ares — Nintendo SA-1 coprocessor
+
+`runner/src/snes/sa1.{c,h}` implements the SA-1 cartridge memory map and
+peripherals from the behavior documented in **ares**, which is ISC-licensed.
+The embedded 65816 instruction engine is the separately attributed
+MIT-licensed LakeSnes-derived `interp816` core.
+
+- Upstream: https://github.com/ares-emulator/ares
+- Reference revision: `b80f67d38312648d197762121c3a27b02c0887db`
+- Files of origin: `ares/sfc/coprocessor/sa1/*`
+- License: ISC (see the ares license text above)
+
+### Derivation / modifications
+
+- ares' C++ component/thread organization was expressed as a self-contained
+  C11 cartridge component using the runner's existing pull synchronization
+  seam. One SA-1 CPU cycle consumes two SNES master clocks.
+- The SA-1 CPU uses `interp816` with architectural BRK behavior and an
+  SA-1-specific bus; it does not use the main CPU's AOT bridge markers.
+- Super MMC ROM selection, 2 KiB IRAM, linear and bitmap BW-RAM windows,
+  write protection, CPU/SA-1 interrupt communication and vector overrides,
+  timer, normal DMA, CC1/CC2 character conversion, multiply/divide/accumulate,
+  and variable-bit reading were translated to explicit fixed-width C state.
+- ares' debugger, serialization framework, and scheduler were replaced with
+  the runner's saveload and observability interfaces.
+- No title-specific address, command shortcut, or firmware data is present.
+
 ## LakeSnes — 65816 CPU core
 
 `runner/src/snes/interp816.{c,h}`, the 65816 interpreter backing the
@@ -235,7 +262,8 @@ interpreter-fallback tier with:
 - snesrecomp debug instrumentation removed (`pc_hist` / `DumpCpuHistory` and
   the top-of-`doOpcode` assert tripwire);
 - `WAI` restored to stock behavior (`waiting = true`, was an assert);
-- `BRK` routed to the `interp816_opcode_hook` bridge seam.
+- `BRK` can retain the historical fallback-tier marker behavior or use
+  architectural interrupt vectoring for coprocessor execution.
 
 The exact transform is reproducible: `git show 9de9855^:runner/src/snes/cpu.c`,
 then the renames + seam edits described above. The vendored core is validated
