@@ -51,6 +51,28 @@ def test_clean_profile_targets_are_optional_aot_roots():
             VariantKey(0x008123, 1, 0),)
 
 
+def test_aot_bailout_site_blacklists_an_earlier_clean_target():
+    with tempfile.TemporaryDirectory() as temp:
+        profile = pathlib.Path(temp) / "tier2_coverage.json"
+        profile.write_text(json.dumps({
+            "schema": "snesrecomp tier2 coverage v1",
+            "discoveries": [
+                {"site_pc24": "0x008000", "target_pc24": "0x008123",
+                 "entry_mx": "M1X0", "site_kind": "call_gap",
+                 "clean_hits": 3, "bail_hits": 0},
+                {"site_pc24": "0x008123", "target_pc24": "0x009000",
+                 "entry_mx": "M1X0", "site_kind": "call_gap",
+                 "clean_hits": 0, "bail_hits": 1},
+                {"site_pc24": "0x008010", "target_pc24": "0x008456",
+                 "entry_mx": "M0X1", "site_kind": "call_gap",
+                 "clean_hits": 2, "bail_hits": 0},
+            ],
+        }), encoding="utf-8")
+
+        assert discover_profile_roots((profile,)) == (
+            VariantKey(0x008456, 0, 1),)
+
+
 def test_declared_profile_target_is_safe_even_when_landing_is_not_a_call():
     with tempfile.TemporaryDirectory() as temp:
         profile = pathlib.Path(temp) / "tier2_coverage.json"

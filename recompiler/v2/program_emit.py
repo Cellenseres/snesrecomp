@@ -265,6 +265,7 @@ def discover_profile_roots(manifest_paths: Iterable[pathlib.Path],
         if mirror is not None:
             declared.add(mirror)
     roots = set()
+    profile_discoveries = []
     for path in manifest_paths:
         path = pathlib.Path(path)
         try:
@@ -283,28 +284,52 @@ def discover_profile_roots(manifest_paths: Iterable[pathlib.Path],
         if not isinstance(discoveries, list):
             raise ValueError(
                 f"profile manifest discoveries must be a list in {path}")
-        for item in discoveries:
-            if not isinstance(item, dict):
-                continue
-            try:
-                clean_hits = int(item.get("clean_hits", 0))
-                bail_hits = int(item.get("bail_hits", 0))
-            except (TypeError, ValueError):
-                continue
-            if clean_hits <= 0 or bail_hits != 0:
-                continue
-            match = _PROFILE_MX_RE.fullmatch(str(item.get("entry_mx", "")))
-            if match is None:
-                continue
-            try:
-                target = int(str(item["target_pc24"]), 0) & 0xFFFFFF
-            except (KeyError, TypeError, ValueError):
-                continue
-            if (str(item.get("site_kind", "")) != "call_gap" and
-                    target not in declared):
-                continue
-            roots.add(VariantKey(
-                target, int(match.group(1)), int(match.group(2))))
+        profile_discoveries.extend(
+            item for item in discoveries if isinstance(item, dict))
+
+    # A later AOT trial can prove that a formerly clean target is not a safe
+    # standalone C boundary: the generated body begins at that target, then
+    # its own dynamic edge bails. Treat the bailout's site as a target
+    # blacklist across the whole profile set. This closes the feedback loop
+    # without requiring a person to edit an earlier clean call-gap row.
+    unsafe_targets = set()
+    for item in profile_discoveries:
+        try:
+            bail_hits = int(item.get("bail_hits", 0))
+            site = int(str(item["site_pc24"]), 0) & 0xFFFFFF
+        except (KeyError, TypeError, ValueError):
+            continue
+        if bail_hits <= 0:
+            continue
+        unsafe_targets.add(site)
+        mirror = _lorom_mirror_pc24(site)
+        if mirror is not None:
+            unsafe_targets.add(mirror)
+
+    for item in profile_discoveries:
+        if not isinstance(item, dict):
+            continue
+        try:
+            clean_hits = int(item.get("clean_hits", 0))
+            bail_hits = int(item.get("bail_hits", 0))
+        except (TypeError, ValueError):
+            continue
+        if clean_hits <= 0 or bail_hits != 0:
+            continue
+        match = _PROFILE_MX_RE.fullmatch(str(item.get("entry_mx", "")))
+        if match is None:
+            continue
+        try:
+            target = int(str(item["target_pc24"]), 0) & 0xFFFFFF
+        except (KeyError, TypeError, ValueError):
+            continue
+        if target in unsafe_targets:
+            continue
+        if (str(item.get("site_kind", "")) != "call_gap" and
+                target not in declared):
+            continue
+        roots.add(VariantKey(
+            target, int(match.group(1)), int(match.group(2))))
     return tuple(sorted(roots))
 
 
