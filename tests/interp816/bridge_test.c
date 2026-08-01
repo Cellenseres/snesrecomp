@@ -248,6 +248,16 @@ static void load(uint32 pc24, const uint8_t *code, int len) {
 int main(void) {
     RAM = malloc(MEMSZ);
 
+    printf("S0 APU timeline policy remains cartridge-scoped\n");
+    CHECK(!interp_bridge_use_absolute_apu_timeline(false, false),
+          "inactive non-SA1 timeline must use legacy catch-up");
+    CHECK(!interp_bridge_use_absolute_apu_timeline(true, false),
+          "active non-SA1 timeline must use legacy catch-up");
+    CHECK(!interp_bridge_use_absolute_apu_timeline(false, true),
+          "inactive SA1 timeline must use legacy catch-up");
+    CHECK(interp_bridge_use_absolute_apu_timeline(true, true),
+          "active SA1 timeline must suppress duplicate catch-up");
+
     /* S1: LDA #$01 ; JSR $8100 (compiled) ; RTS */
     { memset(RAM, 0, MEMSZ); init_cpu(); g_aot_called = 0;
       uint8_t c[] = {0xA9,0x01, 0x20,0x00,0x81, 0x60};

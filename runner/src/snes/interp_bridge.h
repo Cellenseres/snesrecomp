@@ -32,6 +32,15 @@
 #include <stdio.h>
 #include "cpu_state.h"
 
+/* SA-1's frame timeline already advances the SPC to absolute guest time, so
+ * its interpreter must not also apply the legacy relative catch-up. Ordinary
+ * SNES cartridges still require that catch-up during interpreter-heavy boot
+ * code (Mega Man X otherwise stalls in task 0 at the copyright screen). */
+static inline bool interp_bridge_use_absolute_apu_timeline(
+    bool frame_timeline_active, bool is_sa1) {
+  return frame_timeline_active && is_sa1;
+}
+
 /* Optional game policy invoked immediately before one interpreted opcode.
  * The bridge compares the live PC first, so ordinary interpreted instructions
  * pay only the address check. At a match it synchronizes registers into

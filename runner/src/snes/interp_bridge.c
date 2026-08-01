@@ -68,7 +68,9 @@ static void bridge_apu_flush(CpuState *cpu) {
      * SPC handshakes complete at about twice hardware speed (first exposed by
      * Super Mario RPG's long boot upload). Port accesses and the frame-boundary
      * sync already advance the SPC to the exact absolute timestamp. */
-    if (rtl_apu_frame_timeline_active()) {
+    if (interp_bridge_use_absolute_apu_timeline(
+            rtl_apu_frame_timeline_active(),
+            g_snes && cart_has_sa1(g_snes->cart))) {
         s_apu_pending_master = 0;
         g_apu_last_sync_master = cpu->master_cycles;
         return;
@@ -1086,7 +1088,9 @@ static int _interp_run_core(CpuState *cpu, uint32_t entry_pc24,
             {
                 /* Guest-time APU, batched (see bridge_apu_flush): accumulate;
                  * convert on APU-port access / ~4096 master / exits. */
-                if (!rtl_apu_frame_timeline_active()) {
+                if (!interp_bridge_use_absolute_apu_timeline(
+                        rtl_apu_frame_timeline_active(),
+                        g_snes && cart_has_sa1(g_snes->cart))) {
                     s_apu_pending_master += _master;
                     if (s_apu_pending_master >= 4096) bridge_apu_flush(cpu);
                 }
