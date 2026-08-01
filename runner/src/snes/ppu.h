@@ -226,6 +226,10 @@ struct Ppu {
   // when a host line enhancer supplies the expanded scene. This lets the
   // layer's normally hidden/blank native edge columns reveal lower layers.
   uint8_t wsViewportInsetL[4], wsViewportInsetR[4];
+  // Presentation-only expansion of game-authored window edges into the side
+  // margins. Layer bits use the PPU window layer numbering (BG1..BG4, OBJ,
+  // color); window bits select W1/W2. Zero is the hardware-authentic default.
+  uint8_t wsWindowExpandLayers, wsWindowExpandWindows;
   // Strict decode of the ambiguous 9-bit OAM X band [256, 256+extraRightCur).
   // A raw value there is either a genuine right-margin sprite (widescreen
   // host emitted it on purpose) or a sprite the game parked off-screen-left
@@ -460,9 +464,10 @@ void PpuSetExtraSideSpace(Ppu *ppu, int left, int right, int bottom);
 void PpuSetWidescreenHudSplit(Ppu *ppu, uint8_t height, uint8_t left_end,
                               uint8_t right_start);
 
-// Opt the split HUD into full-budget composition. Pixels outside the live
-// world margin remain black unless BG3 supplied an actual HUD pixel. A BG3
-// hardware window is ignored only inside the configured HUD scanline band.
+// Opt the split HUD, configured layer-anchor bands, and selected HUD OAM into
+// full-budget composition. Pixels outside the live world margin remain black
+// unless one of those HUD sources supplied an actual pixel. A BG3 hardware
+// window is ignored only inside the configured split-HUD scanline band.
 void PpuSetWidescreenHudAlwaysVisible(Ppu *ppu, bool enabled);
 
 // Configure the vertical band and native left/right anchor thresholds used by
@@ -477,7 +482,9 @@ void PpuSetWsHudOamBand(Ppu *ppu, uint8_t height, uint8_t left_end,
 void PpuSetWsHudOamShift(Ppu *ppu, uint8_t nslots);
 
 // Shift edge-hugging HUD sprites in OAM slots [first_slot, first_slot+nslots)
-// outward with the live widescreen margins. Presentation-only.
+// outward with the live widescreen margins. When HUD-always-visible is set,
+// use the full centering budget so HUDs can occupy room-bound pillarboxes.
+// Presentation-only.
 void PpuSetWsHudOamShiftRange(Ppu *ppu, uint8_t first_slot, uint8_t nslots);
 
 // Publish this frame's OAM right-margin hints (see wsOamRightHintStrict).
@@ -510,6 +517,12 @@ const uint8_t *PpuGetMode2Bg1Palette(const Ppu *ppu);
 // Per-layer widescreen clamp: bit L keeps BG(L+1) in the authentic 256
 // columns while other layers extend into the margins. Re-apply per frame.
 void PpuSetWidescreenLayerClamp(Ppu *ppu, uint8_t mask);
+
+// Extend selected game-authored PPU windows by the current widescreen margins
+// while evaluating the selected layers. Emulated window registers are not
+// changed. Re-apply per frame; zero masks disable the policy.
+void PpuSetWidescreenWindowExpansion(Ppu *ppu, uint8_t layer_mask,
+                                     uint8_t window_mask);
 
 // Fill Mode-1 background margins by reflecting or cyclically repeating the
 // authentic rendered scanline. Rendering remains layer-, priority-, window-,

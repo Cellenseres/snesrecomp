@@ -73,6 +73,50 @@ def test_aot_bailout_site_blacklists_an_earlier_clean_target():
             VariantKey(0x008456, 0, 1),)
 
 
+def test_explicit_semantic_failure_blacklists_clean_target_and_mirror():
+    with tempfile.TemporaryDirectory() as temp:
+        profile = pathlib.Path(temp) / "tier2_coverage.json"
+        profile.write_text(json.dumps({
+            "schema": "snesrecomp tier2 coverage v1",
+            "unsafe_aot_targets": ["0x008123"],
+            "discoveries": [
+                {"site_pc24": "0x008000", "target_pc24": "0x808123",
+                 "entry_mx": "M1X0", "site_kind": "call_gap",
+                 "clean_hits": 3, "bail_hits": 0},
+                {"site_pc24": "0x008010", "target_pc24": "0x008456",
+                 "entry_mx": "M0X1", "site_kind": "call_gap",
+                 "clean_hits": 2, "bail_hits": 0},
+            ],
+        }), encoding="utf-8")
+
+        assert discover_profile_roots((profile,)) == (
+            VariantKey(0x008456, 0, 1),)
+
+
+def test_qualified_target_allowlist_separates_coverage_from_promotion():
+    with tempfile.TemporaryDirectory() as temp:
+        profile = pathlib.Path(temp) / "tier2_coverage.json"
+        profile.write_text(json.dumps({
+            "schema": "snesrecomp tier2 coverage v1",
+            "qualified_aot_targets": ["0x008456"],
+            "discoveries": [
+                {"site_pc24": "0x008000", "target_pc24": "0x008123",
+                 "entry_mx": "M1X0", "site_kind": "call_gap",
+                 "clean_hits": 3, "bail_hits": 0},
+                {"site_pc24": "0x008010", "target_pc24": "0x808456",
+                 "entry_mx": "M0X1", "site_kind": "call_gap",
+                 "clean_hits": 2, "bail_hits": 0},
+            ],
+        }), encoding="utf-8")
+
+        force_lle = set()
+        assert discover_profile_roots((profile,), (), force_lle) == (
+            VariantKey(0x008123, 1, 0),
+            VariantKey(0x808456, 0, 1),
+        )
+        assert force_lle == {0x008123, 0x808123}
+
+
 def test_declared_profile_target_is_safe_even_when_landing_is_not_a_call():
     with tempfile.TemporaryDirectory() as temp:
         profile = pathlib.Path(temp) / "tier2_coverage.json"

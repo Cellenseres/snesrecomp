@@ -243,7 +243,8 @@ def discover_host_roots(parsed, source_roots: Iterable[pathlib.Path],
 
 
 def discover_profile_roots(manifest_paths: Iterable[pathlib.Path],
-                           declared_entry_pcs: Iterable[int] = ()) \
+                           declared_entry_pcs: Iterable[int] = (),
+                           force_lle_out: set[int] | None = None) \
         -> tuple[VariantKey, ...]:
     """Load clean runtime-observed targets as optional AOT roots.
 
@@ -266,6 +267,9 @@ def discover_profile_roots(manifest_paths: Iterable[pathlib.Path],
             declared.add(mirror)
     roots = set()
     profile_discoveries = []
+    explicit_unsafe_targets = set()
+    qualified_targets = set()
+    qualified_targets_declared = False
     for path in manifest_paths:
         path = pathlib.Path(path)
         try:
@@ -286,13 +290,44 @@ def discover_profile_roots(manifest_paths: Iterable[pathlib.Path],
                 f"profile manifest discoveries must be a list in {path}")
         profile_discoveries.extend(
             item for item in discoveries if isinstance(item, dict))
+        unsafe = manifest.get("unsafe_aot_targets", [])
+        if not isinstance(unsafe, list):
+            raise ValueError(
+                f"profile manifest unsafe_aot_targets must be a list in {path}")
+        for value in unsafe:
+            try:
+                target = int(str(value), 0) & 0xFFFFFF
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"invalid unsafe AOT target {value!r} in {path}")
+            explicit_unsafe_targets.add(target)
+            mirror = _lorom_mirror_pc24(target)
+            if mirror is not None:
+                explicit_unsafe_targets.add(mirror)
+        qualified = manifest.get("qualified_aot_targets")
+        if qualified is not None:
+            qualified_targets_declared = True
+            if not isinstance(qualified, list):
+                raise ValueError(
+                    f"profile manifest qualified_aot_targets must be a list "
+                    f"in {path}")
+            for value in qualified:
+                try:
+                    target = int(str(value), 0) & 0xFFFFFF
+                except (TypeError, ValueError):
+                    raise ValueError(
+                        f"invalid qualified AOT target {value!r} in {path}")
+                qualified_targets.add(target)
+                mirror = _lorom_mirror_pc24(target)
+                if mirror is not None:
+                    qualified_targets.add(mirror)
 
     # A later AOT trial can prove that a formerly clean target is not a safe
     # standalone C boundary: the generated body begins at that target, then
     # its own dynamic edge bails. Treat the bailout's site as a target
     # blacklist across the whole profile set. This closes the feedback loop
     # without requiring a person to edit an earlier clean call-gap row.
-    unsafe_targets = set()
+    unsafe_targets = set(explicit_unsafe_targets)
     for item in profile_discoveries:
         try:
             bail_hits = int(item.get("bail_hits", 0))
@@ -325,6 +360,12 @@ def discover_profile_roots(manifest_paths: Iterable[pathlib.Path],
             continue
         if target in unsafe_targets:
             continue
+        if (qualified_targets_declared and target not in qualified_targets
+                and force_lle_out is not None):
+            force_lle_out.add(target)
+            mirror = _lorom_mirror_pc24(target)
+            if mirror is not None:
+                force_lle_out.add(mirror)
         if (str(item.get("site_kind", "")) != "call_gap" and
                 target not in declared):
             continue

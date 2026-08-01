@@ -67,7 +67,8 @@ def native_analyzer_path() -> pathlib.Path:
 
 def build_manifest_native(*, rom_path, cfg_dir, all_cfg_roots=False,
                           additional_roots=(), executable=None,
-                          max_insns=4096, max_nodes=100_000):
+                          max_insns=4096, max_nodes=100_000,
+                          force_lle=()):
     """Run the compiled analyzer and load its stable manifest contract."""
     executable = pathlib.Path(
         executable or native_analyzer_path()).resolve()
@@ -91,6 +92,8 @@ def build_manifest_native(*, rom_path, cfg_dir, all_cfg_roots=False,
         command.append("--all-cfg-roots")
     for key in sorted(set(additional_roots)):
         command.extend(("--root", f"{key.pc24:06X}:{key.m}:{key.x}"))
+    for pc24 in sorted(set(force_lle)):
+        command.extend(("--force-lle", f"{pc24 & 0xFFFFFF:06X}"))
     try:
         completed = subprocess.run(
             command, text=True, capture_output=True, check=False)

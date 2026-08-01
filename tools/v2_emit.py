@@ -79,6 +79,7 @@ def _config_digest(parsed) -> str:
 
 def _analysis_input_digest(*, rom: bytes, generator_digest: str,
                            config_digest: str, additional_roots,
+                           force_lle,
                            cfg_roots: bool,
                            analysis_backend: str,
                            enable_hle: bool, max_insns: int,
@@ -92,6 +93,7 @@ def _analysis_input_digest(*, rom: bytes, generator_digest: str,
         "additional_roots": [
             (key.pc24, key.m, key.x) for key in sorted(additional_roots)
         ],
+        "force_lle": [int(pc24) for pc24 in sorted(force_lle)],
         "cfg_roots": bool(cfg_roots),
         "analysis_backend": str(analysis_backend),
         "hle": bool(enable_hle),
@@ -223,10 +225,16 @@ def main() -> int:
         for bank, _path, cfg in parsed for entry in cfg.entries
     }
     try:
+        profile_force_lle = set()
         profile_roots = discover_profile_roots(
-            args.profile_manifest, declared_entry_pcs)
+            args.profile_manifest, declared_entry_pcs, profile_force_lle)
     except ValueError as exc:
         parser.error(str(exc))
+    if profile_force_lle and parsed:
+        # Coverage and promotion are separate contracts. Keep every observed
+        # boundary in the exact LLE manifest, but only let the profile's
+        # explicitly qualified targets reach AOT eligibility.
+        parsed[0][2].force_lle.update(profile_force_lle)
     additional_roots = tuple(sorted(
         set(host_roots) | set(profile_roots) | set(ram_routine_roots)))
 
@@ -257,6 +265,7 @@ def main() -> int:
         generator_digest=generator_digest,
         config_digest=config_digest,
         additional_roots=additional_roots,
+        force_lle=profile_force_lle,
         cfg_roots=args.cfg_roots,
         analysis_backend=analysis_backend,
         enable_hle=not args.no_hle,
@@ -289,6 +298,7 @@ def main() -> int:
                     rom_path=args.rom, cfg_dir=cfg_dir,
                     all_cfg_roots=args.cfg_roots,
                     additional_roots=additional_roots,
+                    force_lle=profile_force_lle,
                     executable=native_path,
                     max_insns=args.max_insns,
                     max_nodes=args.max_nodes)
@@ -309,6 +319,7 @@ def main() -> int:
                 rom=rom, generator_digest=generator_digest,
                 config_digest=config_digest,
                 additional_roots=additional_roots, cfg_roots=args.cfg_roots,
+                force_lle=profile_force_lle,
                 analysis_backend="python", enable_hle=not args.no_hle,
                 max_insns=args.max_insns, max_nodes=args.max_nodes,
                 shard_threshold_bytes=shard_threshold_bytes,

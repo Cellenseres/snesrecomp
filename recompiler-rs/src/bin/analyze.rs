@@ -1554,6 +1554,13 @@ fn parse_root(value: &str) -> Result<VariantKey, String> {
     Ok(VariantKey::new(pc24, m, x))
 }
 
+fn parse_pc24(value: &str, flag: &str) -> Result<u32, String> {
+    let pc = value.strip_prefix("0x").unwrap_or(value);
+    u32::from_str_radix(pc, 16)
+        .map(|value| value & 0xFFFFFF)
+        .map_err(|_| format!("invalid {flag} PC {value:?}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1610,6 +1617,13 @@ fn main() {
         inputs
             .roots
             .insert(parse_root(&value).expect("parse --root"));
+    }
+    for value in arg_values(&args, "--force-lle") {
+        let pc24 = parse_pc24(&value, "--force-lle").expect("parse --force-lle");
+        inputs.force_lle.insert(pc24);
+        if let Some(mirror) = mirror_pc24(pc24) {
+            inputs.force_lle.insert(mirror);
+        }
     }
     inputs
         .roots

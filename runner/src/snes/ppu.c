@@ -161,6 +161,8 @@ static inline void PpuResetLayerPolicies(Ppu *ppu) {
   memset(ppu->wsMarginGapR, 0, sizeof(ppu->wsMarginGapR));
   memset(ppu->wsViewportInsetL, 0, sizeof(ppu->wsViewportInsetL));
   memset(ppu->wsViewportInsetR, 0, sizeof(ppu->wsViewportInsetR));
+  ppu->wsWindowExpandLayers = 0;
+  ppu->wsWindowExpandWindows = 0;
 }
 
 void PpuSetExtraSpace(Ppu *ppu, uint8_t extra) {
@@ -274,6 +276,12 @@ void PpuSetWidescreenLayerClamp(Ppu *ppu, uint8_t mask) {
   ppu->wsLayerClamp = mask;
 }
 
+void PpuSetWidescreenWindowExpansion(Ppu *ppu, uint8_t layer_mask,
+                                     uint8_t window_mask) {
+  ppu->wsWindowExpandLayers = layer_mask & 0x3f;
+  ppu->wsWindowExpandWindows = window_mask & 0x03;
+}
+
 void PpuSetWidescreenLayerMirror(Ppu *ppu, uint8_t mask) {
   ppu->wsLayerMirror = mask;
 }
@@ -374,6 +382,9 @@ static inline uint8 PpuMosaicAt(Ppu *ppu, int i) {
 }
 
 void ppu_runLine(Ppu* ppu, int line) {
+  /* Per-line HDMA state must be captured here, not at end-of-frame: games can
+   * rewrite windows and scroll registers before every scanline. */
+  debug_server_on_ppu_line(line);
   if(line == 0) {
     // Always-on: snapshot the OAM the scanline renderer is about to consume.
     debug_server_on_oam_render();
@@ -459,6 +470,18 @@ static void PpuWindows_CalcWithExtra(PpuWindows *win, Ppu *ppu, uint layer,
   int w2l = ppu->window2left, w2r = ppu->window2right;
   PpuWidescreenAdjustPinnedWindowEdges(win->edges[0], window_right, &w1l,
                                        &w1r, &w2l, &w2r);
+  if (ppu->wsWindowExpandLayers & (1u << layer)) {
+    if ((ppu->wsWindowExpandWindows & 1u) &&
+        ppu->window1left <= ppu->window1right) {
+      w1l = IntMax(w1l - extra_left, win->edges[0]);
+      w1r = IntMin(w1r + extra_right, window_right - 1);
+    }
+    if ((ppu->wsWindowExpandWindows & 2u) &&
+        ppu->window2left <= ppu->window2right) {
+      w2l = IntMax(w2l - extra_left, win->edges[0]);
+      w2r = IntMin(w2r + extra_right, window_right - 1);
+    }
+  }
   bool w1_ena = (winflags & kWindow1Enabled) && w1l <= w1r;
   if (w1_ena) {
     if (w1l > win->edges[0]) {
@@ -507,6 +530,7 @@ static void PpuWindows_CalcWithExtra(PpuWindows *win, Ppu *ppu, uint layer,
   if ((winflags & (kWindow2Enabled | kWindow2Inversed)) == (kWindow2Enabled | kWindow2Inversed))
     w2_bits = ~w2_bits;
   win->bits = w1_bits | w2_bits;
+  debug_server_on_ppu_window(y, (int)layer, win->edges, win->nr, win->bits);
 }
 
 static void PpuWindows_Calc(PpuWindows *win, Ppu *ppu, uint layer, int y) {
@@ -534,8 +558,7 @@ static void PpuWindowsSplit(PpuWindows *win, int16 *bias, int xpos) {
 
 static bool PpuApplyLayerAnchorBand(Ppu *ppu, uint layer, uint y,
                                     PpuWindows *win, int16 *bias) {
-  if (!(ppu->extraLeftCur | ppu->extraRightCur) ||
-      win->nr != 1 || win->bits != 0)
+  if (win->nr != 1 || win->bits != 0)
     return false;
   int left_end = 0;
   int right_start = 0;
@@ -549,18 +572,41 @@ static bool PpuApplyLayerAnchorBand(Ppu *ppu, uint layer, uint y,
   }
   if (left_end == 0 || left_end >= right_start)
     return false;
-
+  const bool full_budget =
+      (ppu->wsHudSplitHeight & 0x80) && ppu->extraLeftRight;
+  const int left_extra =
+      full_budget ? ppu->extraLeftRight : ppu->extraLeftCur;
+  const int right_extra =
+      full_budget ? ppu->extraLeftRight : ppu->extraRightCur;
+  if (!(left_extra | right_extra))
+    return false;
   win->nr = 5;
   win->bits = 0x0a;
-  win->edges[0] = -(int16)ppu->extraLeftCur;
-  win->edges[1] = (int16)(left_end - ppu->extraLeftCur);
+  win->edges[0] = -(int16)left_extra;
+  win->edges[1] = (int16)(left_end - left_extra);
   win->edges[2] = (int16)left_end;
   win->edges[3] = (int16)right_start;
-  win->edges[4] = (int16)(right_start + ppu->extraRightCur);
-  win->edges[5] = (int16)(256 + ppu->extraRightCur);
-  bias[0] = ppu->extraLeftCur;
-  bias[4] = -(int16)ppu->extraRightCur;
+  win->edges[4] = (int16)(right_start + right_extra);
+  win->edges[5] = (int16)(256 + right_extra);
+  bias[0] = (int16)left_extra;
+  bias[4] = -(int16)right_extra;
   return true;
+}
+
+static int PpuFullBudgetAnchorLayerAt(const Ppu *ppu, uint y) {
+  if (!(ppu->wsHudSplitHeight & 0x80) || !ppu->extraLeftRight)
+    return -1;
+  for (uint layer = 0; layer < 4; layer++) {
+    for (uint slot = 0; slot < kPpuWsAnchorBands; slot++) {
+      if (y >= ppu->wsAnchorY0[slot][layer] &&
+          y < ppu->wsAnchorY1[slot][layer] &&
+          ppu->wsAnchorLeftEnd[slot][layer] &&
+          ppu->wsAnchorLeftEnd[slot][layer] <
+              ppu->wsAnchorRightStart[slot][layer])
+        return (int)layer;
+    }
+  }
+  return -1;
 }
 
 static void PpuApplyMarginGap(Ppu *ppu, uint layer, PpuWindows *win,
@@ -1515,6 +1561,16 @@ static void PpuDrawSprites(Ppu *ppu, uint y, uint sub, bool clear_backdrop) {
     return;  // layer is completely hidden
   PpuWindows win;
   IS_SCREEN_WINDOWED(ppu, sub, layer) ? PpuWindows_Calc(&win, ppu, layer, y) : PpuWindows_Clear(&win, ppu, layer, y);
+  const bool oam_hud_full_width =
+      (ppu->wsHudSplitHeight & 0x80) &&
+      ppu->wsHudOamHeight &&
+      (y >= 224 || y < ppu->wsHudOamHeight) &&
+      ppu->wsHudOamSlots &&
+      ppu->extraLeftRight;
+  if (oam_hud_full_width && win.nr == 1 && win.bits == 0) {
+    win.edges[0] = -(int16_t)ppu->extraLeftRight;
+    win.edges[1] = 256 + ppu->extraLeftRight;
+  }
   for (size_t windex = 0; windex < win.nr; windex++) {
     if (win.bits & (1 << windex))
       continue;  // layer is disabled for this window part
@@ -1746,12 +1802,21 @@ static NOINLINE void PpuDrawWholeLine(Ppu *ppu, uint y) {
                         hud_height &&
                         y < hud_height &&
                         ppu->extraLeftRight;
+  bool oam_hud_full_width = (ppu->wsHudSplitHeight & 0x80) &&
+                            ppu->wsHudOamHeight &&
+                            (y >= 224 || y < ppu->wsHudOamHeight) &&
+                            ppu->wsHudOamSlots &&
+                            ppu->extraLeftRight;
+  const int anchor_full_layer = PpuFullBudgetAnchorLayerAt(ppu, y);
+  const bool anchor_full_width = anchor_full_layer >= 0;
+  bool any_hud_full_width =
+      hud_full_width || oam_hud_full_width || anchor_full_width;
 
   // Color window affects the drawing mode in each region
   PpuWindows cwin;
   PpuWindows_Calc(&cwin, ppu, 5, y);
   bool compose_full_budget = false;
-  if (hud_full_width) {
+  if (any_hud_full_width) {
     PpuWindows_CalcWithExtra(&cwin, ppu, 5, y,
                              ppu->extraLeftRight, ppu->extraLeftRight);
     compose_full_budget = true;
@@ -1793,7 +1858,13 @@ static NOINLINE void PpuDrawWholeLine(Ppu *ppu, uint y) {
       do {
         uint16 pixel = ppu->bgBuffers[0].data[i];
         bool outside_world = i < hud_world_left || i >= hud_world_right;
-        if (hud_full_width && outside_world && ((pixel >> 8) & 0xf) != 2) {
+        const uint8 main_layer = (pixel >> 8) & 0xf;
+        const bool keep_hud =
+            (hud_full_width && main_layer == 2) ||
+            (anchor_full_width && main_layer == anchor_full_layer) ||
+            (oam_hud_full_width &&
+             (main_layer == 4 || main_layer == 6));
+        if (outside_world && !keep_hud) {
           dst[0] = 0;
         } else {
           uint32 color = ppu->cgram[pixel & 0xff];
@@ -1812,7 +1883,12 @@ static NOINLINE void PpuDrawWholeLine(Ppu *ppu, uint y) {
         uint16 pixel = ppu->bgBuffers[0].data[i];
         uint8 main_layer = (pixel >> 8) & 0xf;
         bool outside_world = i < hud_world_left || i >= hud_world_right;
-        if (hud_full_width && outside_world && main_layer != 2) {
+        const bool keep_hud =
+            (hud_full_width && main_layer == 2) ||
+            (anchor_full_width && main_layer == anchor_full_layer) ||
+            (oam_hud_full_width &&
+             (main_layer == 4 || main_layer == 6));
+        if (outside_world && !keep_hud) {
           dst[0] = 0;
         } else {
           uint32 color = ppu->cgram[pixel & 0xff], color2;
@@ -1849,18 +1925,27 @@ static NOINLINE void PpuDrawWholeLine(Ppu *ppu, uint y) {
   PpuWriteOverlayRenderLine(ppu, kPpuOverlaySource_Obj, y);
 }
 
-static int PpuAdjustWidescreenHudOamX(Ppu *ppu, uint8_t index, uint8_t y,
-                                      int x) {
+static bool PpuWidescreenHudOamSlot(Ppu *ppu, uint8_t index, uint8_t y) {
   uint8_t slot = index >> 1;
   bool hud_y = ppu->wsHudOamHeight &&
       (y >= 224 || y < ppu->wsHudOamHeight);
-  if (hud_y && ppu->wsHudOamSlots &&
+  return hud_y && ppu->wsHudOamSlots &&
       slot >= ppu->wsHudOamFirstSlot &&
-      slot < ppu->wsHudOamFirstSlot + ppu->wsHudOamSlots) {
+      slot < ppu->wsHudOamFirstSlot + ppu->wsHudOamSlots;
+}
+
+static int PpuAdjustWidescreenHudOamX(Ppu *ppu, uint8_t index, uint8_t y,
+                                      int x) {
+  const bool full_budget = (ppu->wsHudSplitHeight & 0x80) != 0;
+  const int left_extra =
+      full_budget ? ppu->extraLeftRight : ppu->extraLeftCur;
+  const int right_extra =
+      full_budget ? ppu->extraLeftRight : ppu->extraRightCur;
+  if (PpuWidescreenHudOamSlot(ppu, index, y)) {
     if (x >= 0 && x < ppu->wsHudLeftEnd)
-      x -= ppu->extraLeftCur;
+      x -= left_extra;
     else if (x >= ppu->wsHudRightStart && x < 256)
-      x += ppu->extraRightCur;
+      x += right_extra;
   }
   return x;
 }
@@ -1900,7 +1985,12 @@ static bool ppu_evaluateSprites(Ppu* ppu, int line) {
     if(row < spriteHeight) {
       int x = PpuDecodeOamX(ppu, index);
       x = PpuAdjustWidescreenHudOamX(ppu, index, y, x);
-      if(x + spriteSize > -ppu->extraLeftCur) {
+      const int left_extra =
+          PpuWidescreenHudOamSlot(ppu, index, y) &&
+                  (ppu->wsHudSplitHeight & 0x80)
+              ? ppu->extraLeftRight
+              : ppu->extraLeftCur;
+      if(x + spriteSize > -left_extra) {
         spritesFound++;
         if(spritesFound > 32 &&
            !(ppu->renderFlags & kPpuRenderFlags_NoSpriteLimits)) {
@@ -1919,7 +2009,15 @@ static bool ppu_evaluateSprites(Ppu* ppu, int line) {
     uint8_t row = line - (ppu->oam[index] >> 8);
     int spriteSize = spriteSizes[PPU_objSize(ppu)][(ppu->highOam[index >> 3] >> ((index & 7) + 1)) & 1];
     int x = PpuDecodeOamX(ppu, index);
-    x = PpuAdjustWidescreenHudOamX(ppu, index, ppu->oam[index] >> 8, x);
+    const uint8_t sprite_y = ppu->oam[index] >> 8;
+    const bool full_budget_hud =
+        PpuWidescreenHudOamSlot(ppu, index, sprite_y) &&
+        (ppu->wsHudSplitHeight & 0x80);
+    const int left_extra =
+        full_budget_hud ? ppu->extraLeftRight : ppu->extraLeftCur;
+    const int right_extra =
+        full_budget_hud ? ppu->extraLeftRight : ppu->extraRightCur;
+    x = PpuAdjustWidescreenHudOamX(ppu, index, sprite_y, x);
         if(PPU_objInterlace(ppu)) row = row * 2 + (ppu->evenFrame ? 0 : 1);
         int oam1 = ppu->oam[index + 1];
         int objAdr = (oam1 & 0x100) ? PPU_objTileAdr2(ppu) : PPU_objTileAdr1(ppu);
@@ -1929,8 +2027,8 @@ static bool ppu_evaluateSprites(Ppu* ppu, int line) {
         PpuZbufType z = paletteBase + (prio << 8);
 
         for(int col = 0; col < spriteSize; col += 8) {
-      if(col + x <= -8 - ppu->extraLeftCur ||
-         col + x >= 256 + ppu->extraRightCur)
+      if(col + x <= -8 - left_extra ||
+         col + x >= 256 + right_extra)
         continue;
             tilesFound++;
             if(tilesFound > 34 &&

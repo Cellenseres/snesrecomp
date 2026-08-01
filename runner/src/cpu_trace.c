@@ -1045,6 +1045,9 @@ extern StackDriftTripwire g_stack_drift_tripwire;
 static void capture(CpuState *cpu, uint32_t pc24, uint8_t event_type,
                     uint8_t extra0, uint16_t extra1) {
     if (g_freeze_capture) return;  /* deliberate inspection-freeze */
+    /* Trace-enabled generated code is also linked into ROM-free/headless
+     * runners that intentionally never allocate the diagnostic ring. */
+    if (!g_cpu_trace_ring || g_cpu_trace_capacity == 0) return;
     /* Ring is always-on. Tripwires snapshot via boundary_get / their own
      * struct copies; freezing capture() here destroys observability for
      * any investigation that runs *after* a tripwire fires (boundary
@@ -1330,6 +1333,7 @@ void cpu_trace_func_entry(CpuState *cpu, uint32_t pc24, const char *name) {
      * checks. See docs/ABSTRACT_INTERPRETATION_GAPS.md. */
     cpu_trace_mx_claim_check(cpu, pc24, name);
 
+    if (!g_cpu_trace_ring || g_cpu_trace_capacity == 0) return;
     int slot = (int)(g_cpu_trace_idx++ & (g_cpu_trace_capacity - 1));
     CpuTraceEvent *e = &g_cpu_trace_ring[slot];
     e->pc24 = pc24;

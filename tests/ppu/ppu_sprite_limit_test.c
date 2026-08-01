@@ -233,6 +233,90 @@ int main(void) {
             "legacy HUD anchors leave inserted margin spans transparent");
     }
 
+    /* A room boundary may deliberately leave the live world margins empty,
+     * while a title-specific HUD still uses the full centering budget. Verify
+     * both supported HUD sources: an anchored 4bpp background and explicitly
+     * selected OAM slots. Unselected world sprites must remain centered. */
+    {
+        enum { kExtra = 8, kWidePixels = kPpuXPixels + kExtra * 2 };
+        uint32_t wide_pixels[kWidePixels];
+
+        ppu_reset(ppu);
+        memset(wide_pixels, 0, sizeof wide_pixels);
+        PpuBeginDrawing(ppu, (uint8_t *)wide_pixels,
+                        sizeof(uint32_t) * kWidePixels,
+                        kPpuRenderFlags_NewRenderer);
+        PpuSetExtraSpaceCentered(ppu, kExtra);
+        PpuSetWidescreenLayerAnchorBand(ppu, 1, 0, 2, 32, 224);
+        PpuSetWidescreenHudAlwaysVisible(ppu, true);
+        ppu->inidisp = 0x0f;
+        ppu->bgmode = 1;
+        ppu->screenEnabled[0] = 1 << 1;
+        for (size_t i = 0; i < sizeof ppu->vram / sizeof ppu->vram[0]; i++)
+            ppu->vram[i] = 0xffff;
+        ppu->cgram[0] = 0;
+        for (size_t i = 1; i < sizeof ppu->cgram / sizeof ppu->cgram[0]; i++)
+            ppu->cgram[i] = 0x7fff;
+
+        ppu_runLine(ppu, 0);
+        ppu_runLine(ppu, 1);
+        failures += check(wide_pixels[0] != 0 &&
+                              wide_pixels[kWidePixels - 1] != 0,
+                          "always-visible BG HUD uses full centered margins");
+
+        ppu_reset(ppu);
+        memset(wide_pixels, 0, sizeof wide_pixels);
+        PpuBeginDrawing(ppu, (uint8_t *)wide_pixels,
+                        sizeof(uint32_t) * kWidePixels,
+                        kPpuRenderFlags_NewRenderer);
+        PpuSetExtraSpaceCentered(ppu, kExtra);
+        PpuSetWsHudOamBand(ppu, 2, 112, 160);
+        PpuSetWsHudOamShiftRange(ppu, 0, 1);
+        PpuSetWidescreenHudAlwaysVisible(ppu, true);
+        ppu->inidisp = 0x0f;
+        ppu->screenEnabled[0] = 1 << 4;
+        for (int slot = 0; slot < 128; slot++)
+            ppu->oam[slot * 2] = 0xf000;
+        ppu->oam[0] = 0x0000;
+        for (size_t i = 0; i < sizeof ppu->vram / sizeof ppu->vram[0]; i++)
+            ppu->vram[i] = 0xffff;
+        ppu->cgram[0] = 0;
+        for (size_t i = 1; i < sizeof ppu->cgram / sizeof ppu->cgram[0]; i++)
+            ppu->cgram[i] = 0x7fff;
+
+        ppu_runLine(ppu, 0);
+        ppu_runLine(ppu, 1);
+        failures += check(wide_pixels[0] != 0 &&
+                              wide_pixels[kExtra] == 0,
+                          "selected HUD OAM shifts into centered margin");
+
+        ppu_reset(ppu);
+        memset(wide_pixels, 0, sizeof wide_pixels);
+        PpuBeginDrawing(ppu, (uint8_t *)wide_pixels,
+                        sizeof(uint32_t) * kWidePixels,
+                        kPpuRenderFlags_NewRenderer);
+        PpuSetExtraSpaceCentered(ppu, kExtra);
+        PpuSetWsHudOamBand(ppu, 2, 112, 160);
+        PpuSetWsHudOamShiftRange(ppu, 1, 1);
+        PpuSetWidescreenHudAlwaysVisible(ppu, true);
+        ppu->inidisp = 0x0f;
+        ppu->screenEnabled[0] = 1 << 4;
+        for (int slot = 0; slot < 128; slot++)
+            ppu->oam[slot * 2] = 0xf000;
+        ppu->oam[0] = 0x0000;
+        for (size_t i = 0; i < sizeof ppu->vram / sizeof ppu->vram[0]; i++)
+            ppu->vram[i] = 0xffff;
+        ppu->cgram[0] = 0;
+        for (size_t i = 1; i < sizeof ppu->cgram / sizeof ppu->cgram[0]; i++)
+            ppu->cgram[i] = 0x7fff;
+
+        ppu_runLine(ppu, 0);
+        ppu_runLine(ppu, 1);
+        failures += check(wide_pixels[0] == 0 &&
+                              wide_pixels[kExtra] != 0,
+                          "unselected world OAM remains centered");
+    }
+
     ppu_free(ppu);
     if (failures) return 1;
     puts("ppu_sprite_limit_test: PASS");

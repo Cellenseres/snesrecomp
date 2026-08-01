@@ -1589,7 +1589,11 @@ static void ram_routine_snapshot(uint32_t entry, uint8_t *snap,
  * tier-2 recorder chokepoint so it dedups with the gap table. */
 static void ram_routine_note(uint32_t target, uint32_t site, uint8_t mx) {
     extern int snes_frame_counter;
-    if (target < 0x7E0000u) return;   /* ROM target — statically analyzable */
+    uint8_t bank = (uint8_t)(target >> 16);
+    /* A numeric target above $7E:0000 is not necessarily RAM: SA-1 LoROM
+     * maps ordinary cartridge ROM into $C0-$FF. Only the dedicated $7E/$7F
+     * WRAM banks satisfy this recorder's contract. */
+    if (bank != 0x7E && bank != 0x7F) return;
     int i;
     for (i = 0; i < g_ram_routine_count; i++)
         if (g_ram_routines[i].entry_pc24 == target) break;

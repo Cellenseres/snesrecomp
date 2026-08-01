@@ -85,13 +85,6 @@ void WsShadowGetMarginStats(int layerIndex, WsShadowMarginStat *out) {
   *out = s_marginStats[layerIndex];
 }
 
-static int32_t WorldFromWrapped(uint32_t anchor, uint32_t coord) {
-  int32_t delta = (int32_t)((coord - anchor) & 0x3ff);
-  if (delta >= 512)
-    delta -= 1024;
-  return (int32_t)anchor + delta;
-}
-
 static bool InBounds(uint32_t tx, uint32_t ty) {
   return tx < kWsShadowXTiles && ty < kWsShadowYTiles;
 }
@@ -211,17 +204,20 @@ static uint32_t WorldRowForMapRow(const WsShadowLayer *layer, int row) {
 void WsShadowOnVramWrite(uint16_t wordAdr, uint16_t value) {
   for (int i = 0; i < kLayers; i++) {
     WsShadowLayer *layer = &s_layers[i];
-    if (!layer->active || !layer->wide || !layer->entries)
+    if (!layer->active || !layer->entries)
       continue;
     uint16_t off = (uint16_t)(wordAdr - layer->mapBaseWord);
-    if (off >= 0x800)
+    if (off >= (layer->wide ? 0x800 : 0x400))
       continue;
-    int col = (off & 0x1f) | (off & 0x400 ? 0x20 : 0);
+    int col =
+        (off & 0x1f) | (layer->wide && (off & 0x400) ? 0x20 : 0);
     int row = (off >> 5) & 0x1f;
     const unsigned sh = layer->tileShift ? layer->tileShift : 3;
     uint32_t k0 = layer->worldX >> (sh + 5);
     uint32_t chunk;
-    if ((uint32_t)(col >> 5) == (k0 & 1))
+    if (!layer->wide)
+      chunk = k0;
+    else if ((uint32_t)(col >> 5) == (k0 & 1))
       chunk = k0;
     else
       chunk = layer->dir < 0 ? k0 - 1 : k0 + 1;
@@ -1210,7 +1206,16 @@ uint16_t WsShadowTile(int layerIndex, int screenX, uint32_t wrappedY,
   if (layerIndex < 0 || layerIndex >= kLayers)
     return realTile;
   WsShadowLayer *layer = &s_layers[layerIndex];
-  if (!layer->active || (screenX >= 0 && screenX < 256))
+  /*
+   * The 8x8 background renderers call once per tile chunk. A hardware window
+   * can make the final chunk start inside the native viewport but extend into
+   * the right margin (for example x=255..262). Treat that whole straddling
+   * chunk as world-keyed shadow data; returning the circular VRAM tile inserts
+   * an exact one-tile seam before margin rendering begins.
+   */
+  const int tile_pixels = 1 << (layer->tileShift ? layer->tileShift : 3);
+  if (!layer->active ||
+      (screenX >= 0 && screenX + tile_pixels <= 256))
     return realTile;
 
   /* Layered margin sources, exact-first: (1) the world-keyed history —
@@ -1225,13 +1230,12 @@ uint16_t WsShadowTile(int layerIndex, int screenX, uint32_t wrappedY,
    * paint filler over known feature cells. */
   const uint32_t shift = layer->tileShift ? layer->tileShift : 3;
   int32_t worldX = (int32_t)layer->worldX + screenX;
-  int32_t worldY;
-  if (layer->retainHistory) {
-    worldY = (int32_t)(((wrappedY - layer->scrollY) & 0x3ff) +
-                       (layer->scrollY & ((1u << shift) - 1)));
-  } else {
-    worldY = WorldFromWrapped(layer->worldY, wrappedY & 0x3ff);
-  }
+  int32_t worldY =
+      layer->retainHistory
+          ? (int32_t)(((wrappedY - layer->scrollY) & 0x3ff) +
+                      (layer->scrollY & ((1u << shift) - 1)))
+          : (int32_t)(layer->worldY +
+                      ((wrappedY - layer->scrollY) & 0x3ff));
   if (layer->entries && worldX >= 0 && worldY >= 0) {
     uint16_t entry;
     const bool hit = GetEntry(layer, (uint32_t)worldX >> shift,
@@ -1272,7 +1276,7 @@ uint16_t WsShadowTile(int layerIndex, int screenX, uint32_t wrappedY,
 
 bool WsShadowLayerActive(int layerIndex) {
   return layerIndex >= 0 && layerIndex < kLayers &&
-         s_layers[layerIndex].active && s_layers[layerIndex].wide &&
+         s_layers[layerIndex].active &&
          (s_layers[layerIndex].fold || s_layers[layerIndex].entries);
 }
 

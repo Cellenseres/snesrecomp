@@ -54,7 +54,7 @@ void debug_server_wait_if_paused(void);
 // reverse-debug WRAM-store instrumentation.
 void debug_server_on_trace_block(CpuState *cpu, uint32_t pc24);
 
-// Returns slot number (0-9) if a loadstate was requested via TCP, or -1 if none.
+// Returns slot number (0-11) if a loadstate was requested via TCP, or -1 if none.
 // Consumes the request (only returns it once).
 int debug_server_consume_loadstate(void);
 
@@ -106,6 +106,13 @@ void debug_server_on_oracle_vram_write(uint32_t byte_addr, uint8_t value);
 // oam_render_get / oam_state.
 void debug_server_on_oam_write(int is_high, uint16_t index, uint16_t value);
 void debug_server_on_oam_render(void);
+// Capture the PPU/window registers after per-line HDMA has run and immediately
+// before scanline rendering. Queried through the TCP `ppu_lines` command.
+void debug_server_on_ppu_line(int line);
+// Capture the renderer's computed window spans after host widescreen policy
+// has been applied. `edges` contains nr+1 signed screen-space boundaries.
+void debug_server_on_ppu_window(int line, int layer, const int16_t *edges,
+                                unsigned nr, uint8_t bits);
 
 // Per-function profiling — called from RecompStackPush and at the
 // watchdog trip point in common_cpu_infra.c. Records a histogram of
@@ -132,6 +139,12 @@ static inline void debug_server_on_vram_write(uint32_t byte_addr, uint8_t value)
 static inline void debug_server_on_oracle_vram_write(uint32_t byte_addr, uint8_t value) { (void)byte_addr; (void)value; }
 static inline void debug_server_on_oam_write(int is_high, uint16_t index, uint16_t value) { (void)is_high; (void)index; (void)value; }
 static inline void debug_server_on_oam_render(void) { }
+static inline void debug_server_on_ppu_line(int line) { (void)line; }
+static inline void debug_server_on_ppu_window(int line, int layer,
+                                               const int16_t *edges,
+                                               unsigned nr, uint8_t bits) {
+    (void)line; (void)layer; (void)edges; (void)nr; (void)bits;
+}
 static inline void debug_server_profile_push(const char *name) { (void)name; }
 static inline void debug_server_profile_latch(int frame_num) { (void)frame_num; }
 

@@ -83,7 +83,7 @@ static uint32_t s_ram_size = 0;
 static volatile int s_paused = 0;
 static volatile int s_step_remaining = 0;  // frames remaining before auto-re-pause
 static volatile int s_run_to_frame_target = -1;  // -1 = disabled
-static volatile int s_pending_loadstate = -1;  // -1 = none, 0-9 = slot to load
+static volatile int s_pending_loadstate = -1;  // -1 = none, 0-11 = slot to load
 static volatile uint32_t s_controller_inputs = 0;  // p1 bits 0..11, p2 bits 12..23
 static volatile uint32_t s_controller_active = 0;  // bit0=p1 present, bit1=p2 present
 
@@ -103,6 +103,7 @@ static volatile int s_trace_parked_stack_depth = 0;
 // Threading state
 #ifdef _WIN32
 static CRITICAL_SECTION s_mutex;
+static volatile LONG s_mutex_state = 0; /* 0 uninitialized, 1 initializing, 2 ready */
 static HANDLE s_thread = NULL;
 #else
 static pthread_mutex_t s_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -110,6 +111,7 @@ static pthread_t s_thread;
 static int s_thread_created = 0;
 #endif
 static volatile int s_shutdown = 0;
+static volatile int s_server_ready = 0;
 
 // Forward declarations for thread function
 #ifdef _WIN32
@@ -118,8 +120,22 @@ static unsigned __stdcall debug_server_thread(void *arg);
 static void *debug_server_thread(void *arg);
 #endif
 
+#ifdef _WIN32
+static void ensure_mutex_initialized(void) {
+    LONG prior = InterlockedCompareExchange(&s_mutex_state, 1, 0);
+    if (prior == 0) {
+        InitializeCriticalSection(&s_mutex);
+        InterlockedExchange(&s_mutex_state, 2);
+        return;
+    }
+    while (InterlockedCompareExchange(&s_mutex_state, 2, 2) != 2)
+        Sleep(0);
+}
+#endif
+
 static void lock_mutex(void) {
 #ifdef _WIN32
+    ensure_mutex_initialized();
     EnterCriticalSection(&s_mutex);
 #else
     pthread_mutex_lock(&s_mutex);
@@ -128,6 +144,7 @@ static void lock_mutex(void) {
 
 static int try_lock_mutex(void) {
 #ifdef _WIN32
+    ensure_mutex_initialized();
     return TryEnterCriticalSection(&s_mutex) != 0;
 #else
     return pthread_mutex_trylock(&s_mutex) == 0;
@@ -1497,6 +1514,11 @@ static void DebugPpuRenderAuthentic(uint8_t *pixels) {
 
 void debug_server_record_frame(int frame) {
     extern uint8_t g_ram[];
+    /* Headless runners link the debug module for shared instrumentation but
+     * intentionally do not start its TCP service. Do not commit the 1.2 GB
+     * history ring or touch synchronization state in that configuration. */
+    if (!s_server_ready)
+        return;
 
     // Step counter: auto-re-pause after N frames
     if (s_step_remaining > 0) {
@@ -3678,8 +3700,8 @@ static void cmd_get_trace_range(const char *args) {
 static void cmd_loadstate(const char *args) {
     int slot = 0;
     if (args[0]) sscanf(args, "%d", &slot);
-    if (slot < 0 || slot > 9) {
-        send_fmt("{\"error\":\"slot must be 0-9\"}");
+    if (slot < 0 || slot > 11) {
+        send_fmt("{\"error\":\"slot must be 0-11\"}");
         return;
     }
     s_pending_loadstate = slot;
@@ -3693,8 +3715,8 @@ static volatile int s_pending_savestate = -1;
 static void cmd_savestate(const char *args) {
     int slot = 0;
     if (args[0]) sscanf(args, "%d", &slot);
-    if (slot < 0 || slot > 9) {
-        send_fmt("{\"error\":\"slot must be 0-9\"}");
+    if (slot < 0 || slot > 11) {
+        send_fmt("{\"error\":\"slot must be 0-11\"}");
         return;
     }
     s_pending_savestate = slot;
@@ -4300,6 +4322,133 @@ static void cmd_dump_oam(const char *args) {
     send(s_client_sock, "\"}\n", 3, 0);
 }
 
+typedef struct PpuLineDebugState {
+    int frame;
+    uint8_t valid;
+    uint8_t w1l, w1r, w2l, w2r;
+    uint16_t hscroll[4], vscroll[4];
+    uint32_t windowsel;
+    uint16_t wbgobjlog;
+    uint8_t screen_enabled[2], screen_windowed[2];
+    uint8_t cgwsel, cgadsub;
+} PpuLineDebugState;
+
+static PpuLineDebugState s_ppu_lines[225];
+
+typedef struct PpuWindowDebugState {
+    int frame;
+    uint8_t valid, nr, bits;
+    int16_t edges[8];
+} PpuWindowDebugState;
+
+static PpuWindowDebugState s_ppu_windows[225][6];
+
+void debug_server_on_ppu_line(int line) {
+    if (!g_ppu || line < 0 ||
+        line >= (int)(sizeof(s_ppu_lines) / sizeof(s_ppu_lines[0])))
+        return;
+    PpuLineDebugState *s = &s_ppu_lines[line];
+    Ppu *p = g_ppu;
+    s->frame = snes_frame_counter;
+    s->valid = 1;
+    s->w1l = p->window1left;
+    s->w1r = p->window1right;
+    s->w2l = p->window2left;
+    s->w2r = p->window2right;
+    memcpy(s->hscroll, p->hScroll, sizeof(s->hscroll));
+    memcpy(s->vscroll, p->vScroll, sizeof(s->vscroll));
+    s->windowsel = p->windowsel;
+    s->wbgobjlog = p->wbgobjlog;
+    memcpy(s->screen_enabled, p->screenEnabled, sizeof(s->screen_enabled));
+    memcpy(s->screen_windowed, p->screenWindowed,
+           sizeof(s->screen_windowed));
+    s->cgwsel = p->cgwsel;
+    s->cgadsub = p->cgadsub;
+}
+
+void debug_server_on_ppu_window(int line, int layer, const int16_t *edges,
+                                unsigned nr, uint8_t bits) {
+    if (line < 0 || line > 224 || layer < 0 || layer >= 6 || !edges)
+        return;
+    if (nr > 7) nr = 7;
+    PpuWindowDebugState *s = &s_ppu_windows[line][layer];
+    s->frame = snes_frame_counter;
+    s->valid = 1;
+    s->nr = (uint8_t)nr;
+    s->bits = bits;
+    memcpy(s->edges, edges, (nr + 1) * sizeof(edges[0]));
+}
+
+static void cmd_ppu_window(const char *args) {
+    int line = -1, layer = -1;
+    if (!args || sscanf(args, "%d %d", &line, &layer) != 2 ||
+        line < 0 || line > 224 || layer < 0 || layer >= 6) {
+        send_fmt("{\"ok\":false,\"error\":\"usage: ppu_window <line 0..224> "
+                 "<layer 0..5>\"}");
+        return;
+    }
+    const PpuWindowDebugState *s = &s_ppu_windows[line][layer];
+    if (!s->valid) {
+        send_fmt("{\"ok\":true,\"valid\":false,\"line\":%d,\"layer\":%d}",
+                 line, layer);
+        return;
+    }
+    char buf[512];
+    int pos = snprintf(
+        buf, sizeof(buf),
+        "{\"ok\":true,\"valid\":true,\"line\":%d,\"layer\":%d,"
+        "\"frame\":%d,\"nr\":%u,\"bits\":\"0x%02x\",\"edges\":[",
+        line, layer, s->frame, (unsigned)s->nr, (unsigned)s->bits);
+    for (unsigned i = 0; i <= s->nr; i++)
+        pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos,
+                        "%s%d", i ? "," : "", (int)s->edges[i]);
+    snprintf(buf + pos, sizeof(buf) - (size_t)pos, "]}");
+    send_line(buf);
+}
+
+static void cmd_ppu_lines(const char *args) {
+    int first = 0, last = 224;
+    if (args && args[0]) {
+        int parsed = sscanf(args, "%d %d", &first, &last);
+        if (parsed == 1) last = first;
+    }
+    if (first < 0) first = 0;
+    if (last > 224) last = 224;
+    if (last < first) {
+        send_fmt("{\"ok\":false,\"error\":\"usage: ppu_lines [first last]\"}");
+        return;
+    }
+
+    static char buf[131072];
+    int pos = snprintf(buf, sizeof(buf),
+                       "{\"ok\":true,\"first\":%d,\"last\":%d,\"lines\":[",
+                       first, last);
+    int emitted = 0;
+    for (int line = first; line <= last && pos < (int)sizeof(buf) - 512; line++) {
+        const PpuLineDebugState *s = &s_ppu_lines[line];
+        if (!s->valid) continue;
+        pos += snprintf(
+            buf + pos, sizeof(buf) - (size_t)pos,
+            "%s{\"line\":%d,\"frame\":%d,\"w1\":[%u,%u],\"w2\":[%u,%u],"
+            "\"h\":[%u,%u,%u,%u],\"v\":[%u,%u,%u,%u],"
+            "\"windowsel\":\"0x%08x\",\"wbgobjlog\":\"0x%04x\","
+            "\"enabled\":[\"0x%02x\",\"0x%02x\"],"
+            "\"windowed\":[\"0x%02x\",\"0x%02x\"],"
+            "\"cgwsel\":\"0x%02x\",\"cgadsub\":\"0x%02x\"}",
+            emitted++ ? "," : "", line, s->frame,
+            s->w1l, s->w1r, s->w2l, s->w2r,
+            s->hscroll[0], s->hscroll[1], s->hscroll[2], s->hscroll[3],
+            s->vscroll[0], s->vscroll[1], s->vscroll[2], s->vscroll[3],
+            s->windowsel, s->wbgobjlog,
+            s->screen_enabled[0], s->screen_enabled[1],
+            s->screen_windowed[0], s->screen_windowed[1],
+            s->cgwsel, s->cgadsub);
+    }
+    snprintf(buf + pos, sizeof(buf) - (size_t)pos,
+             "],\"emitted\":%d}", emitted);
+    send_line(buf);
+}
+
 static void cmd_screenshot(const char *args) {
     if (!g_ppu) { send_fmt("{\"error\":\"ppu not available\"}"); return; }
 
@@ -4382,6 +4531,10 @@ static void cmd_get_ppu_state(const char *args) {
              "\"vramPointer\":\"0x%04x\",\"vramIncrement\":%d,\"vramRemapMode\":%d,"
              "\"cgramPointer\":\"0x%02x\","
              "\"window1left\":%d,\"window1right\":%d,\"window2left\":%d,\"window2right\":%d,"
+             "\"widescreen\":{\"budget\":%u,\"left\":%u,\"right\":%u,\"bottom\":%u,"
+             "\"layerWiden\":\"0x%02x\",\"layerClamp\":\"0x%02x\","
+             "\"layerMirror\":\"0x%02x\",\"layerRepeat\":\"0x%02x\","
+             "\"windowExpandLayers\":\"0x%02x\",\"windowExpandWindows\":\"0x%02x\"},"
              "\"evenFrame\":%s}",
              p->inidisp, p->bgmode & 7, p->mosaic, p->obsel,
              p->setini,
@@ -4396,6 +4549,10 @@ static void cmd_get_ppu_state(const char *args) {
              p->vramPointer, p->vramIncrement, p->vramRemapMode,
              p->cgramPointer,
              p->window1left, p->window1right, p->window2left, p->window2right,
+             p->extraLeftRight, p->extraLeftCur, p->extraRightCur,
+             p->extraBottomCur, p->wsLayerWidenMask, p->wsLayerClamp,
+             p->wsLayerMirror, p->wsLayerRepeat,
+             p->wsWindowExpandLayers, p->wsWindowExpandWindows,
              p->evenFrame ? "true" : "false");
 }
 
@@ -7432,6 +7589,8 @@ static const CmdEntry s_commands[] = {
     {"dump_cgram",    cmd_dump_cgram},
     {"dump_oam",      cmd_dump_oam},
     {"get_ppu_state", cmd_get_ppu_state},
+    {"ppu_lines",     cmd_ppu_lines},
+    {"ppu_window",    cmd_ppu_window},
     {"get_cpu_state", cmd_get_cpu_state},
     {"get_dma_state", cmd_get_dma_state},
     {"get_interrupt_state", cmd_get_interrupt_state},
@@ -7472,7 +7631,7 @@ int debug_server_init(int port) {
 #ifdef _WIN32
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return -1;
-    InitializeCriticalSection(&s_mutex);
+    ensure_mutex_initialized();
 #endif
 
     s_shutdown = 0;
@@ -7594,6 +7753,7 @@ int debug_server_init(int port) {
 #endif
 
     fprintf(stderr, "[debug_server] Listening on port %d (threaded)\n", port);
+    s_server_ready = 1;
     return 0;
 }
 
@@ -7840,6 +8000,7 @@ void debug_server_poll(void) {
 }
 
 void debug_server_shutdown(void) {
+    s_server_ready = 0;
     // Signal thread to stop
     s_shutdown = 1;
 
@@ -7863,7 +8024,10 @@ void debug_server_shutdown(void) {
     s_listen_sock = SOCKET_INVALID;
 
 #ifdef _WIN32
-    DeleteCriticalSection(&s_mutex);
+    if (InterlockedCompareExchange(&s_mutex_state, 2, 2) == 2) {
+        DeleteCriticalSection(&s_mutex);
+        InterlockedExchange(&s_mutex_state, 0);
+    }
     WSACleanup();
 #endif
 }
