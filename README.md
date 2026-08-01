@@ -473,10 +473,10 @@ reverse-engineering and emulation work:
 
 ## License
 
-Not yet declared. Code in this repository is original except where noted in
-[Acknowledgements](#acknowledgements) and
-[`THIRD_PARTY_ATTRIBUTION.md`](THIRD_PARTY_ATTRIBUTION.md). No license is
-asserted for the repository's original code at this time. The `snesref` tool
+SNESRecomp's original code is licensed under the
+[PolyForm Noncommercial License 1.0.0](LICENSE). Third-party components retain
+their own licenses as documented in [Acknowledgements](#acknowledgements) and
+[`THIRD_PARTY_ATTRIBUTION.md`](THIRD_PARTY_ATTRIBUTION.md). The `snesref` tool
 loads a separately supplied libretro emulator core at runtime; no emulator core
 source or binary is vendored or released by this repository.
 

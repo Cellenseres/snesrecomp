@@ -138,8 +138,8 @@ $env:SNESREF_FRAME_DUMP_DIR = "frames"
 ## Licensing
 
 This directory tracks only `frontend.cpp`, build documentation, and
-`libretro.h` (**MIT**, RetroArch team). SNESRecomp's original code does not
-currently have a declared project license; this document does not assign one.
+`libretro.h` (**MIT**, RetroArch team). SNESRecomp's original code is licensed
+under the repository's PolyForm Noncommercial License 1.0.0.
 
 SDL2 is a separately supplied build/runtime dependency under the zlib license.
 The emulator core is another separately supplied runtime DLL. bsnes is GPLv3;

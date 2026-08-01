@@ -2,9 +2,9 @@
 
 snesrecomp incorporates the following third-party software.
 
-SNESRecomp's original code does not currently have a declared project license.
-The notices below describe only the identified third-party material and do not
-assign a license to the repository as a whole.
+SNESRecomp's original code is licensed under the PolyForm Noncommercial
+License 1.0.0 in [`LICENSE`](LICENSE). The notices below describe the licenses
+that continue to apply to identified third-party material.
 
 ## libretro API header
 

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Native whole-program analyzer for the snesrecomp v2 recompiler"
-license = "MIT"
+license-file = "../LICENSE"
 
 [lib]
 name = "snesrecomp_analyzer"

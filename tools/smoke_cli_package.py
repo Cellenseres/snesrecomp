@@ -41,6 +41,8 @@ def main() -> int:
             output / "config" / "bank00.cfg",
             output / "generated" / "dispatch_v2.c",
             output / "generated" / "program_manifest.json",
+            output / "snesrecomp" / "LICENSE",
+            output / "snesrecomp" / "THIRD_PARTY_ATTRIBUTION.md",
             output / "snesrecomp" / "runner" / "runner.cmake",
         )
         missing = [str(path) for path in required if not path.is_file()]
