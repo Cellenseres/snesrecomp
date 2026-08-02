@@ -100,6 +100,34 @@ fewer text bytes in each candidate. A fresh trace configuration selected
 fingerprints ON and successfully compiled both `common_rtl.c` and the real
 `debug_server.c` at BelowNormal priority with one job.
 
+### Production PPU/DMA forensic history
+
+Trace-off production builds now omit the 4,096-frame PPU snapshot ring, the
+8,192-event DMA ring, and the per-frame scan that counts non-zero values in
+all 256 CGRAM entries and 32,768 VRAM words. The public recording API remains
+present as no-op stubs so callers do not need configuration-dependent source.
+Trace builds enable the full implementation by default, co-simulation forces
+it on, and `SNESRECOMP_ENABLE_PPU_DMA_HISTORY=ON` enables it independently.
+
+This smaller cost was near the noise floor of the current desktop harness.
+Five order-balanced pairs produced:
+
+- Super Mario World, 3,000 frames: paired deltas `+0.047%, +5.364%, +21.420%,
+  -0.015%, +1.945%`; paired median **+1.945%**. Raw medians were 326.297 FPS
+  baseline and 326.249 FPS candidate.
+- Mega Man X, 6,000 frames: paired deltas `+8.765%, -7.804%, +1.554%,
+  -5.071%, +5.336%`; paired median **+1.554%**. Raw medians were 505.134 FPS
+  baseline and 494.419 FPS candidate.
+
+The paired medians are positive, but the spread and contradictory raw medians
+mean these measurements establish throughput neutrality rather than a precise
+speedup. The production footprint result is unambiguous: GNU `size` reports
+294,976 fewer BSS bytes, about 4 KiB less text, and 32 fewer data bytes in
+each title. Both titles again produced byte-identical WRAM at frame 2,999
+using the hashes above. A trace-on build selected the real history
+implementation and compiled `ppu_dma_trace.c` successfully at BelowNormal
+priority with one job.
+
 ## Burn-down
 
 ### P0 — harness and attribution
@@ -118,7 +146,7 @@ fingerprints ON and successfully compiled both `common_rtl.c` and the real
 
 - [x] Measure disabling the full-WRAM frame fingerprint while preserving an
   explicit diagnostic/cosim option.
-- [ ] Split the PPU/DMA forensic rings from cheap production counters. In
+- [x] Split the PPU/DMA forensic rings from cheap production counters. In
   particular, do not scan all VRAM and CGRAM every frame when forensic capture
   is absent.
 - [ ] Split the audio PCM/event histories from the counters required for

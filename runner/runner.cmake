@@ -227,6 +227,25 @@ set_property(SOURCE
     SNESRECOMP_FRAME_FINGERPRINTS=${_SNESRECOMP_FRAME_FINGERPRINTS})
 unset(_SNESRECOMP_FRAME_FINGERPRINTS)
 
+# PPU/DMA history is another forensic facility rather than emulated hardware.
+# Its per-frame snapshot counts non-zero entries across all CGRAM and VRAM, so
+# trace-off production must not pay that scan or reserve the event rings.
+option(SNESRECOMP_ENABLE_PPU_DMA_HISTORY
+    "Capture diagnostic PPU snapshots and DMA event history"
+    ${SNESRECOMP_ENABLE_TRACE})
+if(SNES_COSIM OR SNESRECOMP_ENABLE_PPU_DMA_HISTORY)
+    set(_SNESRECOMP_PPU_DMA_HISTORY 1)
+    message(STATUS "SNES PPU/DMA history: enabled")
+else()
+    set(_SNESRECOMP_PPU_DMA_HISTORY 0)
+    message(STATUS "SNES PPU/DMA history: disabled (production)")
+endif()
+set_property(SOURCE
+    ${SNESRECOMP_RUNNER_ROOT}/src/ppu_dma_trace.c
+    APPEND PROPERTY COMPILE_DEFINITIONS
+    SNESRECOMP_PPU_DMA_HISTORY=${_SNESRECOMP_PPU_DMA_HISTORY})
+unset(_SNESRECOMP_PPU_DMA_HISTORY)
+
 set(SNESRECOMP_RUNNER_INCLUDE_DIRS
     ${SNESRECOMP_RUNNER_ROOT}/src
     ${SNESRECOMP_RUNNER_ROOT}/src/snes

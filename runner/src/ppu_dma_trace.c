@@ -12,6 +12,12 @@
 extern CpuState g_cpu;
 extern uint8_t  g_ram[0x20000];
 
+#ifndef SNESRECOMP_PPU_DMA_HISTORY
+#define SNESRECOMP_PPU_DMA_HISTORY 1
+#endif
+
+#if SNESRECOMP_PPU_DMA_HISTORY
+
 #define DMA_RING_LEN  8192   /* ~16 B each; covers many frames of uploads */
 #define PPU_RING_LEN  4096   /* one snapshot/frame => ~68 s at 60 fps      */
 #define DMA_DUMP_MAX  512    /* slice size pulled into the post-mortem     */
@@ -223,3 +229,27 @@ void ppudma_dump_json(FILE *f) {
   }
   fprintf(f, "]},\n");
 }
+
+#else
+
+void ppudma_record_dma(int channel, int fromB, uint8_t aBank, uint16_t aAdr,
+                       uint8_t bAdr, uint16_t size) {
+  (void)channel;
+  (void)fromB;
+  (void)aBank;
+  (void)aAdr;
+  (void)bAdr;
+  (void)size;
+}
+
+void ppudma_frame_snapshot(int frame) {
+  (void)frame;
+}
+
+void ppudma_dump_json(FILE *f) {
+  fprintf(f, "  \"ppu_frames\": {\"disabled\":true,\"snaps\":[]},\n");
+  fprintf(f, "  \"wram_probes\": {\"disabled\":true},\n");
+  fprintf(f, "  \"dma_events\": {\"disabled\":true,\"events\":[]},\n");
+}
+
+#endif
