@@ -36,6 +36,10 @@ typedef int socket_t;
 #include <limits.h>
 #include "debug_server.h"
 
+#ifndef SNESRECOMP_FRAME_FINGERPRINTS
+#define SNESRECOMP_FRAME_FINGERPRINTS 1
+#endif
+
 // External references
 extern const char *g_last_recomp_func;
 extern int snes_frame_counter;
@@ -7179,6 +7183,7 @@ static void cmd_stackbal(const char *args) {
  * (frame hash, common_rtl.c) as "frame hex" lines. Two runs from reset produce
  * identical sequences iff the recomp is deterministic (Axis 7). */
 static void cmd_fingerprint(const char *args) {
+#if SNESRECOMP_FRAME_FINGERPRINTS
     char path[512] = {0};
     int count = 600;
     if (sscanf(args, "%511s %d", path, &count) < 1 || !path[0]) {
@@ -7197,6 +7202,11 @@ static void cmd_fingerprint(const char *args) {
     fclose(f);
     send_fmt("{\"ok\":true,\"path\":\"%s\",\"first\":%llu,\"last\":%llu}",
              path, (unsigned long long)first, (unsigned long long)maxf);
+#else
+    (void)args;
+    send_fmt("{\"error\":\"frame fingerprints disabled in this build; "
+             "configure with SNESRECOMP_ENABLE_FRAME_FINGERPRINTS=ON\"}");
+#endif
 }
 
 /* muldiv_check [count] — Axis-4 differential for the $4202-$4217 hardware

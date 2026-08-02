@@ -205,6 +205,28 @@ if(SNES_COSIM)
     message(STATUS "SNES_COSIM enabled — DEV co-simulation build (not for release)")
 endif()
 
+# Full-WRAM frame fingerprints are a forensic determinism aid, not emulated
+# hardware. A trace build keeps the historical behavior by default, while a
+# normal production build avoids hashing all 128 KiB of WRAM every frame and
+# does not reserve the ring. Co-simulation always requires the fingerprints,
+# regardless of an explicitly disabled cache option.
+option(SNESRECOMP_ENABLE_FRAME_FINGERPRINTS
+    "Hash full WRAM each frame for diagnostic determinism history"
+    ${SNESRECOMP_ENABLE_TRACE})
+if(SNES_COSIM OR SNESRECOMP_ENABLE_FRAME_FINGERPRINTS)
+    set(_SNESRECOMP_FRAME_FINGERPRINTS 1)
+    message(STATUS "SNES frame fingerprints: enabled")
+else()
+    set(_SNESRECOMP_FRAME_FINGERPRINTS 0)
+    message(STATUS "SNES frame fingerprints: disabled (production)")
+endif()
+set_property(SOURCE
+    ${SNESRECOMP_RUNNER_ROOT}/src/common_rtl.c
+    ${SNESRECOMP_RUNNER_ROOT}/src/debug_server.c
+    APPEND PROPERTY COMPILE_DEFINITIONS
+    SNESRECOMP_FRAME_FINGERPRINTS=${_SNESRECOMP_FRAME_FINGERPRINTS})
+unset(_SNESRECOMP_FRAME_FINGERPRINTS)
+
 set(SNESRECOMP_RUNNER_INCLUDE_DIRS
     ${SNESRECOMP_RUNNER_ROOT}/src
     ${SNESRECOMP_RUNNER_ROOT}/src/snes

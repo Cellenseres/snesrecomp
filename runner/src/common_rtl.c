@@ -147,12 +147,13 @@ static uint64_t rtl_apu_guest_cycle(void) {
 // memsel-independent there), so this stays 0 and the emitted charge is constant.
 uint8_t g_memsel = 0;
 
-// Axis-7 determinism: always-on per-frame WRAM fingerprint ring. FNV-1a of the
-// full 128KB g_ram each frame, keyed by frame number. Two runs from the same
-// reset produce identical sequences iff the recompiler is deterministic — which
-// every diff loop (audio / PPU / cycle) silently presupposes. Cheap (~128K hash
-// ops/frame). Dumped on demand via the debug server (`fingerprint`). FP_RING is
-// defined in common_rtl.h.
+// Axis-7 determinism: diagnostic per-frame WRAM fingerprint ring. FNV-1a of
+// the full 128 KiB g_ram each frame, keyed by frame number. Trace and co-sim
+// builds retain the forensic history; production omits both the hash and ring.
+#ifndef SNESRECOMP_FRAME_FINGERPRINTS
+#define SNESRECOMP_FRAME_FINGERPRINTS 1
+#endif
+#if SNESRECOMP_FRAME_FINGERPRINTS
 uint64_t g_fp_ring[FP_RING];
 uint64_t g_fp_max_frame;
 static uint64_t fp_fnv1a(const uint8_t *p, size_t n) {
@@ -160,6 +161,7 @@ static uint64_t fp_fnv1a(const uint8_t *p, size_t n) {
   for (size_t i = 0; i < n; i++) { h ^= p[i]; h *= 1099511628211ULL; }
   return h;
 }
+#endif
 
 // FILE-backed SaveLoadInfo. snes_saveload calls back into func() once per
 // scalar/blob; we route each call to fread/fwrite. Single magic+version
@@ -508,9 +510,11 @@ bool RtlRunFrame(uint32 inputs) {
   recomp_dspreg_trace_tick(); /* S-DSP register-file differential trace (env-gated) */
   recomp_dspout_capture();    /* native DSP output-stream capture (env-gated) */
 
-  /* Axis-7 determinism fingerprint: hash the full WRAM for this frame. */
+  /* Axis-7 diagnostic determinism fingerprint. */
+#if SNESRECOMP_FRAME_FINGERPRINTS
   g_fp_ring[snes_frame_counter & (FP_RING - 1)] = fp_fnv1a(g_ram, sizeof(g_ram));
   g_fp_max_frame = (uint64_t)snes_frame_counter;
+#endif
 
   snes_frame_counter++;
   /* Every runner client gets the same guest-frame/APU coupling. Presentation

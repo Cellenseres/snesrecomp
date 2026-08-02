@@ -70,6 +70,36 @@ A candidate is retained when the order-balanced median is positive outside
 run noise and the full correctness gates pass. Code-size changes are reported
 because instruction-cache pressure matters on the Xbox.
 
+## Retained results
+
+### Production frame fingerprints
+
+The first retained change compiles the full-WRAM fingerprint hash and its
+8,192-entry ring out of trace-off production builds. Trace builds enable the
+history by default, co-simulation forces it on, and an explicit
+`SNESRECOMP_ENABLE_FRAME_FINGERPRINTS=ON` remains available independently.
+
+Controls used MinGW GCC 15.2, SDL 3.4.12, Release `-O3`, native-width output,
+audio disabled, and 3,000 fully simulated/rendered frames. Framework baseline
+code was `868df63`; title revisions were SMW `98edb9e` and MMX `5324bf5`.
+Five order-balanced pairs produced:
+
+- Super Mario World: paired deltas `+2.719%, +19.139%, +18.447%, +12.624%,
+  +6.677%`; paired median **+12.624%**. Raw medians were 278.870 FPS baseline
+  and 322.397 FPS candidate.
+- Mega Man X: paired deltas `+7.502%, +8.486%, +5.407%, +5.256%, +7.340%`;
+  paired median **+7.340%**. Raw medians were 397.349 FPS baseline and
+  421.703 FPS candidate.
+
+Both titles produced byte-identical 128 KiB WRAM dumps at frame 2,999:
+SMW SHA-256 `e395adef1c70fc59ab916f32c6d4e1ca9e4b420e16a5b2390b0bc661b45c8299`
+(`crc32_wram=9c4e595c`) and MMX SHA-256
+`31b29ca41c1108c97e4c491ad8bd5db65ede97924b9426530a3bda9dca5e632c`
+(`crc32_wram=e0f6a7e2`). GNU `size` reports 65,536 fewer BSS bytes and 128
+fewer text bytes in each candidate. A fresh trace configuration selected
+fingerprints ON and successfully compiled both `common_rtl.c` and the real
+`debug_server.c` at BelowNormal priority with one job.
+
 ## Burn-down
 
 ### P0 — harness and attribution
@@ -86,7 +116,7 @@ because instruction-cache pressure matters on the Xbox.
 
 ### P1 — production observability culling
 
-- [ ] Measure disabling the full-WRAM frame fingerprint while preserving an
+- [x] Measure disabling the full-WRAM frame fingerprint while preserving an
   explicit diagnostic/cosim option.
 - [ ] Split the PPU/DMA forensic rings from cheap production counters. In
   particular, do not scan all VRAM and CGRAM every frame when forensic capture
@@ -95,7 +125,7 @@ because instruction-cache pressure matters on the Xbox.
   pacing, underrun reporting, and user-visible diagnostics.
 - [ ] Compile the dispatch-event history out of production while retaining
   hit/miss aggregates if they measure cheaply and remain useful.
-- [ ] Report executable and static/BSS size as well as throughput.
+- [x] Report executable and static/BSS size as well as throughput.
 
 Each item is a separate commit and A/B. This phase should precede renderer or
 CPU changes so later profiles describe emulation rather than diagnostics.
