@@ -246,6 +246,25 @@ set_property(SOURCE
     SNESRECOMP_PPU_DMA_HISTORY=${_SNESRECOMP_PPU_DMA_HISTORY})
 unset(_SNESRECOMP_PPU_DMA_HISTORY)
 
+# Runtime dispatch hit/miss totals are cheap production health counters. The
+# individual event ring is forensic history and writes several fields on every
+# indirect AOT/interpreter dispatch, so keep it only in diagnostic builds.
+option(SNESRECOMP_ENABLE_DISPATCH_HISTORY
+    "Capture diagnostic indirect-dispatch event history"
+    ${SNESRECOMP_ENABLE_TRACE})
+if(SNES_COSIM OR SNESRECOMP_ENABLE_DISPATCH_HISTORY)
+    set(_SNESRECOMP_DISPATCH_HISTORY 1)
+    message(STATUS "SNES dispatch history: enabled")
+else()
+    set(_SNESRECOMP_DISPATCH_HISTORY 0)
+    message(STATUS "SNES dispatch history: disabled (production)")
+endif()
+set_property(SOURCE
+    ${SNESRECOMP_RUNNER_ROOT}/src/cpu_state.c
+    APPEND PROPERTY COMPILE_DEFINITIONS
+    SNESRECOMP_DISPATCH_HISTORY=${_SNESRECOMP_DISPATCH_HISTORY})
+unset(_SNESRECOMP_DISPATCH_HISTORY)
+
 set(SNESRECOMP_RUNNER_INCLUDE_DIRS
     ${SNESRECOMP_RUNNER_ROOT}/src
     ${SNESRECOMP_RUNNER_ROOT}/src/snes

@@ -657,9 +657,15 @@ typedef struct DispatchLogEntry {
     uint32_t frame;
 } DispatchLogEntry;
 
+#ifndef SNESRECOMP_DISPATCH_HISTORY
+#define SNESRECOMP_DISPATCH_HISTORY 1
+#endif
+
 #define DISPATCH_LOG_CAP 1024
+#if SNESRECOMP_DISPATCH_HISTORY
 static DispatchLogEntry g_dispatch_log[DISPATCH_LOG_CAP];
 static unsigned g_dispatch_log_idx;  /* monotonic; modulo via CAP for storage */
+#endif
 
 /* Always-on aggregate found tallies (the ring only keeps the last CAP
  * events, so a whole-run found:0 rate is not recoverable from it). Never
@@ -673,6 +679,7 @@ extern const char *g_last_recomp_func;
 static void _dispatch_log_record(uint32 pc24, uint32 source_pc24,
                                  unsigned mx_idx,
                                  int found, int via_mirror) {
+#if SNESRECOMP_DISPATCH_HISTORY
     unsigned slot = g_dispatch_log_idx % DISPATCH_LOG_CAP;
     g_dispatch_log[slot].pc24 = pc24;
     g_dispatch_log[slot].source_pc24 = source_pc24;
@@ -683,11 +690,21 @@ static void _dispatch_log_record(uint32 pc24, uint32 source_pc24,
     g_dispatch_log[slot].pad = 0;
     g_dispatch_log[slot].frame = (uint32_t)snes_frame_counter;
     g_dispatch_log_idx++;
+#else
+    (void)pc24;
+    (void)source_pc24;
+    (void)mx_idx;
+    (void)via_mirror;
+#endif
     if (found) g_dispatch_found1++; else g_dispatch_found0++;
 }
 
 unsigned cpu_dispatch_log_count(void) {
+#if SNESRECOMP_DISPATCH_HISTORY
     return g_dispatch_log_idx;
+#else
+    return 0;
+#endif
 }
 
 /* Whole-run aggregate: exact AOT-hit vs interp-miss dispatch tallies. */
@@ -697,10 +714,15 @@ void cpu_dispatch_found_totals(uint64_t *found1, uint64_t *found0) {
 }
 
 const DispatchLogEntry *cpu_dispatch_log_at(unsigned i) {
+#if SNESRECOMP_DISPATCH_HISTORY
     if (i >= g_dispatch_log_idx) return NULL;
     if (g_dispatch_log_idx > DISPATCH_LOG_CAP &&
         i < g_dispatch_log_idx - DISPATCH_LOG_CAP) return NULL;
     return &g_dispatch_log[i % DISPATCH_LOG_CAP];
+#else
+    (void)i;
+    return NULL;
+#endif
 }
 
 /* Post-mortem JSON: serialize the always-on dispatch ring (last
@@ -717,6 +739,7 @@ const DispatchLogEntry *cpu_dispatch_log_at(unsigned i) {
  * `dispatch_log_get` command dumps the same ring live; this is the only
  * readable copy when the TCP server is unavailable (SM). */
 void CpuDispatchLogDumpJson(FILE *f) {
+#if SNESRECOMP_DISPATCH_HISTORY
     unsigned total = g_dispatch_log_idx;
     unsigned n = total < DISPATCH_LOG_CAP ? total : DISPATCH_LOG_CAP;
     unsigned start = total - n;
@@ -735,6 +758,11 @@ void CpuDispatchLogDumpJson(FILE *f) {
             (unsigned)e->mirror, (unsigned)e->frame);
     }
     fprintf(f, "]},\n");
+#else
+    fprintf(f,
+        "  \"dispatch_log\": {\"disabled\":true,\"total\":0,\"shown\":0,"
+        "\"events\":[]},\n");
+#endif
 }
 
 /* ── RAM-routine dispatch guard ────────────────────────────────────────────

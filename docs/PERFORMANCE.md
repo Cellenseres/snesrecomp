@@ -128,6 +128,27 @@ using the hashes above. A trace-on build selected the real history
 implementation and compiled `ppu_dma_trace.c` successfully at BelowNormal
 priority with one job.
 
+### Production indirect-dispatch history
+
+Production now retains the whole-run exact-AOT-hit and interpreter-miss
+counters while omitting the 1,024-entry detailed indirect-dispatch ring.
+Trace builds retain the ring by default, co-simulation forces it on, and
+`SNESRECOMP_ENABLE_DISPATCH_HISTORY=ON` remains available independently.
+Five order-balanced 3,000-frame pairs produced:
+
+- Super Mario World: paired deltas `-24.894%, -0.130%, +10.993%, +1.595%,
+  -4.095%`; paired median **-0.130%**. Raw medians were 319.768 FPS baseline
+  and 319.353 FPS candidate, establishing that this cost is immaterial there.
+- Mega Man X: paired deltas `-1.252%, +9.132%, +45.777%, +8.226%, +5.428%`;
+  paired median **+8.226%**. Raw medians were 354.883 FPS baseline and
+  374.147 FPS candidate. The third pair was visibly host-contaminated, but
+  removing it still leaves three of four pairs positive and a positive median.
+
+GNU `size` reports 24,576 fewer BSS bytes and about 1.7 KiB less text per
+title. Both candidates produced byte-identical WRAM at frame 2,999 using the
+same hashes as the preceding gates. A trace-on build selected and compiled
+the real ring implementation.
+
 ## Burn-down
 
 ### P0 — harness and attribution
@@ -151,7 +172,7 @@ priority with one job.
   is absent.
 - [ ] Split the audio PCM/event histories from the counters required for
   pacing, underrun reporting, and user-visible diagnostics.
-- [ ] Compile the dispatch-event history out of production while retaining
+- [x] Compile the dispatch-event history out of production while retaining
   hit/miss aggregates if they measure cheaply and remain useful.
 - [x] Report executable and static/BSS size as well as throughput.
 
