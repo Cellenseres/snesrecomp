@@ -149,6 +149,21 @@ title. Both candidates produced byte-identical WRAM at frame 2,999 using the
 same hashes as the preceding gates. A trace-on build selected and compiled
 the real ring implementation.
 
+## Rejected experiments
+
+### Audio PCM/event/snapshot history culling
+
+An experiment preserved functional pacing, sample-clock, occupancy, drop,
+underflow, consume-quantum, and port-overwrite counters while compiling out
+the 16 MiB PCM ring, 8 MiB event ring, snapshot ring, and per-sample snapshot
+clock check. It was rejected before commit: five order-balanced 3,000-frame
+SMW pairs had deltas `-5.073%, -6.266%, -6.497%, +13.572%, -1.379%` (median
+**-5.073%**), and the first two MMX pairs were **-16.607%** and **-29.740%**.
+That satisfies the two-negative-experiment stop condition. The large static
+footprint saving is not sufficient reason to accept a repeatable throughput
+regression; audio history remains unchanged pending attribution of why its
+removal affects runtime layout or pacing.
+
 ## Burn-down
 
 ### P0 — harness and attribution
