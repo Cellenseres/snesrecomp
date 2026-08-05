@@ -1561,39 +1561,6 @@ fn parse_pc24(value: &str, flag: &str) -> Result<u32, String> {
         .map_err(|_| format!("invalid {flag} PC {value:?}"))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn nonterminal_call_leaf_is_not_aot_safe() {
-        let mut rom = vec![0u8; 0x8000];
-        rom[..4].copy_from_slice(&[0x20, 0x00, 0x90, 0x00]);
-        let exit_sets = HashMap::from([((0x009000, 1, 1), Vec::new())]);
-        let env = DecodeEnv {
-            callee_exit_mx_modes: Some(&exit_sets),
-            stop_on_unknown_callee_exit: true,
-            ..DecodeEnv::default()
-        };
-        let graph = decode_function(&rom, 0, 0x8000, 1, 1, None, &env);
-        assert!(has_truncated_call_continuation(&graph));
-    }
-
-    #[test]
-    fn declared_terminal_call_is_not_a_truncated_continuation() {
-        let mut rom = vec![0u8; 0x8000];
-        rom[..4].copy_from_slice(&[0x20, 0x00, 0x90, 0x00]);
-        let terminal_sites = BTreeSet::from([0x008000]);
-        let env = DecodeEnv {
-            terminal_jsr_sites: Some(&terminal_sites),
-            stop_on_unknown_callee_exit: true,
-            ..DecodeEnv::default()
-        };
-        let graph = decode_function(&rom, 0, 0x8000, 1, 1, None, &env);
-        assert!(!has_truncated_call_continuation(&graph));
-    }
-}
-
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let rom_path = arg_value(&args, "--rom").expect("--rom required");
@@ -1654,4 +1621,37 @@ fn main() {
         Path::new(&manifest_path).display(),
         started.elapsed().as_secs_f64()
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nonterminal_call_leaf_is_not_aot_safe() {
+        let mut rom = vec![0u8; 0x8000];
+        rom[..4].copy_from_slice(&[0x20, 0x00, 0x90, 0x00]);
+        let exit_sets = HashMap::from([((0x009000, 1, 1), Vec::new())]);
+        let env = DecodeEnv {
+            callee_exit_mx_modes: Some(&exit_sets),
+            stop_on_unknown_callee_exit: true,
+            ..DecodeEnv::default()
+        };
+        let graph = decode_function(&rom, 0, 0x8000, 1, 1, None, &env);
+        assert!(has_truncated_call_continuation(&graph));
+    }
+
+    #[test]
+    fn declared_terminal_call_is_not_a_truncated_continuation() {
+        let mut rom = vec![0u8; 0x8000];
+        rom[..4].copy_from_slice(&[0x20, 0x00, 0x90, 0x00]);
+        let terminal_sites = BTreeSet::from([0x008000]);
+        let env = DecodeEnv {
+            terminal_jsr_sites: Some(&terminal_sites),
+            stop_on_unknown_callee_exit: true,
+            ..DecodeEnv::default()
+        };
+        let graph = decode_function(&rom, 0, 0x8000, 1, 1, None, &env);
+        assert!(!has_truncated_call_continuation(&graph));
+    }
 }
