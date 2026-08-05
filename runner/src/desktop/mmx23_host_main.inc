@@ -1129,11 +1129,15 @@ int main(int argc, char** argv) {
     extern void debug_server_set_ram(uint8_t *ram, uint32_t ram_size);
     /* A distinct per-game port lets sibling games run concurrently. */
     if (debug_server_init(MMX_DEBUG_PORT) == 0) {
+#if SNESRECOMP_TRACE
       fprintf(stderr, "[main] Debug server ready on port %d\n", MMX_DEBUG_PORT);
+#endif
     }
     if (start_paused) {
       debug_server_start_paused();
+#if SNESRECOMP_TRACE
       fprintf(stderr, "[main] Started paused — send 'step N' or 'continue' via TCP\n");
+#endif
     }
   }
 
