@@ -11,7 +11,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "debug_server.h"
-#include <SDL.h>
+#include "desktop/sdl_compat.h"
 #ifdef _WIN32
 #include <windows.h>
 #include "platform/win32/volume_control.h"
@@ -72,7 +72,13 @@ typedef struct GamepadInfo {
 } GamepadInfo;
 
 
+#if SNESRECOMP_SDL3
+static void SDLCALL AudioStreamCallback(
+    void *userdata, SDL_AudioStream *stream, int additional_amount,
+    int total_amount);
+#else
 static void SDLCALL AudioCallback(void *userdata, Uint8 *stream, int len);
+#endif
 static void EnsureConfigIni(void);
 static void RenderNumber(uint8 *dst, size_t pitch, int n, uint8 big);
 static void OpenOneGamepad(int i);
@@ -128,7 +134,7 @@ static int g_last_drawable_width, g_last_drawable_height;
 bool g_ws_active;
 int g_ws_extra;
 static const char *g_active_config_file;
-static int g_sdl_audio_mixer_volume = SDL_MIX_MAXVOLUME;
+static int g_sdl_audio_mixer_volume = SNESRECOMP_SDL_MIX_MAXVOLUME;
 static struct RendererFuncs g_renderer_funcs;
 
 static GamepadInfo g_gamepad[2];
@@ -354,17 +360,19 @@ static GamepadInfo *GetGamepadInfo(SDL_JoystickID id) {
 }
 
 void ChangeWindowScale(int scale_step) {
-  if ((SDL_GetWindowFlags(g_window) & (SDL_WINDOW_FULLSCREEN_DESKTOP | SDL_WINDOW_FULLSCREEN | SDL_WINDOW_MINIMIZED | SDL_WINDOW_MAXIMIZED)) != 0)
+  if ((SDL_GetWindowFlags(g_window) & (SNESRECOMP_SDL_WINDOW_FULLSCREEN_DESKTOP | SDL_WINDOW_FULLSCREEN | SDL_WINDOW_MINIMIZED | SDL_WINDOW_MAXIMIZED)) != 0)
     return;
-  int screen = SDL_GetWindowDisplayIndex(g_window);
-  if (screen < 0) screen = 0;
+  /* Display index is resolved inside the bounds shim below (SDL3 uses
+   * DisplayID, not an index). */
   int max_scale = kMaxWindowScale;
   SDL_Rect bounds;
   int bt = -1, bl, bb, br;
   // note this takes into effect Windows display scaling, i.e., resolution is divided by scale factor
-  if (SDL_GetDisplayUsableBounds(screen, &bounds) == 0) {
+  /* Both return true-on-success in SDL3 (0-on-success in SDL2); the raw
+   * comparisons compile clean and silently invert. */
+  if (snesrecomp_sdl_get_display_usable_bounds(g_window, &bounds)) {
     // this call may take a while before it is reported by Windows (or not at all in my testing)
-    if (SDL_GetWindowBordersSize(g_window, &bt, &bl, &bb, &br) != 0) {
+    if (!snesrecomp_sdl_get_window_borders_size(g_window, &bt, &bl, &bb, &br)) {
       // guess based on Windows 10/11 defaults
       bl = br = bb = 1;
       bt = 31;
@@ -386,7 +394,8 @@ void ChangeWindowScale(int scale_step) {
   if (bt >= 0) {
     // Center the window on top of the mouse
     int mx, my;
-    SDL_GetGlobalMouseState(&mx, &my);
+    /* SDL3 returns float coords; the shim keeps the int signature. */
+    snesrecomp_sdl_get_global_mouse_state(&mx, &my);
     int wx = IntMax(IntMin(mx - w / 2, bounds.x + bounds.w - bl - br - w), bounds.x + bl);
     int wy = IntMax(IntMin(my - h / 2, bounds.y + bounds.h - bt - bb - h), bounds.y + bt);
     SDL_SetWindowPosition(g_window, wx, wy);
@@ -398,7 +407,7 @@ void ChangeWindowScale(int scale_step) {
 #define RESIZE_BORDER 20
 static SDL_HitTestResult HitTestCallback(SDL_Window *win, const SDL_Point *pt, void *data) {
   uint32 flags = SDL_GetWindowFlags(win);
-  if ((flags & SDL_WINDOW_FULLSCREEN_DESKTOP) != 0 || (flags & SDL_WINDOW_FULLSCREEN) != 0)
+  if ((flags & SNESRECOMP_SDL_WINDOW_FULLSCREEN_DESKTOP) != 0 || (flags & SDL_WINDOW_FULLSCREEN) != 0)
     return SDL_HITTEST_NORMAL;
 
   if ((SDL_GetModState() & KMOD_CTRL) != 0)
@@ -486,6 +495,13 @@ static uint8 *g_audiobuffer, *g_audiobuffer_cur, *g_audiobuffer_end;
 static int g_frames_per_block;
 static uint8 g_audio_channels;
 static SDL_AudioDeviceID g_audio_device;
+#if SNESRECOMP_SDL3
+/* SDL3 replaced the pull callback with an SDL_AudioStream the app pushes into,
+ * so the mixer needs a scratch buffer sized to whatever the stream asks for. */
+static SDL_AudioStream *g_audio_stream;
+static uint8 *g_audio_stream_buffer;
+static size_t g_audio_stream_buffer_size;
+#endif
 
 void RtlApuLock(void) {
   SDL_LockMutex(g_audio_mutex);
@@ -495,13 +511,15 @@ void RtlApuUnlock(void) {
   SDL_UnlockMutex(g_audio_mutex);
 }
 
-static void SDLCALL AudioCallback(void *userdata, Uint8 *stream, int len) {
+/* Backend-agnostic mixer body. SDL2 calls it from its pull callback; SDL3 calls
+ * it to fill a scratch buffer that is then pushed into the audio stream. */
+static void FillAudioBuffer(Uint8 *stream, int len) {
   /* Boot-stage marker: proves the audio thread reached the mixer at
    * least once (the "crashed before the first sound" class of report). */
   static SDL_atomic_t first_cb;
   if (SDL_AtomicCAS(&first_cb, 0, 1))
     host_report_breadcrumb("first audio callback (len=%d)", len);
-  if (SDL_LockMutex(g_audio_mutex)) Die("Mutex lock failed!");
+  if (!snesrecomp_sdl_lock_mutex(g_audio_mutex)) Die("Mutex lock failed!");
   while (len != 0) {
     if (g_audiobuffer_end - g_audiobuffer_cur == 0) {
       RtlRenderAudio((int16 *)g_audiobuffer, g_frames_per_block, g_audio_channels);
@@ -509,17 +527,60 @@ static void SDLCALL AudioCallback(void *userdata, Uint8 *stream, int len) {
       g_audiobuffer_end = g_audiobuffer + g_frames_per_block * g_audio_channels * sizeof(int16);
     }
     int n = IntMin(len, g_audiobuffer_end - g_audiobuffer_cur);
-    if (g_sdl_audio_mixer_volume == SDL_MIX_MAXVOLUME) {
+    if (g_sdl_audio_mixer_volume == SNESRECOMP_SDL_MIX_MAXVOLUME) {
       memcpy(stream, g_audiobuffer_cur, n);
     } else {
       SDL_memset(stream, 0, n);
-      SDL_MixAudioFormat(stream, g_audiobuffer_cur, AUDIO_S16, n, g_sdl_audio_mixer_volume);
+#if SNESRECOMP_SDL3
+      /* SDL3 takes a 0..1 float gain instead of a 0..128 integer volume. */
+      SDL_MixAudio(stream, g_audiobuffer_cur, SDL_AUDIO_S16, n,
+                   (float)g_sdl_audio_mixer_volume /
+                       SNESRECOMP_SDL_MIX_MAXVOLUME);
+#else
+      SDL_MixAudioFormat(stream, g_audiobuffer_cur, AUDIO_S16, n,
+                         g_sdl_audio_mixer_volume);
+#endif
     }
     g_audiobuffer_cur += n;
     stream += n;
     len -= n;
   }
   SDL_UnlockMutex(g_audio_mutex);
+}
+
+#if SNESRECOMP_SDL3
+static void SDLCALL AudioStreamCallback(
+    void *userdata, SDL_AudioStream *stream, int additional_amount,
+    int total_amount) {
+  (void)userdata;
+  (void)total_amount;
+  if (additional_amount <= 0) return;
+  if ((size_t)additional_amount > g_audio_stream_buffer_size) {
+    uint8 *resized =
+        (uint8 *)realloc(g_audio_stream_buffer, additional_amount);
+    if (!resized) return;
+    g_audio_stream_buffer = resized;
+    g_audio_stream_buffer_size = (size_t)additional_amount;
+  }
+  FillAudioBuffer(g_audio_stream_buffer, additional_amount);
+  SDL_PutAudioStreamData(stream, g_audio_stream_buffer, additional_amount);
+}
+#else
+static void SDLCALL AudioCallback(void *userdata, Uint8 *stream, int len) {
+  (void)userdata;
+  FillAudioBuffer(stream, len);
+}
+#endif
+
+static void SetAudioPaused(bool paused) {
+#if SNESRECOMP_SDL3
+  if (g_audio_stream) {
+    if (paused) SDL_PauseAudioStreamDevice(g_audio_stream);
+    else SDL_ResumeAudioStreamDevice(g_audio_stream);
+  }
+#else
+  if (g_audio_device) SDL_PauseAudioDevice(g_audio_device, paused);
+#endif
 }
 
 
@@ -533,24 +594,22 @@ static bool SdlRenderer_Init(SDL_Window *window) {
   if (g_config.shader)
     fprintf(stderr, "Warning: Shaders are supported only with the OpenGL backend\n");
 
-  SDL_Renderer *renderer = SDL_CreateRenderer(g_window, -1,
-                                              g_config.output_method == kOutputMethod_SDLSoftware ? SDL_RENDERER_SOFTWARE :
-                                              SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+  /* SDL3 dropped the renderer flags argument (software vs accelerated is
+   * chosen by driver name, vsync is set separately) and removed
+   * SDL_RendererInfo entirely. snesrecomp_sdl_create_renderer() hides both. */
+  bool want_software = g_config.output_method == kOutputMethod_SDLSoftware;
+  SDL_Renderer *renderer = snesrecomp_sdl_create_renderer(
+      g_window, want_software, /*vsync=*/true);
   if (renderer == NULL) {
     printf("Failed to create renderer: %s\n", SDL_GetError());
     return false;
   }
-  SDL_RendererInfo renderer_info;
-  SDL_GetRendererInfo(renderer, &renderer_info);
   if (kDebugFlag) {
-    printf("Supported texture formats:");
-    for (Uint32 i = 0; i < renderer_info.num_texture_formats; i++)
-      printf(" %s", SDL_GetPixelFormatName(renderer_info.texture_formats[i]));
-    printf("\n");
+    const char *name = snesrecomp_sdl_renderer_name(renderer);
+    printf("Renderer: %s (vsync=%d)\n", name ? name : "(unknown)",
+           snesrecomp_sdl_get_render_vsync(renderer));
   }
   g_renderer = renderer;
-  if (g_config.linear_filtering)
-    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "best");
 
   int tex_mult = 1;
   g_texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
@@ -559,6 +618,9 @@ static bool SdlRenderer_Init(SDL_Window *window) {
     printf("Failed to create texture: %s\n", SDL_GetError());
     return false;
   }
+  /* SDL3 sets filtering per-texture rather than through the global
+   * SDL_HINT_RENDER_SCALE_QUALITY hint, so this must follow texture creation. */
+  snesrecomp_sdl_set_texture_linear(g_texture, g_config.linear_filtering);
   return true;
 }
 
@@ -568,7 +630,7 @@ static void SdlRenderer_Destroy(void) {
 }
 
 static void SdlRenderer_GetOutputSize(int *width, int *height) {
-  if (SDL_GetRendererOutputSize(g_renderer, width, height) != 0) {
+  if (!snesrecomp_sdl_get_render_output_size(g_renderer, width, height)) {
     *width = 0;
     *height = 0;
   }
@@ -576,7 +638,7 @@ static void SdlRenderer_GetOutputSize(int *width, int *height) {
 
 static void SdlRenderer_BeginDraw(int width, int height, uint8 **pixels, int *pitch) {
   int texture_width, texture_height;
-  SDL_QueryTexture(g_texture, NULL, NULL, &texture_width, &texture_height);
+  snesrecomp_sdl_get_texture_size(g_texture, &texture_width, &texture_height);
   if (texture_width != width || texture_height != height) {
     SDL_DestroyTexture(g_texture);
     g_texture = SDL_CreateTexture(g_renderer, SDL_PIXELFORMAT_ARGB8888,
@@ -598,7 +660,8 @@ static void SdlRenderer_BeginDraw(int width, int height, uint8 **pixels, int *pi
   g_sdl_present_rect.h = viewport.height;
   g_sdl_renderer_rect.w = width;
   g_sdl_renderer_rect.h = height;
-  if (SDL_LockTexture(g_texture, &g_sdl_renderer_rect, (void **)pixels, pitch) != 0) {
+  if (!snesrecomp_sdl_lock_texture(g_texture, &g_sdl_renderer_rect,
+                                   (void **)pixels, pitch)) {
     printf("Failed to lock texture: %s\n", SDL_GetError());
     return;
   }
@@ -611,7 +674,8 @@ static void SdlRenderer_EndDraw(void) {
   //  float v = (double)(after - before) / SDL_GetPerformanceFrequency();
   //  printf("%f ms\n", v * 1000);
   SDL_RenderClear(g_renderer);
-  SDL_RenderCopy(g_renderer, g_texture, &g_sdl_renderer_rect,
+  /* SDL3's SDL_RenderTexture takes SDL_FRect, not SDL_Rect. */
+  snesrecomp_sdl_render_texture(g_renderer, g_texture, &g_sdl_renderer_rect,
                  &g_sdl_present_rect);
   SDL_RenderPresent(g_renderer); // vsyncs to 60 FPS?
 }
@@ -1077,7 +1141,7 @@ int main(int argc, char** argv) {
     g_config.no_sprite_limits * kPpuRenderFlags_NoSpriteLimits;
 
   if (g_config.fullscreen == 1)
-    g_win_flags ^= SDL_WINDOW_FULLSCREEN_DESKTOP;
+    g_win_flags ^= SNESRECOMP_SDL_WINDOW_FULLSCREEN_DESKTOP;
   else if (g_config.fullscreen == 2)
     g_win_flags ^= SDL_WINDOW_FULLSCREEN;
 
@@ -1099,7 +1163,9 @@ int main(int argc, char** argv) {
   SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
 
   // set up SDL
-  if(SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0) {
+  /* Return convention flipped in SDL3 (0 == success became true == success);
+   * the raw `!= 0` form compiles clean and fails init on every good start. */
+  if (!snesrecomp_sdl_init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER)) {
     host_report_breadcrumb("SDL_Init FAILED: %s", SDL_GetError());
     printf("Failed to init SDL: %s\n", SDL_GetError());
     return 1;
@@ -1202,7 +1268,9 @@ error_reading:;
   }
 #endif
 
-  SDL_Window *window = SDL_CreateWindow(kWindowTitle, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, window_width, window_height, g_win_flags);
+  /* SDL3 dropped the x/y arguments from SDL_CreateWindow. */
+  SDL_Window *window = snesrecomp_sdl_create_window(
+      kWindowTitle, window_width, window_height, g_win_flags);
   if(window == NULL) {
     host_report_breadcrumb("SDL_CreateWindow FAILED: %s", SDL_GetError());
     printf("Failed to create window: %s\n", SDL_GetError());
@@ -1235,19 +1303,41 @@ error_reading:;
      * SDL picks (and what else was available) is exactly the per-machine
      * variable a non-reproducible audio/boot crash report needs. */
     {
+#if SNESRECOMP_SDL3
+      int ndev = 0;
+      SDL_AudioDeviceID *devices = SDL_GetAudioPlaybackDevices(&ndev);
+      host_report_breadcrumb("audio outputs: %d device(s)", ndev);
+      for (int i = 0; i < ndev && i < 8; i++)
+        host_report_breadcrumb("audio output[%d]: %s", i,
+                               SDL_GetAudioDeviceName(devices[i]));
+      SDL_free(devices);
+#else
       int ndev = SDL_GetNumAudioDevices(0);
       host_report_breadcrumb("audio outputs: %d device(s)", ndev);
       for (int i = 0; i < ndev && i < 8; i++)
         host_report_breadcrumb("audio output[%d]: %s", i,
                                SDL_GetAudioDeviceName(i, 0));
+#endif
     }
     SDL_AudioSpec want = { 0 }, have;
     want.freq = g_config.audio_freq;
     want.format = AUDIO_S16;
     want.channels = 2;
+#if SNESRECOMP_SDL3
+    /* SDL3 has no `samples`/`callback` in SDL_AudioSpec: the device is opened
+     * as a stream and the callback is supplied separately. */
+    have = want;
+    g_audio_stream = SDL_OpenAudioDeviceStream(
+        SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &want, AudioStreamCallback, NULL);
+    if (g_audio_stream) {
+      g_audio_device = SDL_GetAudioStreamDevice(g_audio_stream);
+      SDL_GetAudioStreamFormat(g_audio_stream, &have, NULL);
+    }
+#else
     want.samples = g_config.audio_samples;
     want.callback = &AudioCallback;
     g_audio_device = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
+#endif
     if (g_audio_device == 0) {
       host_report_breadcrumb("audio device open FAILED: %s", SDL_GetError());
       printf("Failed to open audio device: %s\n", SDL_GetError());
@@ -1264,7 +1354,15 @@ error_reading:;
     g_audiobuffer = (uint8 *)calloc(g_frames_per_block * have.channels * sizeof(int16), 1);
     host_report_breadcrumb(
         "audio device opened: freq=%d (want %d) ch=%d samples=%d frames_per_block=%d",
-        have.freq, want.freq, have.channels, have.samples, g_frames_per_block);
+        have.freq, want.freq, have.channels,
+#if SNESRECOMP_SDL3
+        /* SDL_AudioSpec has no `samples` in SDL3; the stream sizes each pull
+         * itself, so report the configured request for continuity. */
+        g_config.audio_samples,
+#else
+        have.samples,
+#endif
+        g_frames_per_block);
   } else {
     host_report_breadcrumb("audio disabled in config");
   }
@@ -1276,13 +1374,26 @@ error_reading:;
   RtlReadSram();
 
   {
+#if SNESRECOMP_SDL3
+    int njs = 0;
+    SDL_JoystickID *joysticks = SDL_GetJoysticks(&njs);
+#else
     int njs = SDL_NumJoysticks();
+#endif
     printf("[Gamepad] SDL reports %d joystick(s) at startup. "
            "enable_gamepad=[%d,%d]\n",
            njs, g_config.enable_gamepad[0], g_config.enable_gamepad[1]);
     for (int i = 0; i < njs; i++) {
+#if SNESRECOMP_SDL3
+      /* SDL3 enumerates by instance ID rather than by index. */
+      SDL_JoystickID joystick = joysticks[i];
+      const char *name = SDL_GetJoystickNameForID(joystick);
+      int is_gc = SDL_IsGamepad(joystick);
+#else
+      SDL_JoystickID joystick = i;
       const char *name = SDL_JoystickNameForIndex(i);
       int is_gc = SDL_IsGameController(i);
+#endif
       printf("[Gamepad]   #%d name=%s is_game_controller=%d\n",
              i, name ? name : "(null)", is_gc);
       OpenOneGamepad(i);
@@ -1322,25 +1433,25 @@ error_reading:;
     while (SDL_PollEvent(&event)) {
       switch (event.type) {
       case SDL_CONTROLLERDEVICEADDED:
-        OpenOneGamepad(event.cdevice.which);
+        OpenOneGamepad(SNESRECOMP_SDL_EVENT_DEVICE(event));
         break;
       case SDL_CONTROLLERDEVICEREMOVED:
-        gi = GetGamepadInfo(event.cdevice.which);
+        gi = GetGamepadInfo(SNESRECOMP_SDL_EVENT_DEVICE(event));
         if (gi) {
           memset(gi, 0, sizeof(GamepadInfo));
           gi->joystick_id = -1;
         }
         break;
       case SDL_CONTROLLERAXISMOTION:
-        gi = GetGamepadInfo(event.caxis.which);
+        gi = GetGamepadInfo(SNESRECOMP_SDL_EVENT_AXIS_DEVICE(event));
         if (gi)
-          HandleGamepadAxisInput(gi, event.caxis.axis, event.caxis.value);
+          HandleGamepadAxisInput(gi, SNESRECOMP_SDL_EVENT_AXIS(event), SNESRECOMP_SDL_EVENT_AXIS_VALUE(event));
         break;
       case SDL_CONTROLLERBUTTONDOWN:
       case SDL_CONTROLLERBUTTONUP: {
-        gi = GetGamepadInfo(event.cbutton.which);
+        gi = GetGamepadInfo(SNESRECOMP_SDL_EVENT_BUTTON_DEVICE(event));
         if (gi) {
-          int b = RemapSdlButton(event.cbutton.button);
+          int b = RemapSdlButton(SNESRECOMP_SDL_EVENT_BUTTON(event));
           if (b >= 0)
             HandleGamepadInput(gi, b, event.type == SDL_CONTROLLERBUTTONDOWN);
         }
@@ -1385,18 +1496,20 @@ error_reading:;
           ChangeWindowScale(event.wheel.y > 0 ? 1 : -1);
         break;
       case SDL_MOUSEBUTTONDOWN:
-        if (event.button.button == SDL_BUTTON_LEFT && event.button.state == SDL_PRESSED && event.button.clicks == 2) {
-          if ((g_win_flags & SDL_WINDOW_FULLSCREEN_DESKTOP) == 0 && (g_win_flags & SDL_WINDOW_FULLSCREEN) == 0 && SDL_GetModState() & KMOD_SHIFT) {
+        /* SDL3 replaced SDL_MouseButtonEvent.state/SDL_PRESSED with a bool
+     * `down`; the event type already tells us it is a press. */
+    if (event.button.button == SDL_BUTTON_LEFT && event.button.clicks == 2) {
+          if ((g_win_flags & SNESRECOMP_SDL_WINDOW_FULLSCREEN_DESKTOP) == 0 && (g_win_flags & SDL_WINDOW_FULLSCREEN) == 0 && SDL_GetModState() & KMOD_SHIFT) {
             g_win_flags ^= SDL_WINDOW_BORDERLESS;
             SDL_SetWindowBordered(g_window, (g_win_flags & SDL_WINDOW_BORDERLESS) == 0 ? SDL_TRUE : SDL_FALSE);
           }
         }
         break;
       case SDL_KEYDOWN:
-        HandleInput(event.key.keysym.sym, event.key.keysym.mod, true);
+        HandleInput(SNESRECOMP_SDL_EVENT_KEY(event), SNESRECOMP_SDL_EVENT_MOD(event), true);
         break;
       case SDL_KEYUP:
-        HandleInput(event.key.keysym.sym, event.key.keysym.mod, false);
+        HandleInput(SNESRECOMP_SDL_EVENT_KEY(event), SNESRECOMP_SDL_EVENT_MOD(event), false);
         break;
       case SDL_QUIT:
         running = false;
@@ -1407,7 +1520,7 @@ error_reading:;
     if (g_paused != audiopaused) {
       audiopaused = g_paused;
       if (g_audio_device)
-        SDL_PauseAudioDevice(g_audio_device, audiopaused);
+        SetAudioPaused(audiopaused);
     }
 
     if (g_paused) {
@@ -1440,7 +1553,7 @@ error_reading:;
      * A B X Y L R). HandleCommand is idempotent for set/clear, so calling
      * it every frame is safe. */
     {
-      const uint8_t *keys = SDL_GetKeyboardState(NULL);
+      const uint8_t *keys = snesrecomp_sdl_get_keyboard_state();
       uint16_t kb_p1 = keybinds_read_player(keys, 1);
       uint16_t kb_p2 = keybinds_read_player(keys, 2);
       static const uint8 kKb2CtrlsIdx[12] = { 7, 6, 5, 4, 9, 8, 3, 11, 2, 10, 1, 0 };
@@ -1566,8 +1679,14 @@ error_reading:;
   RtlWriteSram();
 
   // clean sdl
-  SDL_PauseAudioDevice(g_audio_device, 1);
+  SetAudioPaused(true);
+#if SNESRECOMP_SDL3
+  /* Destroying the stream closes the device it was opened against. */
+  SDL_DestroyAudioStream(g_audio_stream);
+  g_audio_stream = NULL;
+#else
   SDL_CloseAudioDevice(g_audio_device);
+#endif
   SDL_DestroyMutex(g_audio_mutex);
   free(g_audiobuffer);
 
@@ -1659,10 +1778,10 @@ static void HandleCommand(uint32 j, bool pressed) {
   } else {
     switch (j) {
     case kKeys_Fullscreen:
-      g_win_flags ^= SDL_WINDOW_FULLSCREEN_DESKTOP;
-      SDL_SetWindowFullscreen(g_window, g_win_flags & SDL_WINDOW_FULLSCREEN_DESKTOP);
+      g_win_flags ^= SNESRECOMP_SDL_WINDOW_FULLSCREEN_DESKTOP;
+      SDL_SetWindowFullscreen(g_window, g_win_flags & SNESRECOMP_SDL_WINDOW_FULLSCREEN_DESKTOP);
       g_cursor = !g_cursor;
-      SDL_ShowCursor(g_cursor);
+      snesrecomp_sdl_show_cursor(g_cursor);
       break;
     case kKeys_Reset:
       RtlReset(1);
@@ -1839,7 +1958,7 @@ static void HandleVolumeAdjustment(int volume_adjustment) {
   SetApplicationVolume(new_volume);
   printf("[System Volume]=%i\n", new_volume);
 #else
-  g_sdl_audio_mixer_volume = IntMin(IntMax(0, g_sdl_audio_mixer_volume + volume_adjustment * (SDL_MIX_MAXVOLUME >> 4)), SDL_MIX_MAXVOLUME);
+  g_sdl_audio_mixer_volume = IntMin(IntMax(0, g_sdl_audio_mixer_volume + volume_adjustment * (SNESRECOMP_SDL_MIX_MAXVOLUME >> 4)), SNESRECOMP_SDL_MIX_MAXVOLUME);
   printf("[SDL mixer volume]=%i\n", g_sdl_audio_mixer_volume);
 #endif
 }
