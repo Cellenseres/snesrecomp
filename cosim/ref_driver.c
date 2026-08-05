@@ -472,14 +472,29 @@ int main(int argc, char **argv) {
          * drop — the ref would look silent). Matches the A-side consumer rate so
          * both produce audio at the SNES native 32040/60.0988 = 533.12/frame. */
         {
-            static double acc = 0.0; static int16_t buf[1024 * 2];
-            acc += 32040.0 / 60.0988;
-            int want = (int)acc; acc -= (double)want;
+            static int16_t buf[1024 * 2];
+            /* Drain everything past a one-block cushion rather than a fixed
+             * 533.12/frame. The engine produces exactly
+             * RTL_APU_CYCLES_PER_FRAME/32 = 534 natives per frame, so retiring
+             * the nominal 32040/60.0988 rate leaks 0.88 natives per frame. The
+             * retired dsp_getSamples hid that by always retiring 534 regardless
+             * of the count asked for; the exact-consume version does not, and
+             * the ring would pin at DSP_SAMPLE_RING after ~9300 frames and then
+             * silently drop ~0.16% of samples for the rest of the run, desyncing
+             * the A/B audio stats on any long cosim. The A side absorbs the same
+             * imbalance with its occupancy servo; draining to a fixed cushion is
+             * simpler here and just as deterministic. */
             Dsp *dsp = g_snes->apu->dsp;
             uint32_t available = dsp->sampleWrite - dsp->sampleRead;
             collect_audio_stats(dsp, available);
-            if (available >= (uint32_t)want) {
-                dsp_getSamples(dsp, buf, want);
+            const uint32_t cushion = 534;
+            if (available > cushion) {
+                uint32_t want = available - cushion;
+                while (want != 0) {
+                    uint32_t chunk = want > 1024 ? 1024 : want;
+                    dsp_getSamples(dsp, buf, (int)chunk);
+                    want -= chunk;
+                }
             } else {
                 s_stats.audio_underruns++;
             }

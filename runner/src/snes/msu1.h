@@ -53,7 +53,13 @@ void    msu1_write(uint16_t reg, uint8_t val);
 /* Mix one ~1/60 s audio block of MSU PCM into `out` (int16 interleaved
  * L/R, `out_frames` sample-pairs, already filled with the S-DSP block).
  * Consumes 44100/60 = 735 source frames and resamples to out_frames, so
- * it stays locked to the same 60 Hz block clock as dsp_getSamples and
+ * NOTE: dsp_getSamples is no longer a fixed 60 Hz block clock — the consumer
+ * now asks for whatever the host device requests, at a variable size and
+ * rate. msu1_mix still advances one 44.1 kHz block per call and so assumes
+ * one call per emulated frame; on hosts that call per device chunk (SMK,
+ * SMRPG, ~100x/s) an armed MSU-1 track will play fast and chunk-warped.
+ * Pre-existing, but live now that variable-size calls are the norm.
+ * it stays locked to the same block clock as dsp_getSamples and
  * adapts to any host output rate.
  *
  * MUST be called with the APU lock already held — it is invoked only from

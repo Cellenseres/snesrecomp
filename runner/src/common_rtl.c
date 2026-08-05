@@ -450,9 +450,10 @@ bool RtlRunFrame(uint32 inputs) {
     g_rtl_game_info->run_frame();
   }
 #ifdef SNES_COSIM
-  /* DETERMINISTIC AUDIO CONSUMER (SNES_COSIM_AUDIO=1). Production pins SPC tempo
-   * to the audio device's consumption rate: RtlRenderAudio cycles the SPC only
-   * for the shortfall, then drains a block — so the *consumer* sets the rate.
+  /* DETERMINISTIC AUDIO CONSUMER (SNES_COSIM_AUDIO=1). Production is paced by the
+   * guest frame (rtl_sync_apu_frame_boundary), NOT by the audio device. An
+   * earlier design had RtlRenderAudio cycle the SPC for its own shortfall so the
+   * consumer set the rate; that is retired — the callback only consumes.
    * Headless has no audio thread, so the SPC starves (~40x slow). Here we MODEL
    * the consumer deterministically: drain one frame of samples at the exact SNES
    * rate (32040 / 60.0988 = 533.12 samples/frame). This paces the SPC to the
@@ -1300,9 +1301,17 @@ void RtlAudioSetFastForward(bool active) {
  * clock and let audio drift behind video after turbo. The consumer bending by
  * half a percent cannot become a clock.
  */
-#define RTL_AUDIO_TARGET_NATIVES 1602u /* 3 native blocks, ~50 ms cushion */
+#define RTL_AUDIO_NATIVE_RATE    32040.0 /* SPC output rate: 1.024 MHz / 32   */
+#define RTL_AUDIO_TARGET_NATIVES 2136u /* 4 native blocks, ~67 ms cushion */
 #define RTL_AUDIO_SERVO_GAIN     0.05  /* gentle: full-scale error -> 5%, clamped */
 #define RTL_AUDIO_SERVO_MAX      0.005 /* +/-0.5% == ~8 cents, inaudible        */
+/* Occupancy is sampled at callback entry, but production arrives in 534-native
+ * bursts once per emulated frame, so the raw reading sawtooths by more than the
+ * servo's whole proportional band (+/-160 natives). Feeding that straight in
+ * slams the ratio rail-to-rail every callback — ~1% peak-to-peak pitch flutter
+ * at the callback rate, which is an order of magnitude above where tape wow
+ * becomes objectionable. Smooth the burst out before the servo sees it. */
+#define RTL_AUDIO_OCC_EMA        0.05
 /* Fade length for starvation edges. A hard cut to zero and back is a click at
  * both edges; 64 frames (~2 ms) is short enough to be inaudible as a gain
  * change but long enough to remove the click. */
@@ -1312,16 +1321,46 @@ static double s_render_phase;      /* fractional native position, carried over *
 static int16 s_render_hold_l;      /* last native delivered — fade anchor and  */
 static int16 s_render_hold_r;      /* interpolation partner across calls       */
 static int s_render_starved;       /* in a starvation episode (drives fade-in) */
+static int s_render_fade_pos;      /* fade-in progress, carried across calls   */
+static double s_render_occ_ema = -1.0; /* burst-filtered occupancy, -1 = unset */
+/* Host output rate. Defaults to the native rate, so a host that never calls
+ * RtlSetAudioOutputRate behaves exactly as if no conversion were needed —
+ * which is correct for every shipped default config, all of which open the
+ * device at 32040 (or 32000, inside the servo's range). */
+static double s_render_output_rate = RTL_AUDIO_NATIVE_RATE;
+
+/* Tell the consumer what rate the host actually opened the device at.
+ *
+ * This is not optional bookkeeping: the retired fixed-534-block path did the
+ * 32040 -> device-rate conversion as a side effect of its sample-and-hold, so
+ * removing it removed the only rate conversion in the chain. Every host whose
+ * AudioFreq is user-configurable (all the Family A hosts accept 11025-48000)
+ * must report the obtained rate here, or a user who sets 44100 gets audio
+ * consumed 37% too fast — permanent starvation plus a 5.5-semitone pitch error.
+ *
+ * Called once from host audio init, before the device is unpaused and hence
+ * before any callback can run, so no lock is needed. */
+void RtlSetAudioOutputRate(int freq) {
+  if (freq >= 8000 && freq <= 192000)
+    s_render_output_rate = (double)freq;
+}
 
 static void rtl_render_native(Dsp *dsp, int16 *out, int frames) {
+  if (frames <= 0) return;
   uint32_t available = dsp_available(dsp);
 
-  /* Servo: steer ring occupancy toward the target cushion. */
-  double err = ((double)available - (double)RTL_AUDIO_TARGET_NATIVES) /
+  /* Servo: steer ring occupancy toward the target cushion, on top of the fixed
+   * native->device rate conversion. */
+  if (s_render_occ_ema < 0.0) s_render_occ_ema = (double)available;
+  else s_render_occ_ema += RTL_AUDIO_OCC_EMA *
+                           ((double)available - s_render_occ_ema);
+  double err = (s_render_occ_ema - (double)RTL_AUDIO_TARGET_NATIVES) /
                (double)RTL_AUDIO_TARGET_NATIVES;
-  double ratio = 1.0 + RTL_AUDIO_SERVO_GAIN * err;
-  if (ratio > 1.0 + RTL_AUDIO_SERVO_MAX) ratio = 1.0 + RTL_AUDIO_SERVO_MAX;
-  if (ratio < 1.0 - RTL_AUDIO_SERVO_MAX) ratio = 1.0 - RTL_AUDIO_SERVO_MAX;
+  double servo = 1.0 + RTL_AUDIO_SERVO_GAIN * err;
+  if (servo > 1.0 + RTL_AUDIO_SERVO_MAX) servo = 1.0 + RTL_AUDIO_SERVO_MAX;
+  if (servo < 1.0 - RTL_AUDIO_SERVO_MAX) servo = 1.0 - RTL_AUDIO_SERVO_MAX;
+  /* Natives to advance per output frame: the rate ratio, trimmed by the servo. */
+  double ratio = (RTL_AUDIO_NATIVE_RATE / s_render_output_rate) * servo;
 
   /* Natives spanned by this request, including the carried phase. The last
    * output frame interpolates between floor(pos) and floor(pos)+1, so one
@@ -1352,16 +1391,21 @@ static void rtl_render_native(Dsp *dsp, int16 *out, int frames) {
     dsp_peek(dsp, idx + 1, &l1, &r1);
     int16 l = (int16)((double)l0 + ((double)l1 - (double)l0) * frac);
     int16 r = (int16)((double)r0 + ((double)r1 - (double)r0) * frac);
-    /* Fade in out of a starvation episode so the recovery edge is not a step. */
+    /* Fade in out of a starvation episode so the recovery edge is not a step.
+     * The fade-out below ends at silence, so this ramps 0 -> signal.
+     *
+     * Progress is carried in a static across calls rather than derived from `i`.
+     * Keyed on `i`, a recovery spread over several short callbacks restarts the
+     * ramp from zero every call — a buzz at the callback rate rather than a
+     * fade — and the flag would never clear at all if no single call ever
+     * delivered more than RTL_AUDIO_FADE_FRAMES frames, leaving every
+     * subsequent callback permanently ramped despite a healthy ring. */
     if (s_render_starved) {
-      int32_t w = i < RTL_AUDIO_FADE_FRAMES ? i : RTL_AUDIO_FADE_FRAMES;
-      l = (int16)(((int32_t)l * w +
-                   (int32_t)s_render_hold_l * (RTL_AUDIO_FADE_FRAMES - w)) /
-                  RTL_AUDIO_FADE_FRAMES);
-      r = (int16)(((int32_t)r * w +
-                   (int32_t)s_render_hold_r * (RTL_AUDIO_FADE_FRAMES - w)) /
-                  RTL_AUDIO_FADE_FRAMES);
-      if (i >= RTL_AUDIO_FADE_FRAMES) s_render_starved = 0;
+      int32_t w = s_render_fade_pos < RTL_AUDIO_FADE_FRAMES
+                      ? s_render_fade_pos : RTL_AUDIO_FADE_FRAMES;
+      l = (int16)(((int32_t)l * w) / RTL_AUDIO_FADE_FRAMES);
+      r = (int16)(((int32_t)r * w) / RTL_AUDIO_FADE_FRAMES);
+      if (++s_render_fade_pos >= RTL_AUDIO_FADE_FRAMES) s_render_starved = 0;
     }
     out[i * 2] = l;
     out[i * 2 + 1] = r;
@@ -1382,6 +1426,7 @@ static void rtl_render_native(Dsp *dsp, int16 *out, int frames) {
     /* Fade the tail to silence over the remaining frames (capped) instead of
      * cutting, then hold silence. */
     s_render_starved = 1;
+    s_render_fade_pos = 0;
     audio_trace_on_output_underflow(available);
     int fade = frames - usable;
     if (fade > RTL_AUDIO_FADE_FRAMES) fade = RTL_AUDIO_FADE_FRAMES;

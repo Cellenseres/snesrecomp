@@ -265,6 +265,12 @@ void RtlSaveLoad(int cmd, int slot);
 void RtlApuLock();
 void RtlApuUnlock();
 void RtlRenderAudio(int16 *audio_buffer, int samples, int channels);
+/* Report the rate the host actually opened the audio device at, so the consumer
+ * can convert the SPC's native 32040 Hz onto it. MUST be called from host audio
+ * init (before the device is unpaused) by any host whose rate is configurable —
+ * omitting it silently assumes 32040 and consumes far too fast at any other
+ * rate. Ignored for values outside 8000-192000. */
+void RtlSetAudioOutputRate(int freq);
 /* Notify the shared audio runner of host fast-forward state. Guest-frame SPC
  * synchronization is automatic inside RtlRunFrame; clients only supply the
  * presentation policy needed to discard stale PCM after fast-forward. */
