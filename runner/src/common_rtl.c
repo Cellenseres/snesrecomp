@@ -1268,6 +1268,137 @@ void RtlAudioSetFastForward(bool active) {
   RtlApuUnlock();
 }
 
+/* ---- Native-rate delivery with an occupancy servo ----------------------
+ *
+ * Two independent clocks meet here and nowhere else: the guest produces
+ * exactly 534 natives per emulated frame (RTL_APU_CYCLES_PER_FRAME / 32,
+ * paced by rtl_sync_apu_frame_boundary), and the host audio device drains at
+ * its own crystal rate. They never agree exactly:
+ *
+ *   - the frame loop runs at 60.0988 fps (SMK/SMRPG) or 60.000 (block hosts),
+ *     or whatever vsync imposes, so production lands anywhere in the
+ *     32040-32093 natives/s range;
+ *   - the device consumes at the rate implied by its own clock.
+ *
+ * Left unreconciled, even a 40 natives/s imbalance walks the 8192-sample ring
+ * to one end within ~3 minutes and stays there: at the full end the producer
+ * drops runs (crackle, plus 256 ms of latency), at the empty end the consumer
+ * starves. Both ends were observed in this family.
+ *
+ * So the consumer flexes. Each call we read the ring's occupancy, compare it
+ * against a target cushion, and consume natives at a rate up to +/-0.5% off
+ * nominal to steer occupancy back — resampling that fractional count onto the
+ * exact `frames` the host asked for, with interpolation phase carried across
+ * calls so block boundaries have no seam. +/-0.5% is ~8 cents, an order of
+ * magnitude below the ~25 cents where pitch drift becomes noticeable, and it
+ * comfortably covers every imbalance in this family (SMK's 60.0988 loop is
+ * 0.165% off; 59.94 vsync is 0.1%).
+ *
+ * Production is deliberately NOT touched: the guest frame stays the master
+ * clock. An earlier design had this callback cycle the SPC for its own
+ * shortfall, which made the host's scheduling a second competing emulation
+ * clock and let audio drift behind video after turbo. The consumer bending by
+ * half a percent cannot become a clock.
+ */
+#define RTL_AUDIO_TARGET_NATIVES 1602u /* 3 native blocks, ~50 ms cushion */
+#define RTL_AUDIO_SERVO_GAIN     0.05  /* gentle: full-scale error -> 5%, clamped */
+#define RTL_AUDIO_SERVO_MAX      0.005 /* +/-0.5% == ~8 cents, inaudible        */
+/* Fade length for starvation edges. A hard cut to zero and back is a click at
+ * both edges; 64 frames (~2 ms) is short enough to be inaudible as a gain
+ * change but long enough to remove the click. */
+#define RTL_AUDIO_FADE_FRAMES    64
+
+static double s_render_phase;      /* fractional native position, carried over */
+static int16 s_render_hold_l;      /* last native delivered — fade anchor and  */
+static int16 s_render_hold_r;      /* interpolation partner across calls       */
+static int s_render_starved;       /* in a starvation episode (drives fade-in) */
+
+static void rtl_render_native(Dsp *dsp, int16 *out, int frames) {
+  uint32_t available = dsp_available(dsp);
+
+  /* Servo: steer ring occupancy toward the target cushion. */
+  double err = ((double)available - (double)RTL_AUDIO_TARGET_NATIVES) /
+               (double)RTL_AUDIO_TARGET_NATIVES;
+  double ratio = 1.0 + RTL_AUDIO_SERVO_GAIN * err;
+  if (ratio > 1.0 + RTL_AUDIO_SERVO_MAX) ratio = 1.0 + RTL_AUDIO_SERVO_MAX;
+  if (ratio < 1.0 - RTL_AUDIO_SERVO_MAX) ratio = 1.0 - RTL_AUDIO_SERVO_MAX;
+
+  /* Natives spanned by this request, including the carried phase. The last
+   * output frame interpolates between floor(pos) and floor(pos)+1, so one
+   * extra native must be present. */
+  double span = s_render_phase + (double)(frames - 1) * ratio;
+  uint32_t need = (uint32_t)span + 2;
+
+  int usable = frames;
+  if (available < need) {
+    /* Starving. Emit every frame we can actually source rather than blanking
+     * the whole request — the old behaviour memset the full block even when
+     * 533 perfectly good samples were queued. */
+    if (available < 2) {
+      usable = 0;
+    } else {
+      double max_span = (double)(available - 2) - s_render_phase;
+      usable = max_span <= 0.0 ? 0 : (int)(max_span / ratio) + 1;
+      if (usable > frames) usable = frames;
+    }
+  }
+
+  for (int i = 0; i < usable; i++) {
+    double pos = s_render_phase + (double)i * ratio;
+    uint32_t idx = (uint32_t)pos;
+    double frac = pos - (double)idx;
+    int16 l0, r0, l1, r1;
+    dsp_peek(dsp, idx, &l0, &r0);
+    dsp_peek(dsp, idx + 1, &l1, &r1);
+    int16 l = (int16)((double)l0 + ((double)l1 - (double)l0) * frac);
+    int16 r = (int16)((double)r0 + ((double)r1 - (double)r0) * frac);
+    /* Fade in out of a starvation episode so the recovery edge is not a step. */
+    if (s_render_starved) {
+      int32_t w = i < RTL_AUDIO_FADE_FRAMES ? i : RTL_AUDIO_FADE_FRAMES;
+      l = (int16)(((int32_t)l * w +
+                   (int32_t)s_render_hold_l * (RTL_AUDIO_FADE_FRAMES - w)) /
+                  RTL_AUDIO_FADE_FRAMES);
+      r = (int16)(((int32_t)r * w +
+                   (int32_t)s_render_hold_r * (RTL_AUDIO_FADE_FRAMES - w)) /
+                  RTL_AUDIO_FADE_FRAMES);
+      if (i >= RTL_AUDIO_FADE_FRAMES) s_render_starved = 0;
+    }
+    out[i * 2] = l;
+    out[i * 2 + 1] = r;
+  }
+
+  if (usable > 0) {
+    s_render_hold_l = out[(usable - 1) * 2];
+    s_render_hold_r = out[(usable - 1) * 2 + 1];
+    /* Retire only the natives fully behind the new phase, so the interpolation
+     * partner for the next call stays resident. */
+    double consumed_span = s_render_phase + (double)usable * ratio;
+    uint32_t retire = (uint32_t)consumed_span;
+    dsp_advance(dsp, retire);
+    s_render_phase = consumed_span - (double)retire;
+  }
+
+  if (usable < frames) {
+    /* Fade the tail to silence over the remaining frames (capped) instead of
+     * cutting, then hold silence. */
+    s_render_starved = 1;
+    audio_trace_on_output_underflow(available);
+    int fade = frames - usable;
+    if (fade > RTL_AUDIO_FADE_FRAMES) fade = RTL_AUDIO_FADE_FRAMES;
+    for (int i = 0; i < fade; i++) {
+      int32_t w = RTL_AUDIO_FADE_FRAMES - i;
+      out[(usable + i) * 2] =
+          (int16)(((int32_t)s_render_hold_l * w) / RTL_AUDIO_FADE_FRAMES);
+      out[(usable + i) * 2 + 1] =
+          (int16)(((int32_t)s_render_hold_r * w) / RTL_AUDIO_FADE_FRAMES);
+    }
+    memset(out + (usable + fade) * 2, 0,
+           (size_t)(frames - usable - fade) * 2 * sizeof(*out));
+    s_render_hold_l = 0;
+    s_render_hold_r = 0;
+  }
+}
+
 void RtlRenderAudio(int16 *audio_buffer, int samples, int channels) {
   assert(channels == 2);
   /* SPC state is guest-frame driven by RtlAudioSyncFrame. The host callback is
@@ -1275,16 +1406,7 @@ void RtlRenderAudio(int16 *audio_buffer, int samples, int channels) {
    * schedule a second, competing emulation clock and is what let audio drift
    * behind visuals after turbo. */
   RtlApuLock();
-  uint32_t available = g_snes->apu->dsp->sampleWrite -
-                       g_snes->apu->dsp->sampleRead;
-  if (available >= 534) {
-    dsp_getSamples(g_snes->apu->dsp, audio_buffer, samples);
-  } else {
-    /* Do not advance guest state to hide host scheduling jitter. Preserve a
-     * partial block for the next callback and emit one block of silence. */
-    memset(audio_buffer, 0, (size_t)samples * 2 * sizeof(*audio_buffer));
-    audio_trace_on_output_underflow(available);
-  }
+  rtl_render_native(g_snes->apu->dsp, audio_buffer, samples);
   /* Mix MSU-1 streaming audio on top of the S-DSP block. Inert (no-op)
    * unless a pack is armed and a track is playing. Runs under the APU
    * lock we already hold, which serialises it against MSU register

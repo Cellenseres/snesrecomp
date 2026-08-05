@@ -109,7 +109,32 @@ void dsp_reset(Dsp* dsp);
 void dsp_cycle(Dsp* dsp);
 uint8_t dsp_read(Dsp* dsp, uint8_t adr);
 void dsp_write(Dsp* dsp, uint8_t adr, uint8_t val);
-void dsp_getSamples(Dsp* dsp, int16_t* sampleData, int samplesPerFrame);
+/* Native-rate output-ring access. The consumer (RtlRenderAudio) reconciles the
+ * guest production clock against the host device clock, which needs to read the
+ * ring at a fractional offset and retire a count it computes itself — so the
+ * ring is exposed directly rather than through a fixed-block accessor.
+ *
+ * dsp_available  natives currently queued (sampleWrite - sampleRead).
+ * dsp_peek       sample at `offset` natives past the read cursor. The caller
+ *                must have checked offset < dsp_available().
+ * dsp_advance    retire `natives` from the read cursor and record the consume
+ *                event. Clamped to what is available.
+ */
+uint32_t dsp_available(const Dsp* dsp);
+void dsp_peek(const Dsp* dsp, uint32_t offset, int16_t* l, int16_t* r);
+void dsp_advance(Dsp* dsp, uint32_t natives);
+/* Exact-consume block read at the native rate: copies `frames` natives 1:1 and
+ * retires exactly `frames`. Returns the count actually copied (< frames when
+ * the ring is short; the tail is left untouched for the caller to fill).
+ *
+ * This replaces a fixed-534-block sample-and-hold resampler inherited from
+ * upstream LakeSnes, which retired 534 natives per call regardless of how many
+ * frames were requested. Any caller not asking for exactly 534 therefore put
+ * the ring permanently out of balance: measured on Super Mario Kart at 33
+ * calls/s x 534 = 17.8 k natives/s consumed against 32.04 k/s produced, which
+ * pinned the ring at its 8192 cap and destroyed 43% of all samples (384 k of
+ * them carrying audible music) inside 33 s. */
+uint32_t dsp_getSamples(Dsp* dsp, int16_t* sampleData, int frames);
 /* Drop queued host-output samples without rewinding SPC/DSP state. Used only
  * when leaving fast-forward, where buffered samples describe obsolete guest
  * time and retaining them would create persistent A/V latency. */

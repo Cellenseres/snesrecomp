@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 
@@ -75,6 +76,60 @@ static AudioTraceEvent *push_event(uint8_t type) {
   return e;
 }
 
+/* Release-readable readout of the always-on counters.
+ *
+ * The debug server (audio_stats / audio_wav) compiles to nothing without
+ * SNESRECOMP_TRACE, so on a Production build — the one the user actually
+ * listens to — there was no way to read these rings at all. A trace build
+ * is not an acceptable substitute here: it perturbs the very timing the
+ * audio path is being measured for.
+ *
+ * This is a QUERY of the always-on rings, not an arm-then-capture probe:
+ * the counters have been accumulating since process start regardless, and
+ * setting SNESRECOMP_AUDIO_STATS only decides whether a line gets written
+ * out once per second. Line-buffered + explicit fflush so a killed process
+ * still leaves every completed second on disk.
+ *
+ * SNESRECOMP_AUDIO_STATS=<path>  append one line per second to <path>
+ * SNESRECOMP_AUDIO_STATS=1       ... to stderr
+ */
+static FILE *s_stats_out;        /* NULL until resolved; s_stats_mode says how */
+static int   s_stats_mode = -1;  /* -1 unresolved, 0 off, 1 on */
+
+static void stats_line(uint32_t ring_fill) {
+  if (s_stats_mode < 0) {
+    const char *e = getenv("SNESRECOMP_AUDIO_STATS");
+    if (!e || !e[0] || (e[0] == '0' && !e[1])) {
+      s_stats_mode = 0;
+    } else if (e[0] == '1' && !e[1]) {
+      s_stats_out = stderr;
+      s_stats_mode = 1;
+    } else {
+      s_stats_out = fopen(e, "a");
+      s_stats_mode = s_stats_out ? 1 : 0;
+    }
+    if (s_stats_mode == 1)
+      fprintf(s_stats_out,
+              "# ms produced consumed dropped dropped_audible drop_runs "
+              "underflows consume_calls occupancy hiwater prod_cpu prod_audio\n");
+  }
+  if (s_stats_mode == 0) return;
+  fprintf(s_stats_out,
+          "%llu %llu %llu %llu %llu %llu %llu %llu %u %u %llu %llu\n",
+          (unsigned long long)wall_ms(),
+          (unsigned long long)s_stats.produced,
+          (unsigned long long)s_stats.consumed,
+          (unsigned long long)s_stats.dropped,
+          (unsigned long long)s_stats.dropped_audible,
+          (unsigned long long)s_stats.drop_runs,
+          (unsigned long long)s_stats.output_underflows,
+          (unsigned long long)s_stats.consume_calls,
+          ring_fill, s_stats.occupancy_highwater,
+          (unsigned long long)s_stats.produced_cpu,
+          (unsigned long long)s_stats.produced_audio);
+  fflush(s_stats_out);
+}
+
 static void maybe_snap(uint32_t ring_fill) {
   uint64_t now = wall_ms();
   if (now - s_last_snap_ms < 1000) return;
@@ -86,6 +141,7 @@ static void maybe_snap(uint32_t ring_fill) {
   s->dropped = s_stats.dropped;
   s->consumed = s_stats.consumed;
   s->occupancy = ring_fill;
+  stats_line(ring_fill);
 }
 
 void audio_trace_set_producer(int producer) {

@@ -637,23 +637,43 @@ void dsp_write(Dsp* dsp, uint8_t adr, uint8_t val) {
   dsp->ram[adr] = val;
 }
 
-void dsp_getSamples(Dsp* dsp, int16_t* sampleData, int samplesPerFrame) {
-  // Consume the oldest 534 native samples (one block) from the ring and
-  // resample to samplesPerFrame for the output rate. Caller guarantees
-  // >= 534 samples are available. Indexing by the absolute read counter
-  // (not a reset-to-0 offset) keeps any catch-up lead intact for the next
-  // call — FIFO, no sample loss at the block boundary.
-  double adder = 534.0 / samplesPerFrame;
-  double location = 0.0;
+uint32_t dsp_available(const Dsp* dsp) {
+  return dsp->sampleWrite - dsp->sampleRead;
+}
+
+void dsp_peek(const Dsp* dsp, uint32_t offset, int16_t* l, int16_t* r) {
+  uint32_t idx = (dsp->sampleRead + offset) & (DSP_SAMPLE_RING - 1);
+  *l = dsp->sampleBuffer[idx * 2];
+  *r = dsp->sampleBuffer[idx * 2 + 1];
+}
+
+void dsp_advance(Dsp* dsp, uint32_t natives) {
+  uint32_t available = dsp->sampleWrite - dsp->sampleRead;
+  if (natives > available) natives = available;
+  if (natives == 0) return;
   uint32_t base = dsp->sampleRead;
-  for(int i = 0; i < samplesPerFrame; i++) {
-    uint32_t idx = (base + (uint32_t) location) & (DSP_SAMPLE_RING - 1);
+  dsp->sampleRead += natives;
+  audio_trace_on_consume(base, natives, dsp->sampleWrite - dsp->sampleRead);
+}
+
+uint32_t dsp_getSamples(Dsp* dsp, int16_t* sampleData, int frames) {
+  // Exact-consume 1:1 copy at the native rate. Retires precisely as many
+  // natives as it emits frames, so a caller's request size can never put the
+  // ring out of balance (see the contract note in dsp.h).
+  if (frames <= 0) return 0;
+  uint32_t available = dsp->sampleWrite - dsp->sampleRead;
+  uint32_t n = (uint32_t)frames < available ? (uint32_t)frames : available;
+  uint32_t base = dsp->sampleRead;
+  for (uint32_t i = 0; i < n; i++) {
+    uint32_t idx = (base + i) & (DSP_SAMPLE_RING - 1);
     sampleData[i * 2] = dsp->sampleBuffer[idx * 2];
     sampleData[i * 2 + 1] = dsp->sampleBuffer[idx * 2 + 1];
-    location += adder;
   }
-  dsp->sampleRead += 534;
-  audio_trace_on_consume(base, 534, dsp->sampleWrite - dsp->sampleRead);
+  if (n != 0) {
+    dsp->sampleRead += n;
+    audio_trace_on_consume(base, n, dsp->sampleWrite - dsp->sampleRead);
+  }
+  return n;
 }
 
 uint32_t dsp_trimSamples(Dsp* dsp, uint32_t samples_to_keep) {
