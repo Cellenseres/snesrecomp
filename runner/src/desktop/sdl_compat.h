@@ -149,7 +149,18 @@ static inline bool snesrecomp_sdl_set_render_logical_size(
 static inline bool snesrecomp_sdl_get_render_output_size(
     SDL_Renderer *renderer, int *width, int *height) {
 #if SNESRECOMP_SDL3
-  return SDL_GetCurrentRenderOutputSize(renderer, width, height);
+  /* SDL_GetRenderOutputSize, NOT SDL_GetCurrentRenderOutputSize: this must be
+   * the TRUE physical output size, ignoring logical size and presentation, to
+   * match SDL2's SDL_GetRendererOutputSize.
+   *
+   * The "Current" variant applies logical-presentation adjustments, so a game
+   * that calls SDL_SetRenderLogicalPresentation gets its own logical size back
+   * instead of the real window. That silently breaks any drawable-driven
+   * decision: A Link to the Past's adaptive widescreen derives its column count
+   * from this aspect, so it read 256x224, computed zero extra columns, and stayed
+   * pinned to 4:3 with no error and no log line. Games using an explicit viewport
+   * (Mega Man X, SMW) never set a logical presentation and so never saw it. */
+  return SDL_GetRenderOutputSize(renderer, width, height);
 #else
   return SDL_GetRendererOutputSize(renderer, width, height) == 0;
 #endif

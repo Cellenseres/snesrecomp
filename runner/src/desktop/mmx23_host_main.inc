@@ -618,6 +618,9 @@ static bool SdlRenderer_Init(SDL_Window *window) {
     printf("Failed to create texture: %s\n", SDL_GetError());
     return false;
   }
+  /* SNES frames are opaque RGB with a zero alpha byte; SDL3 would blend
+   * them away to the black clear colour. */
+  snesrecomp_sdl_set_texture_opaque(g_texture);
   /* SDL3 sets filtering per-texture rather than through the global
    * SDL_HINT_RENDER_SCALE_QUALITY hint, so this must follow texture creation. */
   snesrecomp_sdl_set_texture_linear(g_texture, g_config.linear_filtering);
@@ -645,6 +648,9 @@ static void SdlRenderer_BeginDraw(int width, int height, uint8 **pixels, int *pi
                                   SDL_TEXTUREACCESS_STREAMING, width, height);
     if (!g_texture) Die("SDL widescreen texture allocation failed");
   }
+  /* SNES frames are opaque RGB with a zero alpha byte; SDL3 would blend
+   * them away to the black clear colour. */
+  snesrecomp_sdl_set_texture_opaque(g_texture);
   /* Use the same explicit viewport as OpenGL. SDL's integer logical size
    * rounded the 342x224 16:9 frame to 399x224 and produced a 1920x1078
    * destination on a 1080p display. The shared geometry snaps that
