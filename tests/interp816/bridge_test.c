@@ -34,6 +34,7 @@ static int      g_aot_interp_nlr;
 static int      g_aot_double_rewrite;
 static int      g_aot_crosses_interp_owner;
 static int      g_aot_tail_chain_probe;
+static int      g_aot_skips_root;
 static int      g_tail_chain_direct;
 static int      g_nested_chain_direct;
 #define FAKE_AOT 0x008100u
@@ -121,6 +122,14 @@ RecompReturn cpu_dispatch_pc(CpuState *cpu, uint32 pc24, uint16 miss_restore) {
 RecompReturn cpu_dispatch_pc_paired(CpuState *cpu, uint32 pc24,
                                     uint8 frame_size) {
     cpu->host_return_valid = frame_size;
+    if (g_aot_skips_root && (pc24 & 0xFFFFFF) == FAKE_AOT) {
+        /* Model a compiled root whose nested helper consumes the root's guest
+         * JSL frame and returns SKIP_1 through the root host frame. The owning
+         * interpreter must consume that one skip and continue after its JSL. */
+        g_aot_called++;
+        cpu->S = (uint16)(cpu->S + frame_size);
+        return RECOMP_RETURN_SKIP_1;
+    }
     if (g_aot_double_rewrite && (pc24 & 0xFFFFFF) == FAKE_AOT) {
         /* Computed-RTS dispatcher shape: a synthetic handler address is
          * pushed and immediately popped, so the interpreted caller's real
@@ -469,6 +478,29 @@ int main(void) {
             "A.lo=%02X exp 5A (rewritten continuation executed)", g_c.A & 0xFF);
       CHECK(g_c.S == 0x01FF, "S=%04X exp 01FF (bounce frame consumed once)", g_c.S);
       g_aot_rewrites_return = 0; }
+
+    /* S8b: an AOT root reached from the LLE scheduler can non-locally return
+     * through its own compiled host frame while still landing normally in the
+     * interpreted scheduler. SKIP_1 is consumed at that mixed-tier boundary;
+     * abandoning the scheduler here leaves its current task permanently
+     * marked running. */
+    { memset(RAM, 0, MEMSZ); init_cpu(); g_aot_called = 0;
+      g_aot_skips_root = 1;
+      uint8_t scheduler[] = {
+          0x22,0x00,0x81,0x00,                 /* JSL fake compiled root */
+          0xA9,0x5A,                           /* scheduler continuation */
+          0xAD,0x20,0x00, 0xD0,0xFB            /* cooperative wait loop */
+      };
+      load(0x8000, scheduler, sizeof scheduler);
+      RAM[0x20] = 0;
+      int rc = interp_bridge_run_loop(&g_c, 0x008000, 0x008006, 0x0020, 0);
+      printf("S8b scheduler consumes AOT-root SKIP_1\n");
+      CHECK(rc == 1, "rc=%d exp 1", rc);
+      CHECK(g_aot_called == 1, "aot_called=%d exp 1", g_aot_called);
+      CHECK((g_c.A & 0xFF) == 0x5A,
+            "A.lo=%02X exp 5A (scheduler continuation executed)", g_c.A & 0xFF);
+      CHECK(g_c.S == 0x01FF, "S=%04X exp 01FF (JSL frame consumed once)", g_c.S);
+      g_aot_skips_root = 0; }
 
     /* S9: the same rewrite below the paired AOT root belongs to a compiled
      * ancestor, not directly to the scheduler interpreter.  Finish that
