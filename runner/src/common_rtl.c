@@ -1345,6 +1345,15 @@ void RtlSetAudioOutputRate(int freq) {
     s_render_output_rate = (double)freq;
 }
 
+/* Accessor for other consumers that must resample onto the same device rate
+ * as rtl_render_native (e.g. msu1_mix's 44.1 kHz track -> device-rate
+ * conversion in snes/msu1.c). Declared extern locally there rather than
+ * pulled in through a header, matching this file's existing convention for
+ * small cross-module hooks (see msu1.c's RtlApuLock/RtlApuUnlock externs). */
+double RtlAudioOutputRate(void) {
+  return s_render_output_rate;
+}
+
 static void rtl_render_native(Dsp *dsp, int16 *out, int frames) {
   if (frames <= 0) return;
   uint32_t available = dsp_available(dsp);

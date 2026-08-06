@@ -50,17 +50,16 @@ void msu1_set_rom_path(const char *rom_path);
 uint8_t msu1_read(uint16_t reg);
 void    msu1_write(uint16_t reg, uint8_t val);
 
-/* Mix one ~1/60 s audio block of MSU PCM into `out` (int16 interleaved
- * L/R, `out_frames` sample-pairs, already filled with the S-DSP block).
- * Consumes 44100/60 = 735 source frames and resamples to out_frames, so
- * NOTE: dsp_getSamples is no longer a fixed 60 Hz block clock — the consumer
- * now asks for whatever the host device requests, at a variable size and
- * rate. msu1_mix still advances one 44.1 kHz block per call and so assumes
- * one call per emulated frame; on hosts that call per device chunk (SMK,
- * SMRPG, ~100x/s) an armed MSU-1 track will play fast and chunk-warped.
- * Pre-existing, but live now that variable-size calls are the norm.
- * it stays locked to the same block clock as dsp_getSamples and
- * adapts to any host output rate.
+/* Mix MSU PCM into `out` (int16 interleaved L/R, `out_frames` sample-pairs,
+ * already filled with the S-DSP block). `out_frames` is whatever the host
+ * device requested THIS call, at whatever rate it opened (see
+ * RtlSetAudioOutputRate) -- callers are not required to call once per
+ * emulated 60 Hz frame, nor with a fixed chunk size. msu1_mix continuously
+ * resamples the fixed 44.1 kHz track rate onto that rate proportionally to
+ * out_frames, carrying the fractional resample phase across calls (the same
+ * pattern rtl_render_native uses in common_rtl.c for the S-DSP output), so
+ * playback speed and pitch are correct regardless of call frequency/size and
+ * there is no seam at chunk boundaries.
  *
  * MUST be called with the APU lock already held — it is invoked only from
  * inside RtlRenderAudio's locked region. No-op when disabled / not

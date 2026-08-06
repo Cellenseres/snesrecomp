@@ -24,9 +24,15 @@
  * nesting is safe. Declared here to avoid coupling to common_rtl.h. */
 extern void RtlApuLock(void);
 extern void RtlApuUnlock(void);
+/* The device rate the host actually opened (common_rtl.c RtlSetAudioOutputRate
+ * / RtlAudioOutputRate). msu1_mix resamples the fixed 44.1 kHz track rate onto
+ * this, the same conversion rtl_render_native does for the S-DSP output. */
+extern double RtlAudioOutputRate(void);
 
 #define MSU1_RATE            44100
-#define MSU1_FRAMES_PER_BLK  (MSU1_RATE / 60)   /* 735, locked to the 60 Hz block clock */
+#define MSU1_FRAMES_PER_BLK  (MSU1_RATE / 60)   /* 735 = 44100/60; historical unit, no
+                                                    longer msu1_mix's per-call quantum
+                                                    (see msu1_mix) */
 #define MSU1_PCM_HEADER      8                  /* "MSU1" + uint32 loop point */
 #define MSU1_REVISION        0x01
 #define MSU1_PATH_MAX        1024
@@ -61,6 +67,19 @@ static struct {
     bool   data_tried;   /* attempted to open data file */
     uint8_t seek[4];     /* latched $2000-$2003, committed on $2003 */
 } g;
+
+/* Continuous-phase resample state for msu1_mix: 44.1 kHz track rate -> host
+ * output rate, carried ACROSS calls the same way rtl_render_native
+ * (common_rtl.c) carries its native->device phase. s_mix_buf is a growable
+ * scratch buffer sized to each call's need; s_mix_carry holds the handful of
+ * frames (always < ~2, since need is sized per-call) not yet fully consumed.
+ * Reset in msu_load_track so a stale tail from the previous track can never
+ * bleed into the next one. */
+static int16_t *s_mix_buf;
+static int s_mix_buf_cap;         /* frames capacity of s_mix_buf */
+static double s_mix_phase;        /* fractional 44.1kHz position, carried over */
+static int16_t s_mix_carry[8 * 2];
+static int s_mix_carry_count;
 
 /* ── lifecycle ───────────────────────────────────────────────────────── */
 
@@ -212,6 +231,10 @@ static void msu_load_track(uint16_t track) {
     msu_close_track();
     g.playing = false;
     g.audio_error = false;
+    /* A new track starts its own 44.1 kHz stream; don't let a leftover
+     * resample tail or phase from the previous track bleed into it. */
+    s_mix_phase = 0.0;
+    s_mix_carry_count = 0;
 
     char fn[MSU1_PATH_MAX + 32];
     snprintf(fn, sizeof(fn), "%s-%u.pcm", g.base, (unsigned)track);
@@ -311,7 +334,14 @@ void msu1_write(uint16_t reg, uint8_t val) {
 /* ── audio mix (audio thread, APU lock already held) ─────────────────── */
 
 /* Fill `frames` stereo frames from the track, looping or stopping at EOF.
- * Returns the count actually backed by audio; the remainder is zeroed. */
+ * Returns the count actually backed by audio; the remainder is zeroed.
+ *
+ * KNOWN REMAINING ISSUE: this fread()s straight off disk from inside the
+ * audio callback (msu1_mix -> here, under the APU lock). A slow/contended
+ * filesystem can stall the audio thread. Not addressed here -- fixing it
+ * means moving track I/O off-thread (background prefetch into a ring the
+ * callback only drains), which is a larger change than this pass's scope
+ * (msu1_mix's per-call resample math). Recorded for a future pass. */
 static int msu_read_frames(int16_t *dst, int frames) {
     int filled = 0;
     bool looped = false;
@@ -343,30 +373,79 @@ void msu1_mix(int16_t *out, int out_frames) {
     if (!msu1_enabled() || !g.playing || !g.track || out_frames <= 0)
         return;
 
-    int16_t src[MSU1_FRAMES_PER_BLK * 2];
-    msu_read_frames(src, MSU1_FRAMES_PER_BLK);
+    /* Continuous-phase resample from the fixed 44.1 kHz track rate onto
+     * whatever the host asks for THIS call (out_frames, at s_render_output_rate
+     * -- see RtlAudioOutputRate), with the fractional phase carried in a
+     * static across calls. Mirrors rtl_render_native's native->device
+     * conversion in common_rtl.c exactly (span/need/retire math below is the
+     * same shape).
+     *
+     * Previously this consumed exactly one fixed MSU1_FRAMES_PER_BLK (735 =
+     * 44100/60) block per call and stretched it onto out_frames with the
+     * phase reset every call -- correct only when the host called once per
+     * emulated 60 Hz frame. Hosts that instead pull fixed-size device chunks
+     * (Super Mario Kart / Super Mario RPG: ~320 frames, ~100 calls/s) got
+     * exactly one 735-frame block's worth of track audio per call regardless
+     * of how much output time out_frames actually spanned -- roughly 1.7x
+     * too fast, and warped at every chunk boundary. */
+    double output_rate = RtlAudioOutputRate();
+    if (output_rate < 1.0) output_rate = MSU1_RATE;
+    const double ratio = (double)MSU1_RATE / output_rate;
 
-    if (g.volume == 0)
-        return;  /* still advanced the cursor above; just don't mix */
+    double span = s_mix_phase + (double)(out_frames - 1) * ratio;
+    int need = (int)span + 2;
+    if (need < 2) need = 2;
 
-    const int vol = g.volume;  /* 0..255, linear */
-    const double step = (double)MSU1_FRAMES_PER_BLK / (double)out_frames;
-    double pos = 0.0;
-    for (int i = 0; i < out_frames; i++) {
-        int idx = (int)pos;
-        double frac = pos - idx;
-        int idx1 = idx + 1;
-        if (idx  > MSU1_FRAMES_PER_BLK - 1) idx  = MSU1_FRAMES_PER_BLK - 1;
-        if (idx1 > MSU1_FRAMES_PER_BLK - 1) idx1 = MSU1_FRAMES_PER_BLK - 1;
-
-        for (int ch = 0; ch < 2; ch++) {
-            int s0 = src[idx * 2 + ch];
-            int s1 = src[idx1 * 2 + ch];
-            int s  = (int)(s0 + (s1 - s0) * frac);   /* linear interpolation */
-            s = (s * vol) / 255;
-            int o = out[i * 2 + ch] + s;
-            out[i * 2 + ch] = clamp_s16(o);
-        }
-        pos += step;
+    if (need > s_mix_buf_cap) {
+        int16_t *nb = (int16_t *)realloc(s_mix_buf,
+                                          (size_t)need * 2 * sizeof(int16_t));
+        if (!nb) return;   /* OOM: skip this call, carried state unchanged */
+        s_mix_buf = nb;
+        s_mix_buf_cap = need;
     }
+
+    int have = s_mix_carry_count < need ? s_mix_carry_count : need;
+    if (have > 0)
+        memcpy(s_mix_buf, s_mix_carry, (size_t)have * 2 * sizeof(int16_t));
+    if (need > have)
+        /* msu_read_frames always fills its full request (zero-padding past
+         * EOF when not looping), so s_mix_buf[0..need) is fully populated
+         * after this -- it also advances the file cursor / handles looping,
+         * which is why it still runs even when volume is 0 below. */
+        msu_read_frames(s_mix_buf + (size_t)have * 2, need - have);
+
+    if (g.volume != 0) {
+        const int vol = g.volume;  /* 0..255, linear */
+        for (int i = 0; i < out_frames; i++) {
+            double pos = s_mix_phase + (double)i * ratio;
+            int idx = (int)pos;
+            double frac = pos - idx;
+            int idx1 = idx + 1;
+            if (idx  > need - 1) idx  = need - 1;
+            if (idx1 > need - 1) idx1 = need - 1;
+
+            for (int ch = 0; ch < 2; ch++) {
+                int s0 = s_mix_buf[idx * 2 + ch];
+                int s1 = s_mix_buf[idx1 * 2 + ch];
+                int s  = (int)(s0 + (s1 - s0) * frac);  /* linear interpolation */
+                s = (s * vol) / 255;
+                int o = out[i * 2 + ch] + s;
+                out[i * 2 + ch] = clamp_s16(o);
+            }
+        }
+    }
+    /* else: still advance the cursor above; just don't mix (matches prior
+     * behaviour -- the track position moves whether or not it's audible). */
+
+    double consumed_span = s_mix_phase + (double)out_frames * ratio;
+    int retire = (int)consumed_span;
+    if (retire > need) retire = need;
+    int remain = need - retire;
+    int carry_cap = (int)(sizeof(s_mix_carry) / (2 * sizeof(int16_t)));
+    if (remain > carry_cap) remain = carry_cap;  /* defensive; math above keeps this tiny */
+    if (remain > 0)
+        memmove(s_mix_carry, s_mix_buf + (size_t)retire * 2,
+                (size_t)remain * 2 * sizeof(int16_t));
+    s_mix_carry_count = remain;
+    s_mix_phase = consumed_span - (double)retire;
 }
