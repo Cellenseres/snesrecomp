@@ -189,7 +189,11 @@ struct Ppu {
   // range near either native screen edge can move outward with the live
   // margins. Its vertical band can be decoupled from the BG3 split for games
   // whose HUD is sprite-only while BG3 carries dialogue. 0 slots/height = off.
+  // A second, independently published range exists for HUD elements the game
+  // allocates OUTSIDE its fixed HUD reserve (e.g. MMX boss health bars are
+  // general-pool objects at OAM 16+); both ranges share the band/thresholds.
   uint8_t wsHudOamFirstSlot, wsHudOamSlots, wsHudOamHeight;
+  uint8_t wsHudOamFirstSlot2, wsHudOamSlots2;
   // Widescreen BG3 widen (see PpuSetWidescreenBg3Widen). Scanlines >= this let
   // BG3 (layer 2) extend into the side margins like BG1/BG2 instead of staying
   // clamped to the authentic 256-wide region. 0 = off (BG3 clamped everywhere,
@@ -479,6 +483,13 @@ void PpuSetWsHudOamBand(Ppu *ppu, uint8_t height, uint8_t left_end,
 
 // Shift edge-hugging HUD sprites in OAM slots [0, nslots) outward with the
 // live widescreen margins. Presentation-only; 0 disables the anchor.
+/* Deterministic widescreen geometry for probes/CI: SNESRECOMP_WS_EXTRA=<px>
+ * pins the per-side margin regardless of window size (0 forces 4:3; unset
+ * returns -1 = follow the window). Games consult this when computing their
+ * widescreen frame width so measured margins never silently depend on
+ * window-manager geometry. Clamped to kPpuExtraLeftRight. */
+int PpuWsExtraOverride(void);
+
 void PpuSetWsHudOamShift(Ppu *ppu, uint8_t nslots);
 
 // Shift edge-hugging HUD sprites in OAM slots [first_slot, first_slot+nslots)
@@ -486,6 +497,10 @@ void PpuSetWsHudOamShift(Ppu *ppu, uint8_t nslots);
 // use the full centering budget so HUDs can occupy room-bound pillarboxes.
 // Presentation-only.
 void PpuSetWsHudOamShiftRange(Ppu *ppu, uint8_t first_slot, uint8_t nslots);
+/* Second anchored slot range (same band/edge thresholds as the first).
+ * For sprite HUDs whose elements live outside the game's fixed HUD OAM
+ * reserve. nslots 0 disables. Publish every frame like the first range. */
+void PpuSetWsHudOamShiftRange2(Ppu *ppu, uint8_t first_slot, uint8_t nslots);
 
 // Publish this frame's OAM right-margin hints (see wsOamRightHintStrict).
 // `hints` is a 128-bit set (16 bytes, bit N of byte N/8 = OAM slot N), or

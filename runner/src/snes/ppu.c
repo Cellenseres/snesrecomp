@@ -165,6 +165,17 @@ static inline void PpuResetLayerPolicies(Ppu *ppu) {
   ppu->wsWindowExpandWindows = 0;
 }
 
+int PpuWsExtraOverride(void) {
+  static int s_ov = -2;
+  if (s_ov == -2) {
+    const char *e = getenv("SNESRECOMP_WS_EXTRA");
+    s_ov = (e && e[0]) ? atoi(e) : -1;
+    if (s_ov > kPpuExtraLeftRight)
+      s_ov = kPpuExtraLeftRight;
+  }
+  return s_ov;
+}
+
 void PpuSetExtraSpace(Ppu *ppu, uint8_t extra) {
   if (extra > kPpuExtraLeftRight)
     extra = kPpuExtraLeftRight;
@@ -239,6 +250,17 @@ void PpuSetWsHudOamShiftRange(Ppu *ppu, uint8_t first_slot, uint8_t nslots) {
   }
   ppu->wsHudOamFirstSlot = first_slot;
   ppu->wsHudOamSlots =
+      nslots > 128 - first_slot ? (uint8_t)(128 - first_slot) : nslots;
+}
+
+void PpuSetWsHudOamShiftRange2(Ppu *ppu, uint8_t first_slot, uint8_t nslots) {
+  if (first_slot >= 128 || nslots == 0) {
+    ppu->wsHudOamFirstSlot2 = 0;
+    ppu->wsHudOamSlots2 = 0;
+    return;
+  }
+  ppu->wsHudOamFirstSlot2 = first_slot;
+  ppu->wsHudOamSlots2 =
       nslots > 128 - first_slot ? (uint8_t)(128 - first_slot) : nslots;
 }
 
@@ -1565,7 +1587,7 @@ static void PpuDrawSprites(Ppu *ppu, uint y, uint sub, bool clear_backdrop) {
       (ppu->wsHudSplitHeight & 0x80) &&
       ppu->wsHudOamHeight &&
       (y >= 224 || y < ppu->wsHudOamHeight) &&
-      ppu->wsHudOamSlots &&
+      (ppu->wsHudOamSlots || ppu->wsHudOamSlots2) &&
       ppu->extraLeftRight;
   if (oam_hud_full_width && win.nr == 1 && win.bits == 0) {
     win.edges[0] = -(int16_t)ppu->extraLeftRight;
@@ -1805,7 +1827,7 @@ static NOINLINE void PpuDrawWholeLine(Ppu *ppu, uint y) {
   bool oam_hud_full_width = (ppu->wsHudSplitHeight & 0x80) &&
                             ppu->wsHudOamHeight &&
                             (y >= 224 || y < ppu->wsHudOamHeight) &&
-                            ppu->wsHudOamSlots &&
+                            (ppu->wsHudOamSlots || ppu->wsHudOamSlots2) &&
                             ppu->extraLeftRight;
   const int anchor_full_layer = PpuFullBudgetAnchorLayerAt(ppu, y);
   const bool anchor_full_width = anchor_full_layer >= 0;
@@ -1929,9 +1951,15 @@ static bool PpuWidescreenHudOamSlot(Ppu *ppu, uint8_t index, uint8_t y) {
   uint8_t slot = index >> 1;
   bool hud_y = ppu->wsHudOamHeight &&
       (y >= 224 || y < ppu->wsHudOamHeight);
-  return hud_y && ppu->wsHudOamSlots &&
+  if (!hud_y)
+    return false;
+  if (ppu->wsHudOamSlots &&
       slot >= ppu->wsHudOamFirstSlot &&
-      slot < ppu->wsHudOamFirstSlot + ppu->wsHudOamSlots;
+      slot < ppu->wsHudOamFirstSlot + ppu->wsHudOamSlots)
+    return true;
+  return ppu->wsHudOamSlots2 &&
+      slot >= ppu->wsHudOamFirstSlot2 &&
+      slot < ppu->wsHudOamFirstSlot2 + ppu->wsHudOamSlots2;
 }
 
 static int PpuAdjustWidescreenHudOamX(Ppu *ppu, uint8_t index, uint8_t y,
