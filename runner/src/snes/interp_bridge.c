@@ -1227,6 +1227,9 @@ static int _interp_run_core(CpuState *cpu, uint32_t entry_pc24,
                             "sp_pre=$%04X aot_ret=%d sp_post=$%04X\n",
                             op, (unsigned)pc_before, (unsigned)target,
                             (unsigned)_sp_pre, (int)_air, (unsigned)in.sp);
+                const uint32_t ret =
+                    (pc_before + (uint32_t)call_len +
+                     (uint32_t)cpu_dispatch_inline_arg_bytes(target)) & 0xFFFFFF;
                 if (_air != RECOMP_RETURN_NORMAL) {
                     if (s_lle_unwind_active) {
                         if (s_lle_unwind_owner_depth == s_interp_bridge_depth) {
@@ -1267,36 +1270,45 @@ static int _interp_run_core(CpuState *cpu, uint32_t entry_pc24,
                         sync_interp_to_cpu(&in, cpu);
                         return 1;
                     }
-                    /* The bounced body did a non-local return that unwound past
-                     * this call (it pre-popped to an ancestor and returned an
-                     * NLR SKIP). Don't force-resume at ret; treat the interpreted
-                     * routine as having exited and let the unwind propagate. */
-                    if (yield_pc) {
-                        /* Never previously reachable (yield mode didn't
-                         * bounce). Ending the scheduler frame restarts the
-                         * slot walk next frame at $8099 — contained, but
-                         * worth seeing. */
-                        static int s_ynlr_logged = 0;
-                        if (s_ynlr_logged < 8) {
-                            s_ynlr_logged++;
-                            fprintf(stderr, "[interp_bridge] yield-mode NLR "
-                                    "exit (non-unwind) _air=%d target=$%06X\n",
-                                    (int)_air, (unsigned)target);
+                    /* SKIP_1 normally means the bounced AOT root's guest
+                     * return frame was already consumed. When S remains at or
+                     * below this interpreter's entry watermark, the
+                     * interpreter is that root's caller: consume the single
+                     * host-frame skip and resume at the post-call
+                     * continuation. This is the mixed-tier equivalent of a
+                     * generated caller receiving SKIP_1 and returning NORMAL
+                     * after skipping its body.
+                     *
+                     * SKIP_2+, or even SKIP_1 after S crossed above this
+                     * interpreter's watermark, belongs to an ancestor outside
+                     * this interpreter frame. Preserve that non-local return
+                     * instead of resuming at ret. */
+                    const uint16_t _owner_delta =
+                        (uint16_t)(in.sp - s_enter);
+                    const int _skip_crossed_owner =
+                        _owner_delta != 0 && _owner_delta < 0x8000u;
+                    if (_air != RECOMP_RETURN_SKIP_1 ||
+                        _skip_crossed_owner) {
+                        if (yield_pc) {
+                            static int s_ynlr_logged = 0;
+                            if (s_ynlr_logged < 8) {
+                                s_ynlr_logged++;
+                                fprintf(stderr, "[interp_bridge] yield-mode NLR "
+                                        "exit (non-unwind) _air=%d target=$%06X\n",
+                                        (int)_air, (unsigned)target);
+                            }
                         }
+                        sync_interp_to_cpu(&in, cpu);
+                        /* A nested non-scheduler tier run belongs to a compiled
+                         * caller. Preserve SKIP_N so that caller can unwind the
+                         * host frame whose guest epilogue was already consumed.
+                         * Top-level scheduler runs retain their contained boolean
+                         * completion contract. */
+                        if (!yield_pc && s_interp_bridge_depth > 1)
+                            return (int)_air + 2;
+                        return 1;
                     }
-                    sync_interp_to_cpu(&in, cpu);
-                    /* A nested non-scheduler tier run belongs to a compiled
-                     * caller. Preserve SKIP_N so that caller can unwind the
-                     * host frame whose guest epilogue was already consumed.
-                     * Top-level scheduler runs retain their contained boolean
-                     * completion contract. */
-                    if (!yield_pc && s_interp_bridge_depth > 1)
-                        return (int)_air + 2;
-                    return 1;
                 }
-                const uint32_t ret =
-                    (pc_before + (uint32_t)call_len +
-                     (uint32_t)cpu_dispatch_inline_arg_bytes(target)) & 0xFFFFFF;
                 in.k  = (uint8)((ret >> 16) & 0xFF);
                 in.pc = (uint16)(ret & 0xFFFF);
                 /* Resume-task mode: a successful bounce is forward progress
