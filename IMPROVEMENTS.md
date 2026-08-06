@@ -476,3 +476,37 @@ cfg-only edits (those don't change `callee_exit_mx` at all, so the
 naive A3 might suddenly start saving — but at that point the
 disk-cache idea in §"Per-bank cache hashed on inputs" is even
 stronger because it skips the decode entirely).
+
+---
+
+## Audio occupancy servo: add an integral term
+
+`rtl_render_native` (`runner/src/common_rtl.c`) steers the DSP output ring
+toward `RTL_AUDIO_TARGET_NATIVES` (2136 natives, ~67 ms) by trimming how fast
+the consumer drains it. The correction is purely proportional:
+
+    servo = 1.0 + RTL_AUDIO_SERVO_GAIN * ((occupancy - TARGET) / TARGET)
+
+A proportional-only loop stops correcting as the error shrinks, so it settles
+at a standing offset rather than reaching the setpoint. Measured across the
+family after the 2026-08-05 audio work: occupancy parks around **1603**, not
+2136 - i.e. the real cushion is ~50 ms, not the ~67 ms the target implies.
+
+**Impact today: none observed.** Zero steady-state underruns on every title
+measured (MMX, Zelda, SMK, SMW, Super Metroid, Star Fox), and all nine were
+ear-verified at this behaviour before the v1.3.3 / v0.10.1 / v0.6.1 / v0.2.1 /
+v0.0.3 / v0.1.1 / v0.0.3 / v0.0.2 / v0.0.1 release wave. This is lost margin,
+not a defect: a heavily loaded host has ~25% less buffer than intended before
+it starves.
+
+**Fix:** accumulate the residual error and add it to the correction (a PI
+loop), clamped so the integral cannot wind up during a device stall or
+fast-forward, where occupancy legitimately runs far from target for a while.
+Related: after a big excursion the current loop only drains excess at about
+160 natives/s, so recovering from a stalled device takes tens of seconds of
+slightly-off pitch; an integral term plus a hard recenter (reuse
+`dsp_trimSamples`) would cover both.
+
+**Why not now:** it changes audio timing on every title, and the current
+behaviour has just been signed off by ear across the whole family. Land it
+with a fresh listening pass, not as a drive-by.
