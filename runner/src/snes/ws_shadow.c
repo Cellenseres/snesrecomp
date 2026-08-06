@@ -30,6 +30,13 @@ typedef struct WsShadowLayer {
   uint16_t mapBaseWord;
   uint16_t *entries;
   uint8_t *valid;
+  /* Per-cell origin class: bit set = the entry is a game-map GUESS seeded
+   * by WsShadowPrefillTile; bit clear = captured from the game's own VRAM
+   * (native sweep / OnVramWrite / ForceTile). Prefill may refresh its own
+   * guesses when the game's CPU-side map is still streaming at seed time
+   * (e.g. MMX room decompression racing the first widescreen frame);
+   * captured entries are authoritative and never yield to a guess. */
+  uint8_t *guessOrigin;
   uint32_t validCount;
   int blankTilePlus1;
   uint32_t lastTx0;
@@ -78,7 +85,7 @@ void WsShadowGetMarginStats(int layerIndex, WsShadowMarginStat *out) {
   if (!out)
     return;
   if (layerIndex < 0 || layerIndex >= kLayers) {
-    WsShadowMarginStat zero = {0, 0, 0, 0};
+    WsShadowMarginStat zero = {0};
     *out = zero;
     return;
   }
@@ -96,6 +103,29 @@ static void SetEntry(WsShadowLayer *layer, uint32_t tx, uint32_t ty,
   uint32_t i = ty * kWsShadowXTiles + tx;
   layer->entries[i] = entry;
   layer->valid[i >> 3] |= (uint8_t)(1u << (i & 7));
+  /* Every non-prefill write is a capture (or an exact Force): it wins over
+   * any future prefill guess for this cell. */
+  if (layer->guessOrigin)
+    layer->guessOrigin[i >> 3] &= (uint8_t)~(1u << (i & 7));
+}
+
+static void SetEntryGuess(WsShadowLayer *layer, uint32_t tx, uint32_t ty,
+                          uint16_t entry) {
+  if (!layer->entries || !InBounds(tx, ty))
+    return;
+  uint32_t i = ty * kWsShadowXTiles + tx;
+  layer->entries[i] = entry;
+  layer->valid[i >> 3] |= (uint8_t)(1u << (i & 7));
+  if (layer->guessOrigin)
+    layer->guessOrigin[i >> 3] |= (uint8_t)(1u << (i & 7));
+}
+
+static bool IsGuessOrigin(const WsShadowLayer *layer, uint32_t tx,
+                          uint32_t ty) {
+  if (!layer->guessOrigin || !InBounds(tx, ty))
+    return false;
+  uint32_t i = ty * kWsShadowXTiles + tx;
+  return (layer->guessOrigin[i >> 3] & (1u << (i & 7))) != 0;
 }
 
 static bool GetEntry(const WsShadowLayer *layer, uint32_t tx, uint32_t ty,
@@ -125,6 +155,8 @@ void WsShadowReset(void) {
     WsShadowLayer *layer = &s_layers[i];
     if (layer->valid)
       memset(layer->valid, 0, kWsShadowXTiles * kWsShadowYTiles / 8);
+    if (layer->guessOrigin)
+      memset(layer->guessOrigin, 0, kWsShadowXTiles * kWsShadowYTiles / 8);
     if (layer->cooldown)
       memset(layer->cooldown, 0, (size_t)kWsShadowXTiles * kWsShadowYTiles);
     layer->validCount = 0;
@@ -160,10 +192,13 @@ void WsShadowSetWorld(int layerIndex, uint32_t worldX, uint32_t worldY) {
     size_t count = (size_t)kWsShadowXTiles * kWsShadowYTiles;
     layer->entries = (uint16_t *)calloc(count, sizeof(uint16_t));
     layer->valid = (uint8_t *)calloc(count / 8, 1);
+    layer->guessOrigin = (uint8_t *)calloc(count / 8, 1);
     layer->cooldown = (uint8_t *)calloc(count, 1);
-    if (!layer->entries || !layer->valid || !layer->cooldown) {
+    if (!layer->entries || !layer->valid || !layer->guessOrigin ||
+        !layer->cooldown) {
       free(layer->entries);
       free(layer->valid);
+      free(layer->guessOrigin);
       free(layer->cooldown);
       memset(layer, 0, sizeof(*layer));
       return;
@@ -300,10 +335,34 @@ void WsShadowPrefillTile(int layerIndex, uint32_t worldTileX,
   if (layer->retainHistory)
     return;
   if (layer->entries && (layer->active || layer->registered)) {
-    uint16_t ignore;
-    if (!GetEntry(layer, worldTileX, worldTileY, &ignore))
-      SetEntry(layer, worldTileX, worldTileY, entry);
+    uint16_t cur;
+    if (!GetEntry(layer, worldTileX, worldTileY, &cur)) {
+      SetEntryGuess(layer, worldTileX, worldTileY, entry);
+      s_marginStats[layerIndex].prefillSeed++;
+    } else if (cur != entry && IsGuessOrigin(layer, worldTileX, worldTileY)) {
+      /* The game's CPU-side map changed under an earlier guess. This is
+       * routine while a room's map is still streaming in (a clean-launch
+       * first frame can seed margins from a half-decompressed map); the
+       * newest resolve of the same map is strictly fresher, so take it.
+       * Captured entries (guess bit clear) never yield: real VRAM content
+       * beats any guess, and re-guessing it would fight OnVramWrite. */
+      SetEntryGuess(layer, worldTileX, worldTileY, entry);
+      s_marginStats[layerIndex].prefillRefresh++;
+    }
   }
+}
+
+int WsShadowDebugCell(int layerIndex, uint32_t worldTileX, uint32_t worldTileY,
+                      uint16_t *entry) {
+  if (layerIndex < 0 || layerIndex >= kLayers)
+    return 0;
+  const WsShadowLayer *layer = &s_layers[layerIndex];
+  uint16_t e = 0;
+  if (!GetEntry(layer, worldTileX, worldTileY, &e))
+    return 0;
+  if (entry)
+    *entry = e;
+  return IsGuessOrigin(layer, worldTileX, worldTileY) ? 2 : 1;
 }
 
 void WsShadowSetRespectGameWrites(int layerIndex, int frames) {
@@ -914,6 +973,8 @@ void WsShadowFrame(const struct Ppu *ppu) {
       if (!keep) {
         if (layer->valid)
           memset(layer->valid, 0, kWsShadowXTiles * kWsShadowYTiles / 8);
+        if (layer->guessOrigin)
+          memset(layer->guessOrigin, 0, kWsShadowXTiles * kWsShadowYTiles / 8);
         if (layer->cooldown)
           memset(layer->cooldown, 0,
                  (size_t)kWsShadowXTiles * kWsShadowYTiles);

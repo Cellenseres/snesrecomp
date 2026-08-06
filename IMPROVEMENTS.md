@@ -510,3 +510,78 @@ slightly-off pitch; an integral term plus a hard recenter (reuse
 **Why not now:** it changes audio timing on every title, and the current
 behaviour has just been signed off by ear across the whole family. Land it
 with a fresh listening pass, not as a drive-by.
+
+---
+
+## Codegen: detect and factor repeated identical instruction sequences
+
+Surfaced 2026-08-06 while generalizing MMX's WS-CHRBIND observability hook
+(MegamanXRecomp `tools/apply_overrides.py` / `src/mmx_rtl.c`, ISSUES.md
+"Widescreen margin-enemy garbled CHR"). Root cause of that bug's *residual*
+(the fix only reached one call site) was that the ROM's own hand-written
+65816 code inlines the same short byte sequence — read a VRAM-CHR
+allocation-table slot, store the tile-base, read the palette slot, store
+the palette — independently in at least 9 different enemy-type spawn/init
+routines across banks 82/83/87/88, rather than JSR'ing to one shared
+subroutine. The recompiler is doing the *correct* thing today: one C
+function per ROM routine, faithfully preserving the ROM's own (non-DRY)
+control-flow shape (see PRINCIPLES.md "Control Flow Semantics" — preserve
+target-CPU semantics, not surface shape). That's not a recompiler bug. But
+it means:
+
+1. **Any host-side hook keyed to a byte/instruction pattern must be found
+   by pattern, not by function name**, or it silently covers only one of N
+   sites (exactly what happened here — attempt #2 originally hooked
+   `bank_82_827D_M1X1` by name and missed the other 8). MMX's fix for
+   *this* pattern is now function-agnostic (scans every generated
+   translation unit for the store shape itself), which is the necessary
+   fix at the injector level regardless of anything below — that part is
+   already landed, not blocked on this idea.
+2. **Generated code size is presumably larger than it needs to be** across
+   every title, in proportion to how often the ROM's own authors repeated
+   a sequence instead of calling a shared routine. Nobody has measured this
+   yet — it's an unverified hypothesis, not a measured finding.
+
+**The idea (NOT scoped, NOT started, needs its own profiling pass first):**
+teach the v2 emitter to detect byte-identical (or CFG-shape-identical)
+instruction runs recurring across *different* ROM functions within the
+same bank/mirror-bank group, and factor them into one shared generated C
+helper that every occurrence calls, the same way a human disassembler
+would recognize "these 12 instructions are the same 5 times" and suggest a
+subroutine.
+
+**Hard constraints on any real design (why this is a future-session item,
+not a today item):**
+
+- **Must not perturb per-bank code-size / bank-boundary accounting.** The
+  sharded, mirror-bank-keyed emission (`bank_XX_partNN_v2.c`) and the
+  dispatch-table addressing both key off the ROM's own bank layout;
+  factoring code across a bank boundary, or shrinking/growing a shard
+  enough to change how work is sharded, is exactly the kind of "reduce
+  function/bank sizing" side effect that must NOT happen as a side effect
+  of a dedup pass. If factoring is done at all, it should be scoped
+  *within* a shard/bank, never across one, until proven safe more broadly.
+- **Must not weaken per-site correctness.** This session's concrete
+  discovery: the *tile-base* half of the repeated sequence is a uniform
+  plain store at all 9 sites (safe to factor), but the *palette* half is
+  NOT — most sites do a plain store, but several do a hand-written
+  AND/OR read-modify-write that preserves OTHER bits packed into the same
+  byte, and at least one site combines from a completely different
+  source byte. A naive dedup that assumes "same bytes in → same helper"
+  without verifying the *full* surrounding read-modify-write shape would
+  either miss real duplicates (too conservative) or merge routines that
+  only *look* identical in a bounded window but diverge just outside it
+  (silently wrong — worse than not deduping at all). Any detector needs a
+  correctness proof over the *entire* matched region, not a fixed-size
+  window match.
+- **Profile first, per OPTIMIZATION.md / PRINCIPLES.md's promotion
+  process.** Before writing a detector, measure actual generated-code size
+  and compile time across the current title family and quantify how much
+  a realistic dedup pass would actually save. If the win is small, this is
+  a nice-to-have, not worth the correctness risk above.
+
+**Why not now:** unscoped, unmeasured, and the concrete bug that surfaced
+it is already fixed at the injector level without needing this. This is a
+framework-level capability, not specific to MMX or to CHR-binding — file
+it here rather than let the next session that hits a similar
+"one-hooked-site-of-many" bug rediscover the same root cause from scratch.

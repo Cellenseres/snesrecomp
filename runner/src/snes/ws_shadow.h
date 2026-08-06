@@ -70,18 +70,33 @@ void WsShadowSetEastKeep(int layer, int tiles);
  * told apart from "history was never consulted" or "consulted and missed". */
 typedef struct WsShadowMarginStat {
   uint64_t westHit, westMiss, eastHit, eastMiss;
+  /* PrefillTile accounting: cells seeded first-time, and guess-origin cells
+   * rewritten because the game's CPU-side map re-resolved differently (a
+   * nonzero refresh count is the signature of prefill racing a still-
+   * streaming room map, e.g. on a clean-launch first widescreen frame). */
+  uint64_t prefillSeed, prefillRefresh;
 } WsShadowMarginStat;
 void WsShadowGetMarginStats(int layer, WsShadowMarginStat *out);
+
+/* Debug/observability: read one shadow cell without touching stats.
+ * Returns 0 = cell invalid, 1 = captured from real VRAM (authoritative),
+ * 2 = prefill guess (still refreshable). *entry is set for 1/2. */
+int WsShadowDebugCell(int layer, uint32_t worldTileX, uint32_t worldTileY,
+                      uint16_t *entry);
 
 /* When set, capture columns east of the 256px view that match any live
  * view column are cleared instead of stored — kills VRAM-wrap / period
  * phantoms (e.g. a second door) in the right widescreen gutter. */
 void WsShadowSetRejectEastEcho(int layer, bool reject);
 
-// Supply an exact raw tilemap entry for a world tile. This is useful when a
-// game retains full room data in WRAM but streams only the native viewport to
-// VRAM. It changes renderer-side state only. Does not overwrite an entry that
-// Frame/history already captured.
+// Supply a raw tilemap entry resolved from the game's CPU-side map for a
+// world tile. This is useful when a game retains full room data in WRAM but
+// streams only the native viewport to VRAM. It changes renderer-side state
+// only. Never overwrites an entry that Frame/history/OnVramWrite captured
+// from real VRAM; it MAY refresh a cell it seeded itself when a later call
+// resolves a different value (the game's map was still streaming when the
+// first guess was taken — without this, a clean-launch race freezes garbage
+// into the margin until the native view sweeps it).
 void WsShadowPrefillTile(int layer, uint32_t worldTileX, uint32_t worldTileY,
                          uint16_t entry);
 

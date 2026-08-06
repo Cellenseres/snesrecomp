@@ -2545,12 +2545,57 @@ static void cmd_ws_shadow_stats(const char *args) {
             "%s{\"layer\":%d,\"active\":%s,"
             "\"worldX\":%u,\"worldY\":%u,\"scrollX\":%u,\"scrollY\":%u,"
             "\"westHit\":%llu,\"westMiss\":%llu,"
-            "\"eastHit\":%llu,\"eastMiss\":%llu}",
+            "\"eastHit\":%llu,\"eastMiss\":%llu,"
+            "\"prefillSeed\":%llu,\"prefillRefresh\":%llu}",
             l ? "," : "", l, WsShadowLayerActive(l) ? "true" : "false",
             (unsigned)WsShadowWorldX(l), (unsigned)WsShadowWorldY(l),
             (unsigned)WsShadowScrollX(l), (unsigned)WsShadowScrollY(l),
             (unsigned long long)st.westHit, (unsigned long long)st.westMiss,
-            (unsigned long long)st.eastHit, (unsigned long long)st.eastMiss);
+            (unsigned long long)st.eastHit, (unsigned long long)st.eastMiss,
+            (unsigned long long)st.prefillSeed,
+            (unsigned long long)st.prefillRefresh);
+    }
+    pos += snprintf(buf + pos, sizeof(buf) - pos, "]}");
+    send_line(buf);
+}
+
+/* dump_shadow <layer> <tx> <ty> <w> <h> — read a rectangle of ws_shadow
+ * world-keyed cells. Each cell renders as one 5-char token "oXXXX": o is
+ * '-' (invalid), 'C' (captured from real VRAM), or 'G' (prefill guess,
+ * still refreshable); XXXX is the raw tilemap entry in hex ("----" when
+ * invalid). Always-on state, never armed — pairs with ws_shadow_stats to
+ * tell "never seeded" apart from "seeded wrong and stuck". */
+static void cmd_dump_shadow(const char *args) {
+    int layer = 0, w = 32, h = 29;
+    long tx = 0, ty = 0;
+    if (!args || sscanf(args, "%d %ld %ld %d %d", &layer, &tx, &ty, &w, &h) < 3) {
+        send_fmt("{\"error\":\"usage: dump_shadow <layer> <tx> <ty> [w] [h]\"}");
+        return;
+    }
+    if (w < 1) w = 1;
+    if (w > 128) w = 128;
+    if (h < 1) h = 1;
+    if (h > 64) h = 64;
+    static char buf[65536];
+    int pos = snprintf(buf, sizeof(buf),
+        "{\"layer\":%d,\"tx\":%ld,\"ty\":%ld,\"w\":%d,\"h\":%d,"
+        "\"legend\":\"-=invalid C=captured G=guess\",\"rows\":[",
+        layer, tx, ty, w, h);
+    int budget = (int)sizeof(buf) - 256;
+    for (int row = 0; row < h && pos < budget; row++) {
+        pos += snprintf(buf + pos, sizeof(buf) - pos, "%s\"", row ? "," : "");
+        for (int col = 0; col < w && pos < budget; col++) {
+            uint16_t entry = 0;
+            int st = WsShadowDebugCell(layer, (uint32_t)(tx + col),
+                                       (uint32_t)(ty + row), &entry);
+            if (st == 0)
+                pos += snprintf(buf + pos, sizeof(buf) - pos, "%s-----",
+                                col ? " " : "");
+            else
+                pos += snprintf(buf + pos, sizeof(buf) - pos, "%s%c%04x",
+                                col ? " " : "", st == 2 ? 'G' : 'C', entry);
+        }
+        pos += snprintf(buf + pos, sizeof(buf) - pos, "\"");
     }
     pos += snprintf(buf + pos, sizeof(buf) - pos, "]}");
     send_line(buf);
@@ -4516,8 +4561,9 @@ static void cmd_screenshot(const char *args) {
     }
     fclose(f);
 
-    send_fmt("{\"ok\":true,\"path\":\"%s\",\"width\":%d,\"height\":%d,\"frame\":%d}",
-             path, w, h, snes_frame_counter);
+    send_fmt("{\"ok\":true,\"path\":\"%s\",\"width\":%d,\"height\":%d,"
+             "\"ws_extra\":%d,\"frame\":%d}",
+             path, w, h, (int)g_ppu->extraLeftRight, snes_frame_counter);
 }
 
 static void cmd_get_ppu_state(const char *args) {
@@ -7538,6 +7584,7 @@ static const CmdEntry s_commands[] = {
     {"trace_vram",    cmd_trace_vram},
     {"vwring_get",    cmd_vwring_get},
     {"ws_shadow_stats", cmd_ws_shadow_stats},
+    {"dump_shadow", cmd_dump_shadow},
     {"trace_vram_reset", cmd_trace_vram_reset},
     {"get_vram_trace", cmd_get_vram_trace},
     {"get_oracle_vram_trace", cmd_get_oracle_vram_trace},
