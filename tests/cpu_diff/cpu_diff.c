@@ -105,6 +105,12 @@ RecompReturn interp_tier_dispatch_rewritten_return(
     return RECOMP_RETURN_NORMAL;
 }
 int interp_bridge_has_direct_paired_bounce(void) { return 0; }
+int interp_bridge_return_targets_owner(uint16 ret_s, uint16 post_s) {
+    (void)ret_s; (void)post_s; return 0;
+}
+RecompReturn interp_bridge_lle_yield_unwind(CpuState *c, uint32 pc) {
+    (void)c; (void)pc; return RECOMP_RETURN_NORMAL;
+}
 int interp816_opcode_hook(uint32_t addr) { (void)addr; return 0; }
 
 /* ── deterministic RNG (no Date/rand: reproducible) ── */

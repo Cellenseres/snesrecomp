@@ -24,6 +24,9 @@ def test_single_block_pla_pla_rts_uses_hardware_stack_unwind():
 
     assert src.count("CPU_STACK_OP_PLA") == 2
     assert "cpu_resolve_ancestor_skip" in src
+    assert "interp_bridge_return_targets_owner(_ret_s, cpu->S)" in src
+    assert "interp_bridge_lle_yield_unwind(cpu, _rpc24)" in src
+    assert "return-to-interpreter-owner" in src
     assert "RTS return-to-ancestor" in src
     assert "interp_bridge_has_direct_paired_bounce" in src
     assert "interp_tier_dispatch_rewritten_return" in src

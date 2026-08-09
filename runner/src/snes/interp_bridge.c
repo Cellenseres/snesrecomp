@@ -467,6 +467,41 @@ int interp_bridge_has_direct_paired_bounce(void) {
     return 1;
 }
 
+int interp_bridge_return_targets_owner(uint16 ret_s, uint16 post_s) {
+    if (s_interp_bounce_owner_depth <= 0 ||
+        s_interp_bounce_recomp_base < 0 ||
+        !s_interp_owner_exit_valid)
+        return 0;
+
+    const int base = s_interp_bounce_recomp_base;
+    if (base >= g_recomp_stack_top)
+        return 0;
+
+    /* A generated child can manually discard enough guest-stack data that its
+     * final RTS/RTL returns past the generated bounce root and into a caller
+     * that is currently being interpreted. That caller has no entry in
+     * g_cpu_entry_s[], so the ordinary compiled-ancestor lookup cannot name
+     * it. The real continuation is the PC just popped by the return; the
+     * caller uses this predicate to arm the existing LLE unwind sentinel and
+     * hand that PC back to the owning interpreter.
+     *
+     * Require both boundaries:
+     *   1. ret_s is shallower than the generated bounce root, proving that the
+     *      popped frame is not owned by any frame in this bounce; and
+     *   2. post_s has not crossed above the interpreter run's exit watermark,
+     *      proving the continuation still belongs to this interpreter rather
+     *      than to a compiled ancestor outside it.
+     *
+     * The 65816 stack grows downward; a small positive unsigned delta means
+     * "shallower", while zero/large deltas remain at or below the watermark. */
+    const uint16 root_delta = (uint16)(ret_s - g_cpu_entry_s[base]);
+    if (root_delta == 0 || root_delta >= 0x8000u)
+        return 0;
+
+    const uint16 owner_delta = (uint16)(post_s - s_interp_owner_exit_s);
+    return owner_delta == 0 || owner_delta >= 0x8000u;
+}
+
 void interp_bridge_set_lle_bounce_exclusions(const uint32 *targets,
                                               size_t count) {
     if (count > sizeof(s_lle_bounce_exclusions) /

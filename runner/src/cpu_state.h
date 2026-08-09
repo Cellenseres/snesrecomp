@@ -637,6 +637,10 @@ RecompReturn interp_tier_dispatch_rewritten_return(CpuState *cpu,
  * interpreter bounce. A rewritten/non-local RTS from that root belongs to
  * the interpreter's guest call chain, not a compiled ancestor. */
 int interp_bridge_has_direct_paired_bounce(void);
+/* True when a non-local AOT return crossed its paired bounce root but its
+ * popped continuation still belongs to the interpreter that owns the bounce.
+ * The caller then unwinds to that owner and resumes at the popped PC. */
+int interp_bridge_return_targets_owner(uint16 ret_s, uint16 post_s);
 
 /* Interpreter-tier fallback for a runtime-pointer JSR (abs,X) whose loaded
  * target has no AOT body for the live (m,x). Called by cpu_dispatch_call_pc

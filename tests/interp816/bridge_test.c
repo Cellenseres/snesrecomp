@@ -34,6 +34,8 @@ static int      g_aot_nested_rewrite;
 static int      g_aot_interp_nlr;
 static int      g_aot_double_rewrite;
 static int      g_aot_crosses_interp_owner;
+static int      g_aot_skips_interp_owner;
+static int      g_owner_target_result;
 static int      g_aot_tail_chain_probe;
 static int      g_aot_skips_root;
 static int      g_tail_chain_direct;
@@ -124,6 +126,27 @@ RecompReturn cpu_dispatch_pc(CpuState *cpu, uint32 pc24, uint16 miss_restore) {
 RecompReturn cpu_dispatch_pc_paired(CpuState *cpu, uint32 pc24,
                                     uint8 frame_size) {
     cpu->host_return_valid = frame_size;
+    if (g_aot_skips_interp_owner && (pc24 & 0xFFFFFF) == FAKE_AOT) {
+        /* Model interpreter outer -> interpreter inner -> compiled root ->
+         * compiled child. The child manually discards the generated child and
+         * root frames, then its RTS consumes the interpreted inner frame and
+         * lands at the outer continuation. No generated ancestor owns that
+         * PC, so the active interpreter must resume it directly. */
+        g_aot_called++;
+        const int base = g_recomp_stack_top;
+        g_recomp_stack_top += 2;
+        g_cpu_entry_s[base] = cpu->S;
+        cpu->S = (uint16)(cpu->S - 2);       /* root JSRs compiled child */
+        g_cpu_entry_s[base + 1] = cpu->S;
+        const uint16 ret_s = (uint16)(cpu->S + 4); /* expose inner's frame */
+        cpu->S = (uint16)(ret_s + 2);        /* final RTS pops inner frame */
+        g_owner_target_result =
+            interp_bridge_return_targets_owner(ret_s, cpu->S);
+        g_recomp_stack_top = base;
+        if (g_owner_target_result)
+            return interp_bridge_lle_yield_unwind(cpu, 0x008003);
+        return RECOMP_RETURN_NORMAL;
+    }
     if (g_aot_skips_root && (pc24 & 0xFFFFFF) == FAKE_AOT) {
         /* Model a compiled root whose nested helper consumes the root's guest
          * JSL frame and returns SKIP_1 through the root host frame. The owning
@@ -397,6 +420,30 @@ int main(void) {
             "A.lo=%02X exp 5A (inner continuation skipped)", g_c.A & 0xFF);
       CHECK(g_c.S == 0x01FF, "S=%04X exp 01FF (all frames balanced)", g_c.S);
       g_aot_interp_nlr = 0; }
+
+    /* S6bb: an AOT child non-locally returns through its compiled parent and
+     * an interpreted inner caller, landing in the interpreted outer caller.
+     * The generated-only ancestor table cannot see either interpreted frame;
+     * the mixed-tier resolver must unwind the generated bounce and resume the
+     * real popped continuation in the existing interpreter. */
+    { memset(RAM, 0, MEMSZ); init_cpu(); g_aot_called = 0;
+      g_aot_skips_interp_owner = 1; g_owner_target_result = 0;
+      uint8_t outer[] = {0x20,0x00,0x82, 0xA9,0x5A, 0x60};
+      uint8_t inner[] = {0x20,0x00,0x81, 0xA9,0xEE, 0x60};
+      load(0x8000, outer, sizeof outer);
+      load(0x8200, inner, sizeof inner);
+      cpu_push_jsr_return_frame(&g_c);
+      int rc = interp_bridge_run(&g_c, 0x008000);
+      printf("S6bb nested AOT NLR resumes interpreted grandparent\n");
+      CHECK(rc == 1, "rc=%d exp 1", rc);
+      CHECK(g_aot_called == 1, "aot_called=%d exp 1", g_aot_called);
+      CHECK(g_owner_target_result == 1,
+            "owner_target=%d exp 1", g_owner_target_result);
+      CHECK((g_c.A & 0xFF) == 0x5A,
+            "A.lo=%02X exp 5A (inner continuation skipped)",
+            g_c.A & 0xFF);
+      CHECK(g_c.S == 0x01FF, "S=%04X exp 01FF (all frames balanced)", g_c.S);
+      g_aot_skips_interp_owner = 0; }
 
     /* S6c: LttP's sprite dispatch shape performs two rewritten AOT returns in
      * one interpreted call chain.  The first computed RTS preserves the
