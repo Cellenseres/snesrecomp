@@ -108,10 +108,20 @@ indirect-dispatch configuration, validation, and a host application.
 
 ## Widescreen and Adaptive View
 
+Display aspect and view width are separate controls. The shared desktop policy
+supports **4:3 (CRT)** with the SNES's 7:6 horizontal pixel correction,
+**8:7 (Square pixels)** for a 1:1 pixel aspect, and a literal **1:1 (Square
+frame)** presentation. Games opt into the launcher control and persist it as
+`DisplayAspect`; 4:3 remains the default.
+
 These are genuinely wider views—not stretched 4:3 output. SNES 2D engines
 normally stream backgrounds, spawn objects, and cull sprites for a 256-pixel
 viewport. A correct widescreen integration widens those systems together while
 leaving game simulation and authentic 4:3 behavior unchanged.
+
+A fixed widescreen view adds one third more horizontal logical pixels. Because
+the chosen pixel shape stays unchanged, that expansion presents as 16:9 from
+4:3, 32:21 from 8:7, or 4:3 from a square frame.
 
 <table>
   <tr><td><img src="docs/assets/games/super-mario-world-wide.png" alt="Super Mario World true widescreen at 16:9" width="100%"></td></tr>

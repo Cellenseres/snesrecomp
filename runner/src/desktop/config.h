@@ -2,6 +2,7 @@
 /* Shared Mega Man X trilogy desktop configuration contract. */
 #include "types.h"
 #include "sdl_compat.h"
+#include "display_aspect.h"
 
 enum {
   kKeys_Null,
@@ -41,6 +42,7 @@ typedef struct Config {
   int window_height;
   bool new_renderer;
   bool ignore_aspect_ratio;
+  uint8 display_aspect;
   uint8 fullscreen;
   uint8 window_scale;
   bool enable_audio;

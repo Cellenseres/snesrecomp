@@ -2056,6 +2056,9 @@ static const char kDefaultConfigIniContent[] =
   "# Don't keep the aspect ratio\n"
   "IgnoreAspectRatio = 0\n"
   "\n"
+  "# Display aspect: 4:3 (CRT), 8:7 (square pixels), or 1:1 (square frame)\n"
+  "DisplayAspect = 4:3\n"
+  "\n"
   "# Render real extra PPU columns to match a widescreen display.\n"
   "# OPT-IN ENHANCEMENT, off by default: the faithful ground floor\n"
   MMX_WIDESCREEN_STATUS_LINES

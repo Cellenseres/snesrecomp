@@ -335,6 +335,22 @@ static bool HandleIniConfig(int section, const char *key, char *value) {
       return ParseBool(value, &g_config.new_renderer);
     } else if (StringEqualsNoCase(key, "IgnoreAspectRatio")) {
       return ParseBool(value, &g_config.ignore_aspect_ratio);
+    } else if (StringEqualsNoCase(key, "DisplayAspect")) {
+      if (StringEqualsNoCase(value, "4:3") ||
+          StringEqualsNoCase(value, "CRT") || StringEqualsNoCase(value, "0")) {
+        g_config.display_aspect = kSnesDisplayAspect_Crt4x3;
+      } else if (StringEqualsNoCase(value, "8:7") ||
+                 StringEqualsNoCase(value, "SquarePixels") ||
+                 StringEqualsNoCase(value, "1")) {
+        g_config.display_aspect = kSnesDisplayAspect_SquarePixels8x7;
+      } else if (StringEqualsNoCase(value, "1:1") ||
+                 StringEqualsNoCase(value, "SquareFrame") ||
+                 StringEqualsNoCase(value, "2")) {
+        g_config.display_aspect = kSnesDisplayAspect_SquareFrame1x1;
+      } else {
+        return false;
+      }
+      return true;
     } else if (StringEqualsNoCase(key, "Fullscreen")) {
       g_config.fullscreen = (uint8)strtol(value, (char**)NULL, 10);
       return true;
@@ -442,6 +458,7 @@ void ParseConfigFile(const char *filename) {
   g_config.enable_gamepad[0] = true;
   g_config.enable_gamepad[1] = true;
   g_config.gamepad_deadzone = 10000;
+  g_config.display_aspect = kSnesDisplayAspect_Crt4x3;
   g_config.skip_launcher = false;
   /* Default ON to preserve current behaviour across other ports that
    * share this framework code; per-game .ini sets it false where the
@@ -568,6 +585,7 @@ void WriteConfigFile(const char *filename) {
 
   CfgKV kvs[] = {
     { "Graphics", "WindowScale" },
+    { "Graphics", "DisplayAspect" },
     { "Graphics", "LinearFiltering" },
     { "Graphics", "Widescreen" },
     { "Sound",    "EnableAudio" },
@@ -578,15 +596,21 @@ void WriteConfigFile(const char *filename) {
     { "GamepadMap", "GamepadDeadzone" },
   };
   const int N = (int)countof(kvs);
+  static const char *const kDisplayAspectNames[kSnesDisplayAspect_Count] = {
+    "4:3", "8:7", "1:1"
+  };
+  SnesDisplayAspect display_aspect =
+      SnesDisplayAspect_Clamp(g_config.display_aspect);
   snprintf(kvs[0].val, sizeof(kvs[0].val), "%d", g_config.window_scale ? g_config.window_scale : 3);
-  snprintf(kvs[1].val, sizeof(kvs[1].val), "%d", g_config.linear_filtering ? 1 : 0);
-  snprintf(kvs[2].val, sizeof(kvs[2].val), "%d", g_config.widescreen ? 1 : 0);
-  snprintf(kvs[3].val, sizeof(kvs[3].val), "%d", g_config.enable_audio ? 1 : 0);
-  snprintf(kvs[4].val, sizeof(kvs[4].val), "%d", g_config.audio_freq);
-  snprintf(kvs[5].val, sizeof(kvs[5].val), "%s", g_config.enable_gamepad[0] ? "true" : "false");
-  snprintf(kvs[6].val, sizeof(kvs[6].val), "%s", g_config.enable_gamepad[1] ? "true" : "false");
-  snprintf(kvs[7].val, sizeof(kvs[7].val), "%d", g_config.skip_launcher ? 1 : 0);
-  snprintf(kvs[8].val, sizeof(kvs[8].val), "%d", g_config.gamepad_deadzone);
+  snprintf(kvs[1].val, sizeof(kvs[1].val), "%s", kDisplayAspectNames[display_aspect]);
+  snprintf(kvs[2].val, sizeof(kvs[2].val), "%d", g_config.linear_filtering ? 1 : 0);
+  snprintf(kvs[3].val, sizeof(kvs[3].val), "%d", g_config.widescreen ? 1 : 0);
+  snprintf(kvs[4].val, sizeof(kvs[4].val), "%d", g_config.enable_audio ? 1 : 0);
+  snprintf(kvs[5].val, sizeof(kvs[5].val), "%d", g_config.audio_freq);
+  snprintf(kvs[6].val, sizeof(kvs[6].val), "%s", g_config.enable_gamepad[0] ? "true" : "false");
+  snprintf(kvs[7].val, sizeof(kvs[7].val), "%s", g_config.enable_gamepad[1] ? "true" : "false");
+  snprintf(kvs[8].val, sizeof(kvs[8].val), "%d", g_config.skip_launcher ? 1 : 0);
+  snprintf(kvs[9].val, sizeof(kvs[9].val), "%d", g_config.gamepad_deadzone);
 
   char *data = NULL;
   long sz = 0;
