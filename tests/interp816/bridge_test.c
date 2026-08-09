@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "interp_bridge.h"   /* -> cpu_state.h (types, inline frame helpers) */
+#include "tier2_capture.h"
 #include "snes.h"            /* Snes storage for the bridge's APU clock hook */
 #include "sa1.h"
 
@@ -44,6 +45,7 @@ static int      g_nested_chain_direct;
 /* The Phase-2 manifest recorder stamps the live frame counter on each
  * discovery; the bridge references it as extern. */
 int snes_frame_counter = 0;
+const char *rtl_game_title(void) { return "bridge_test"; }
 static Snes g_test_snes;
 Snes *g_snes = &g_test_snes;
 uint64_t g_apu_last_sync_master;
@@ -255,6 +257,13 @@ static void load(uint32 pc24, const uint8_t *code, int len) {
 }
 
 int main(void) {
+    const char *journal = "tier2_bridge_test.jsonl";
+    remove(journal);
+#ifdef _WIN32
+    _putenv_s("SNESRECOMP_TIER2_JOURNAL", journal);
+#else
+    setenv("SNESRECOMP_TIER2_JOURNAL", journal, 1);
+#endif
     RAM = malloc(MEMSZ);
 
     printf("S0 APU timeline policy remains cartridge-scoped\n");
@@ -603,8 +612,23 @@ int main(void) {
       CHECK((g_c.A & 0xFF) == 0x44, "A.lo=%02X exp 44", g_c.A & 0xFF);
       CHECK(g_c.S == 0x01FF, "S=%04X exp 01FF (inherited frame consumed)", g_c.S); }
 
+    /* S12: the production feedback set must grow beyond the historical 4096
+     * ceiling without dropping tuples. Kind is part of the tuple key, too. */
+    { int before = 0, after = 0;
+      interp_tier2_stats(&before, NULL, NULL);
+      for (unsigned i = 0; i < 4352; ++i)
+          Tier2CoverageTestRecord(0xC00000u + i, 0xC10000u + i,
+                                  (uint8_t)(i & 3), 3, 1);
+      Tier2CoverageTestRecord(0xD00000u, 0xD10000u, 3, 3, 1);
+      Tier2CoverageTestRecord(0xD00000u, 0xD10000u, 3, 4, 1);
+      interp_tier2_stats(&after, NULL, NULL);
+      printf("S12 growable, kind-exact coverage set\n");
+      CHECK(after == before + 4354, "sites=%d exp %d", after, before + 4354); }
+
     printf("\n==== interp_bridge Phase-1: %d/%d checks passed ====\n", g_check - g_fail, g_check);
     if (g_fail) { printf("RESULT: FAIL (%d)\n", g_fail); return 1; }
+    tier2_capture_close();
+    remove(journal);
     printf("RESULT: PASS\n");
     return 0;
 }

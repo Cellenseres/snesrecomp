@@ -123,6 +123,7 @@ set(SNESRECOMP_RUNNER_SOURCES
     ${SNESRECOMP_RUNNER_ROOT}/src/snes/superfx.c
     # Interpreter-fallback tier (docs/MULTI_TIER.md): LakeSnes core + bridge.
     ${SNESRECOMP_RUNNER_ROOT}/src/snes/interp816.c
+    ${SNESRECOMP_RUNNER_ROOT}/src/snes/tier2_capture.c
     ${SNESRECOMP_RUNNER_ROOT}/src/snes/interp_bridge.c
 )
 

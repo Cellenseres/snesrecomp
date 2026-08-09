@@ -79,7 +79,7 @@ apply.
   true runtime indirect call: binary-search `g_dispatch_table`, call the correct
   `(m,x)` variant, LoROM bank-mirror fallback, controlled `S`-restore + `NORMAL`
   on miss.
-- **`g_dispatch_log`** — always-on 1024-entry ring of every dispatch
+- **`g_dispatch_log`** — diagnostic-build 1024-entry ring of every dispatch
   `(pc24, source_pc24, func_name, mx_idx, found, mirror, frame)`; read via
   `cpu_dispatch_log_count()` / `cpu_dispatch_log_at(i)`.
 

@@ -660,8 +660,7 @@ void recomp_post_mortem_dump(const char *reason, void *fault_info) {
 
 #if SNESRECOMP_POST_MORTEM_TIER2
     /* Slim, schema-versioned interpreter-gap manifest for offline ingest. */
-    Tier2CoverageWriteManifest(
-        "tier2_coverage.json",
+    Tier2CoverageWriteDefaultManifest(
         g_rtl_game_info ? g_rtl_game_info->title : "unknown");
 #endif
 

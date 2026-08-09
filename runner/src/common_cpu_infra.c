@@ -29,14 +29,12 @@ const RtlGameInfo *g_rtl_game_info;
  * had to resolve at runtime; this serializes that promotion worklist (schema
  * "snesrecomp tier2 coverage v1") so tools/tier2_ingest.py can fold it back
  * into the cfg and the next regen promotes those entries to AOT — the LLE-first
- * burn-down loop. Path overridable via SNESRECOMP_TIER2_MANIFEST (default: CWD
- * tier2_coverage.json). Empty discoveries on a fully-covered run is the
- * expected dormant case. */
+ * burn-down loop. SNESRECOMP_TIER2_MANIFEST can override the unique per-run
+ * path. First sightings are also flushed to an append-only JSONL journal, so
+ * earlier sessions and crash-time discoveries are preserved. */
 static void rtl_write_tier2_coverage_manifest(void) {
-  const char *path = getenv("SNESRECOMP_TIER2_MANIFEST");
-  Tier2CoverageWriteManifest(path && *path ? path : "tier2_coverage.json",
-                             g_rtl_game_info ? g_rtl_game_info->title
-                                             : "unknown");
+  Tier2CoverageWriteDefaultManifest(g_rtl_game_info ? g_rtl_game_info->title
+                                                     : "unknown");
 }
 
 /* Registered game title (e.g. "mmx", "Rockman X (Japan v1.1)"), or "unknown"

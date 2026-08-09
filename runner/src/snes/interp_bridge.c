@@ -7,6 +7,7 @@
 #include <string.h>
 #include "interp_bridge.h"
 #include "interp816.h"
+#include "tier2_capture.h"
 #include "snes.h"   /* Snes, apuCatchupCycles, snes_catchupApu */
 #include "superfx.h"
 #include "cx4.h"
@@ -1502,18 +1503,14 @@ static void interp_tier_note(uint32_t target_pc24) {
 }
 
 /* ── Phase-2 gap manifest: always-on tier-down coverage worklist ───────────
- * One record per distinct (site, target, m/x) tuple. clean_hits = the
+ * One record per distinct (site, target, m/x, kind) tuple. clean_hits = the
  * interpreter ran the gap and returned balanced (a pure coverage gap, safe to
  * promote to AOT); bail_hits = the interpreter hit the step cap and fell back
  * to abandon (the target was unrunnable — a strong signal of an UPSTREAM
  * recomp-state bug at this site, e.g. SM's JMP ($0012)=$FFFF). The offline
  * ingest tool (Phase 3) folds clean discoveries into cfg directives and ranks
- * the bail sites as bug leads. Bounded; an overflow counter never lies about
- * dropped tuples. */
-#define TIER2_COVERAGE_MAX 4096   /* in-bridge gap sightings (call_gap/goto_gap)
-                                   * on a minimal cfg discover far more tuples
-                                   * than tier-down entries alone; the overflow
-                                   * counter still never lies about drops */
+ * the bail sites as bug leads. The table grows dynamically so a production
+ * playthrough cannot silently age discoveries out of a fixed-size ring. */
 typedef struct {
     uint32_t site_pc24;
     uint32_t target_pc24;
@@ -1524,9 +1521,11 @@ typedef struct {
     int32_t  first_frame;
     int32_t  last_frame;
 } Tier2CovSite;
-static Tier2CovSite g_tier2_cov[TIER2_COVERAGE_MAX];
+static Tier2CovSite *g_tier2_cov;
 static int          g_tier2_cov_count;
+static int          g_tier2_cov_capacity;
 static uint64_t     g_tier2_cov_overflow;
+static uint64_t     g_tier2_journal_failures;
 
 void interp_tier2_stats(int *sites, unsigned long long *clean,
                         unsigned long long *bail) {
@@ -1641,10 +1640,12 @@ static void ram_routine_note(uint32_t target, uint32_t site, uint8_t mx) {
     g_ram_routines[i].hits++;
 }
 
-/* Gap tuples remain in this bounded structured table for manifest consumers;
- * runtime execution does not print per-gap diagnostics. */
-static void tier2_record(uint32_t site, uint32_t target, uint8_t mx,
-                         uint8_t kind, int clean) {
+extern const char *rtl_game_title(void);
+
+/* Find or add a tuple and journal its first sighting. outcome is -1 when the
+ * target has not run yet, 0 for a contained bail, and 1 for a clean return. */
+static int tier2_discover(uint32_t site, uint32_t target, uint8_t mx,
+                          uint8_t kind, int outcome) {
     /* Canonicalize LoROM exec-mirror banks ($80-$BF ≡ $00-$3F) so one guest
      * code path yields ONE tuple regardless of which mirror K held (the LLE
      * scheduler runs in $80; ingest maps target bank -> bankNN.cfg, and
@@ -1655,27 +1656,37 @@ static void tier2_record(uint32_t site, uint32_t target, uint8_t mx,
         target -= 0x800000u;
     /* Direct-mapped repeat cache: the in-bridge recorders fire once per
      * interpreted call/indirect-jump, so the common case must not re-walk
-     * the (up to 4096-entry) table. Index+1 so 0 = empty. */
-    static uint16_t s_cache[1024];
-    const uint32_t h = (site ^ (target * 2654435761u) ^ mx) & 1023u;
+     * the table. Index+1 so 0 = empty. */
+    static uint32_t s_cache[1024];
+    const uint32_t h = (site ^ (target * 2654435761u) ^
+                        ((uint32_t)mx << 8) ^ kind) & 1023u;
     int i = -1;
     if (s_cache[h]) {
         const int c = (int)s_cache[h] - 1;
         if (c < g_tier2_cov_count &&
             g_tier2_cov[c].site_pc24 == site &&
             g_tier2_cov[c].target_pc24 == target &&
-            g_tier2_cov[c].mx == mx)
+            g_tier2_cov[c].mx == mx &&
+            g_tier2_cov[c].kind == kind)
             i = c;
     }
     if (i < 0) {
         for (i = 0; i < g_tier2_cov_count; i++) {
             if (g_tier2_cov[i].site_pc24 == site &&
                 g_tier2_cov[i].target_pc24 == target &&
-                g_tier2_cov[i].mx == mx)
+                g_tier2_cov[i].mx == mx &&
+                g_tier2_cov[i].kind == kind)
                 break;
         }
         if (i == g_tier2_cov_count) {
-            if (i >= TIER2_COVERAGE_MAX) { g_tier2_cov_overflow++; return; }
+            if (i == g_tier2_cov_capacity) {
+                int next = g_tier2_cov_capacity ? g_tier2_cov_capacity * 2 : 256;
+                Tier2CovSite *grown = (Tier2CovSite *)realloc(
+                    g_tier2_cov, (size_t)next * sizeof(*g_tier2_cov));
+                if (!grown) { g_tier2_cov_overflow++; return -1; }
+                g_tier2_cov = grown;
+                g_tier2_cov_capacity = next;
+            }
             g_tier2_cov_count++;
             g_tier2_cov[i].site_pc24   = site;
             g_tier2_cov[i].target_pc24 = target;
@@ -1684,9 +1695,24 @@ static void tier2_record(uint32_t site, uint32_t target, uint8_t mx,
             g_tier2_cov[i].clean_hits  = 0;
             g_tier2_cov[i].bail_hits   = 0;
             g_tier2_cov[i].first_frame = snes_frame_counter;
+            g_tier2_cov[i].last_frame  = snes_frame_counter;
+            if (!tier2_capture_append_discovery(
+                    rtl_game_title(), site, target, tier2_mx_str(mx),
+                    tier2_kind_str(kind), outcome, snes_frame_counter))
+                g_tier2_journal_failures++;
         }
-        s_cache[h] = (uint16_t)(i + 1);
+        s_cache[h] = (uint32_t)(i + 1);
     }
+    return i;
+}
+
+/* Gap tuples remain in a growable structured set for manifest consumers. The
+ * first sighting is flushed before target execution whenever the caller knows
+ * the target, so a crash cannot erase the address that caused it. */
+static void tier2_record(uint32_t site, uint32_t target, uint8_t mx,
+                         uint8_t kind, int clean) {
+    int i = tier2_discover(site, target, mx, kind, clean ? 1 : 0);
+    if (i < 0) return;
     if (clean) g_tier2_cov[i].clean_hits++;
     else       g_tier2_cov[i].bail_hits++;
     g_tier2_cov[i].last_frame = snes_frame_counter;
@@ -1694,6 +1720,13 @@ static void tier2_record(uint32_t site, uint32_t target, uint8_t mx,
      * them for the offline AOT-declaration pass. No-op for ROM targets. */
     ram_routine_note(target, site, mx);
 }
+
+#ifdef SNESRECOMP_TIER2_TEST
+void Tier2CoverageTestRecord(uint32_t site, uint32_t target, uint8_t mx,
+                             uint8_t kind, int clean) {
+    tier2_record(site, target, mx, kind, clean);
+}
+#endif
 
 static uint8_t tier2_entry_mx(const CpuState *cpu) {
     return (uint8_t)(((cpu->m_flag & 1) << 1) | (cpu->x_flag & 1));
@@ -1708,6 +1741,8 @@ static int interp_run_propagated_return(int result, RecompReturn *out) {
 RecompReturn interp_tier_dispatch(CpuState *cpu, uint32_t target_pc24) {
     interp_tier_note(target_pc24);
     const uint8_t mx = tier2_entry_mx(cpu);
+    tier2_discover(target_pc24 & 0xFFFFFF, target_pc24 & 0xFFFFFF, mx,
+                   TIER2_KIND_DISPATCH, -1);
     /* Interpret the routine the static pass couldn't resolve. It shares cpu's
      * stack, so its RTS/RTL pops the inherited caller frame and the bridge
      * exits past entry; control then unwinds to the dispatcher's caller, same
@@ -1731,6 +1766,8 @@ RecompReturn interp_tier_dispatch_interrupt(CpuState *cpu,
     cpu_interrupt_context_enter();
     interp_tier_note(target_pc24);
     const uint8_t mx = tier2_entry_mx(cpu);
+    tier2_discover(target_pc24 & 0xFFFFFF, target_pc24 & 0xFFFFFF, mx,
+                   TIER2_KIND_DISPATCH, -1);
     int ok = interp_bridge_run_ex2(
         cpu, target_pc24 & 0xFFFFFF, cpu->S, NULL, NULL,
         0, 0, 0, 0, NULL, 0, 1);
@@ -1778,6 +1815,9 @@ RecompReturn interp_tier_dispatch_balanced(CpuState *cpu, uint32_t target_pc24,
      * loaded target. */
     const uint8_t kind = (target_pc24 == site_pc24) ? TIER2_KIND_INDIRECT_GOTO
                                                     : TIER2_KIND_DISPATCH;
+    if (kind == TIER2_KIND_DISPATCH)
+        tier2_discover(site_pc24 & 0xFFFFFF, target_pc24 & 0xFFFFFF, mx,
+                       kind, -1);
     uint32_t landing = target_pc24 & 0xFFFFFF;
     /* Write-log scope: capture the interp's write sequence for a targeted node
      * so it can be first-divergence-diffed against the AOT body. Gated to the
@@ -1844,6 +1884,7 @@ RecompReturn interp_tier_dispatch_popped_return(CpuState *cpu,
     site_pc24 &= 0xFFFFFFu;
     interp_tier_note(target_pc24);
     const uint8_t mx = tier2_entry_mx(cpu);
+    tier2_discover(site_pc24, target_pc24, mx, TIER2_KIND_DISPATCH, -1);
 
     /* cpu_dispatch_pc_from is entered after the previous compiled routine has
      * already popped the RTS/RTL that selected target_pc24.  The target thus
@@ -1902,6 +1943,7 @@ RecompReturn interp_tier_dispatch_rewritten_return(CpuState *cpu,
 
     interp_tier_note(target_pc24);
     const uint8_t mx = tier2_entry_mx(cpu);
+    tier2_discover(site_pc24, target_pc24, mx, TIER2_KIND_DISPATCH, -1);
     const uint16_t post_pop_s = cpu->S;
     uint32_t landing = target_pc24;
     int ok = interp_bridge_run_ex2(cpu, target_pc24, post_pop_s, &landing,
@@ -1948,6 +1990,7 @@ RecompReturn interp_tier_run_call_frame(CpuState *cpu, uint32_t target_pc24,
     source_pc24 &= 0xFFFFFF;
     interp_tier_note(target_pc24);
     const uint8_t mx = tier2_entry_mx(cpu);
+    tier2_discover(source_pc24, target_pc24, mx, TIER2_KIND_DISPATCH, -1);
     const uint16_t watermark = cpu->S;
     const uint16_t post_call = (uint16_t)(cpu->S + frame_size);
     uint32_t landing = target_pc24;
@@ -1975,10 +2018,11 @@ RecompReturn interp_tier_run_call(CpuState *cpu, uint32_t target_pc24,
  * fall back to the same stack-safe abandon the no-op stub used, so it is never
  * worse than the drop path. Recorded distinctly as kind=bank_miss. */
 RecompReturn interp_tier_dispatch_bank_miss(CpuState *cpu, uint32_t addr_pc24,
-                                            uint16_t entry_s, uint8_t hrv) {
+                                             uint16_t entry_s, uint8_t hrv) {
     addr_pc24 &= 0xFFFFFF;
     interp_tier_note(addr_pc24);
     const uint8_t mx = tier2_entry_mx(cpu);
+    tier2_discover(addr_pc24, addr_pc24, mx, TIER2_KIND_BANK_MISS, -1);
     uint32_t landing = addr_pc24;
     int ok = interp_bridge_run_ex2(cpu, addr_pc24, entry_s, &landing, NULL,
                                    0, 0, 0, 0, NULL, 0, 0);
@@ -2036,9 +2080,11 @@ void Tier2CoverageDumpJson(FILE *f) {
                "    \"total_tier_hits\": %ld,\n"
                "    \"distinct_sites\": %d,\n"
                "    \"overflowed_tuples\": %llu,\n"
+               "    \"journal_write_failures\": %llu,\n"
                "    \"discoveries\": [",
             interp_tier_hit_count(), g_tier2_cov_count,
-            (unsigned long long)g_tier2_cov_overflow);
+            (unsigned long long)g_tier2_cov_overflow,
+            (unsigned long long)g_tier2_journal_failures);
     tier2_emit_discoveries(f, "      ");
     fprintf(f, "\n    ]\n  },\n");
 }
@@ -2068,7 +2114,10 @@ static void ram_routines_emit(FILE *f, const char *indent) {
 
 void Tier2CoverageWriteManifest(const char *path, const char *rom_title) {
     FILE *f = fopen(path, "w");
-    if (!f) return;
+    if (!f) {
+        fprintf(stderr, "[tier2] cannot write coverage manifest: %s\n", path);
+        return;
+    }
     /* Minimal title sanitize: drop quotes/backslashes/control so the JSON is
      * always well-formed without a full escaper. Game titles are ASCII. */
     char title[64];
@@ -2087,9 +2136,11 @@ void Tier2CoverageWriteManifest(const char *path, const char *rom_title) {
         "  \"total_tier_hits\": %ld,\n"
         "  \"distinct_sites\": %d,\n"
         "  \"overflowed_tuples\": %llu,\n"
+        "  \"journal_write_failures\": %llu,\n"
         "  \"discoveries\": [",
         title, interp_tier_hit_count(), g_tier2_cov_count,
-        (unsigned long long)g_tier2_cov_overflow);
+        (unsigned long long)g_tier2_cov_overflow,
+        (unsigned long long)g_tier2_journal_failures);
     tier2_emit_discoveries(f, "    ");
     fprintf(f, "\n  ],\n"
                "  \"ram_routines_overflow\": %llu,\n"
@@ -2097,5 +2148,12 @@ void Tier2CoverageWriteManifest(const char *path, const char *rom_title) {
             (unsigned long long)g_ram_routine_overflow);
     ram_routines_emit(f, "    ");
     fprintf(f, "\n  ]\n}\n");
-    fclose(f);
+    if (fclose(f) != 0)
+        fprintf(stderr, "[tier2] failed closing coverage manifest: %s\n", path);
+}
+
+void Tier2CoverageWriteDefaultManifest(const char *rom_title) {
+    const char *path = tier2_capture_manifest_path(rom_title);
+    Tier2CoverageWriteManifest(path, rom_title);
+    fprintf(stderr, "[tier2] per-run coverage manifest: %s\n", path);
 }

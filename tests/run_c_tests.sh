@@ -38,6 +38,13 @@ echo "=== PPU sprite limits ==="
 "$OUT/ppu_sprite_limit_test"
 
 echo "=== interpreter and bridge ==="
+"$CC" -std=c11 -Wall -Wextra -Werror -O1 \
+    -D_POSIX_C_SOURCE=200809L -I "$ROOT/runner/src/snes" \
+    "$ROOT/tests/interp816/tier2_capture_test.c" \
+    "$ROOT/runner/src/snes/tier2_capture.c" \
+    -o "$OUT/tier2_capture_test"
+(cd "$OUT" && ./tier2_capture_test)
+
 "$CC" -std=c11 -Wall -Wextra -Wno-unused-parameter -O1 \
     -I "$ROOT/runner/src/snes" \
     "$ROOT/tests/interp816/interp816_test.c" \
@@ -46,9 +53,11 @@ echo "=== interpreter and bridge ==="
 "$OUT/interp816_test"
 
 "$CC" -std=c11 -Wall -Wextra -Wno-unused-parameter -O1 \
+    -D_POSIX_C_SOURCE=200809L -DSNESRECOMP_TIER2_TEST=1 \
     -I "$ROOT/runner/src" -I "$ROOT/runner/src/snes" \
     "$ROOT/tests/interp816/bridge_test.c" \
     "$ROOT/runner/src/snes/interp816.c" \
+    "$ROOT/runner/src/snes/tier2_capture.c" \
     "$ROOT/runner/src/snes/interp_bridge.c" \
     "$ROOT/runner/src/snes/cx4.c" \
     -lm -o "$OUT/bridge_test"

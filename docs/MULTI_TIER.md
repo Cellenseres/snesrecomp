@@ -465,7 +465,7 @@ discoveries become cfg seeds, the next regen makes them Tier 1.
   behind `SNESRECOMP_TRACE`.** Trace (the 2 GB debug rings) is excluded from
   Production (`smw.vcxproj`); but since Production runs are now the primary
   coverage-harvesting source (§3a), the trap→manifest recorder has to live in
-  the shipped build. Keep it cheap: a bounded in-memory set of
+  the shipped build. Keep it cheap: a growable in-memory set of
   (site, target, mx, hit_count) flushed to a small JSON next to the save dir on
   exit. The heavy trace rings stay dev-only; only this slim recorder ships.
 - Keep the strict `_STUB_MARKERS` build-error default for shipped titles; the
@@ -532,9 +532,11 @@ discoveries become cfg seeds, the next regen makes them Tier 1.
   clean-return vs contained-bail counts + frame span, with a resolved-landing
   capture (an indirect-goto records the *dynamically resolved* target, not the
   JMP site). `Tier2CoverageDumpJson` embeds it in the unified post-mortem
-  (`last_run_report.json`); `Tier2CoverageWriteManifest` writes the slim
-  standalone `build/tier2_coverage.json` (schema "snesrecomp tier2 coverage
-  v1"). Wired into SM's always-on `recomp_post_mortem_dump` (so it harvests on
+  (`last_run_report.json`); normal exit writes a unique per-run
+  `tier2_<rom>_<UTC>_p<PID>.json` (schema "snesrecomp tier2 coverage v1").
+  Every distinct tuple is also flushed immediately to the matching append-only
+  `.jsonl` journal, so a crash or later run cannot erase the set. Wired into
+  SM's always-on `recomp_post_mortem_dump` (so it harvests on
   normal exit, atexit, SEH crash, and on-demand TCP — not gated behind
   `SNESRECOMP_TRACE`). Recording adds no signature change → no regen, runtime
   rebuild only. Interp harness still 17/17 + 20/20.
