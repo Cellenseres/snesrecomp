@@ -29,15 +29,22 @@ def main() -> int:
         rom_path.write_bytes(rom)
         output = root / "project"
 
-        subprocess.run([
+        completed = subprocess.run([
             str(executable), "build",
             "--rom", str(rom_path),
             "--output", str(output),
             "--name", "CI Fixture",
-        ], check=True)
+        ], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        print(completed.stdout, end="")
+        completed.check_returncode()
+        if "Expected build result: generated-code static library only" not in completed.stdout:
+            raise RuntimeError(
+                "packaged CLI omitted static-library guidance from its output")
         required = (
             output / "CMakeLists.txt",
             output / "build.ps1",
+            output / "build.sh",
+            output / "README.md",
             output / "config" / "bank00.cfg",
             output / "generated" / "dispatch_v2.c",
             output / "generated" / "program_manifest.json",
@@ -48,6 +55,18 @@ def main() -> int:
         missing = [str(path) for path in required if not path.is_file()]
         if missing:
             raise RuntimeError(f"packaged CLI omitted expected output: {missing}")
+
+        build_notice = "No playable executable was produced"
+        for path in (output / "build.ps1", output / "build.sh"):
+            if build_notice not in path.read_text(encoding="utf-8"):
+                raise RuntimeError(
+                    f"generated build helper omitted artifact guidance: {path}")
+
+        readme = (output / "README.md").read_text(encoding="utf-8")
+        if ("Expected build result" not in readme or
+                "playable executable" not in readme):
+            raise RuntimeError(
+                "generated README omitted static-library artifact guidance")
     print("packaged CLI smoke test passed")
     return 0
 
