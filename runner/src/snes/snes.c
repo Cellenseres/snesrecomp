@@ -254,10 +254,7 @@ void snes_writeBBus(Snes* snes, uint8_t adr, uint8_t val) {
 }
 
 uint16_t SwapInputBits(uint16_t x) {
-  uint16_t r = 0;
-  for (int i = 0; i < 16; i++, x >>= 1)
-    r = r * 2 + (x & 1);
-  return r;
+  return joypad_auto_read_word(x);
 }
 
 static void snes_advance_beam(Snes *snes, uint32_t clocks, bool check_irq) {
@@ -385,13 +382,13 @@ uint8_t snes_readReg(Snes* snes, uint16_t adr) {
       /* $4016 bit 0 latches both pads; reads shift B through R, then 1s. */
       return joypad_read_serial(snes, adr - 0x4016);
     case 0x4218:
-      return SwapInputBits(snes->input1_currentState) & 0xff;
+      return joypad_auto_read_reg(snes->input1_currentState, adr);
     case 0x4219:
-      return SwapInputBits(snes->input1_currentState) >> 8;
+      return joypad_auto_read_reg(snes->input1_currentState, adr);
     case 0x421a:
-      return SwapInputBits(snes->input2_currentState) & 0xff;
+      return joypad_auto_read_reg(snes->input2_currentState, adr);
     case 0x421b:
-      return SwapInputBits(snes->input2_currentState) >> 8;
+      return joypad_auto_read_reg(snes->input2_currentState, adr);
     case 0x421c:
     case 0x421e:
     case 0x421d:

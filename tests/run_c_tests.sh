@@ -129,6 +129,14 @@ echo "=== manual joypad serial protocol ==="
     -o "$OUT/manual_joypad_test"
 "$OUT/manual_joypad_test"
 
+echo "=== automatic joypad register byte order ==="
+"$CC" -std=c11 -Wall -Wextra -Werror -O1 \
+    -I "$ROOT/runner/src" -I "$ROOT/runner/src/snes" \
+    "$ROOT/tests/joypad/auto_joypad_test.c" \
+    "$ROOT/runner/src/snes/joypad.c" \
+    -o "$OUT/auto_joypad_test"
+"$OUT/auto_joypad_test"
+
 echo "=== runtime dispatch ==="
 "$CC" -std=c11 -Wall -Wextra -ffunction-sections -fdata-sections \
     -I "$ROOT/runner/src" -I "$ROOT/runner/src/snes" \
