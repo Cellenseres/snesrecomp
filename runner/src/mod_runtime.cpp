@@ -130,6 +130,16 @@ std::vector<SNESModActivationCallback>& reset_callbacks() {
     return value;
 }
 
+std::vector<SNESModFrameCallback>& frame_callbacks() {
+    static std::vector<SNESModFrameCallback> value;
+    return value;
+}
+
+std::vector<SNESModApuWriteCallback>& apu_write_callbacks() {
+    static std::vector<SNESModApuWriteCallback> value;
+    return value;
+}
+
 struct Runtime {
     fs::path root;
     std::string game_id;
@@ -1757,6 +1767,8 @@ bool mod_runtime_commit(const fs::path& rom_path, std::string* error) {
 void mod_runtime_activate_plugins() {
     Runtime& runtime = state();
     if (!runtime.initialized) return;
+    frame_callbacks().clear();
+    apu_write_callbacks().clear();
     for (SNESModActivationCallback callback : reset_callbacks())
         if (callback) callback();
     for (const ResolvedPlugin& plugin : runtime.committed.plugins)
@@ -1790,6 +1802,39 @@ extern "C" int snes_mod_register_reset_callback(
         callbacks.end())
         callbacks.push_back(callback);
     return 1;
+}
+
+extern "C" int snes_mod_register_frame_callback(SNESModFrameCallback callback) {
+    if (!callback) return 0;
+    auto& callbacks = SNESRecomp::frame_callbacks();
+    if (std::find(callbacks.begin(), callbacks.end(), callback) ==
+        callbacks.end())
+        callbacks.push_back(callback);
+    return 1;
+}
+
+extern "C" int snes_mod_register_apu_write_callback(
+    SNESModApuWriteCallback callback) {
+    if (!callback) return 0;
+    auto& callbacks = SNESRecomp::apu_write_callbacks();
+    if (std::find(callbacks.begin(), callbacks.end(), callback) ==
+        callbacks.end())
+        callbacks.push_back(callback);
+    return 1;
+}
+
+extern "C" void snes_mod_runtime_frame_tick_c(void) {
+    for (SNESModFrameCallback callback : SNESRecomp::frame_callbacks())
+        if (callback) callback();
+}
+
+extern "C" int snes_mod_runtime_filter_apu_write_c(
+    uint16_t reg, uint8_t value) {
+    for (SNESModApuWriteCallback callback : SNESRecomp::apu_write_callbacks()) {
+        if (callback && callback(reg, value))
+            return 1;
+    }
+    return 0;
 }
 
 extern "C" int snes_mod_runtime_initialize_c(

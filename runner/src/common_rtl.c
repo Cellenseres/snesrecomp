@@ -20,6 +20,9 @@
 #include "snes/sa1.h"
 #include "snes/msu1.h"
 #include "snes/ws_shadow.h"
+#if SNESRECOMP_ENABLE_MODS
+#include "mod_runtime.h"
+#endif
 #include "cpu_state.h"
 #include "cpu_trace.h"
 #include "debug_server.h"
@@ -523,6 +526,10 @@ bool RtlRunFrame(uint32 inputs) {
    * the emulation clock. */
   rtl_sync_apu_frame_boundary();
 
+#if SNESRECOMP_ENABLE_MODS
+  snes_mod_runtime_frame_tick_c();
+#endif
+
 #ifdef SNES_COSIM
   /* Frame-keyed checkpoint: snapshot full state + park for the coordinator. */
   cosim_frame();
@@ -759,6 +766,12 @@ void WriteReg(uint16 reg, uint8 value) {
   } else if (reg >= 0x2100 && reg < 0x2140) {
     ppu_write(g_ppu, reg & 0xff, value);
   } else if (reg >= 0x2140 && reg < 0x2180) {
+#if SNESRECOMP_ENABLE_MODS
+    if (snes_mod_runtime_filter_apu_write_c(reg, value)) {
+      debug_server_on_reg_write(reg, value);
+      return;
+    }
+#endif
     RtlApuWrite(reg, value);
   } else if (reg >= 0x2180 && reg < 0x2184) {
     snes_writeBBus(g_snes, reg & 0xff, value);
