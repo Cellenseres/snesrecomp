@@ -668,7 +668,8 @@ def build_manifest(rom: bytes, parsed, *, max_insns: int, max_nodes: int,
             if target not in inline_arg_map and target not in inline_arg_probes:
                 inline_arg_probes.add(target)
                 byte_counts = set()
-                for probe_m, probe_x in ((0, 0), (1, 1)):
+                byte_count_probes = 0
+                for probe_m, probe_x in ((0, 0), (0, 1), (1, 0), (1, 1)):
                     try:
                         count = detect_inline_arg_bytes(
                             rom, (target >> 16) & 0xFF,
@@ -677,7 +678,8 @@ def build_manifest(rom: bytes, parsed, *, max_insns: int, max_nodes: int,
                         count = None
                     if count:
                         byte_counts.add(count)
-                if len(byte_counts) == 1:
+                        byte_count_probes += 1
+                if byte_count_probes == 4 and len(byte_counts) == 1:
                     inline_additions[target] = byte_counts.pop()
 
         if helper_additions or inline_additions:

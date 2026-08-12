@@ -2790,10 +2790,10 @@ pub fn classify_dispatch_helper(
 /// number of inline argument bytes. Port of Python's
 /// `detect_inline_arg_bytes`.
 ///
-/// This deliberately recognizes only the load-return-address, add-immediate,
-/// store-back-to-the-same-stack-slot idiom. Instructions that may clobber A
-/// reset the match, which keeps ordinary routines that merely inspect their
-/// return address from being classified as inline-argument callees.
+/// This deliberately recognizes narrow return-address adjustment idioms.
+/// Instructions that clobber the tracked carrier register reset that carrier,
+/// which keeps ordinary routines that merely inspect their return address from
+/// being classified as inline-argument callees.
 pub fn detect_inline_arg_bytes(
     rom: &[u8],
     mapping: RomMapping,
@@ -2867,7 +2867,41 @@ pub fn detect_inline_arg_bytes(
     fn mutates_y(opcode: u8) -> bool {
         matches!(
             opcode,
-            0xA0 | 0xA4 | 0xB4 | 0xAC | 0xBC | 0xC8 | 0x88 | 0x7A
+            0xA0 | 0xA4 | 0xB4 | 0xAC | 0xBC | 0xC8 | 0x88 | 0x7A | 0xA8 | 0x9B
+        )
+    }
+
+    fn mutates_x(opcode: u8) -> bool {
+        matches!(
+            opcode,
+            0xA2 | 0xA6 | 0xB6 | 0xAE | 0xBE | 0xE8 | 0xCA | 0xFA | 0xAA | 0xBA | 0xBB
+        )
+    }
+
+    fn breaks_carrier_flow(opcode: u8) -> bool {
+        matches!(
+            opcode,
+            0x00 | 0x02
+                | 0x10
+                | 0x20
+                | 0x22
+                | 0x30
+                | 0x40
+                | 0x4C
+                | 0x50
+                | 0x5C
+                | 0x60
+                | 0x6B
+                | 0x70
+                | 0x80
+                | 0x82
+                | 0x90
+                | 0xB0
+                | 0xD0
+                | 0xDC
+                | 0xF0
+                | 0x6C
+                | 0x7C
         )
     }
 
@@ -2875,9 +2909,13 @@ pub fn detect_inline_arg_bytes(
     let mut m = entry_m & 1;
     let mut x = entry_x & 1;
     let mut a_slot: Option<u8> = None;
+    let mut a_pulled = false;
     let mut a_added = 0u32;
     let mut y_slot: Option<u8> = None;
+    let mut y_pulled = false;
     let mut y_added = 0u32;
+    let mut x_pulled = false;
+    let mut x_added = 0u32;
 
     for _ in 0..96 {
         let offset = rom_offset_opt(mapping, bank, pc)?;
@@ -2896,6 +2934,8 @@ pub fn detect_inline_arg_bytes(
                 }
                 if ins.operand & 0x10 != 0 {
                     x = 0;
+                    x_pulled = false;
+                    x_added = 0;
                 }
             }
             "SEP" => {
@@ -2904,21 +2944,39 @@ pub fn detect_inline_arg_bytes(
                 }
                 if ins.operand & 0x10 != 0 {
                     x = 1;
+                    x_pulled = false;
+                    x_added = 0;
                 }
             }
             "LDA" if ins.mode == Mode::Stk => {
                 a_slot = Some((ins.operand & 0xFF) as u8);
+                a_pulled = false;
+                a_added = 0;
+            }
+            "PLA" => {
+                a_slot = None;
+                a_pulled = true;
                 a_added = 0;
             }
             "TAY" => {
                 y_slot = a_slot;
-                y_added = if a_slot.is_some() { a_added } else { 0 };
+                y_pulled = a_pulled;
+                y_added = if a_slot.is_some() || a_pulled {
+                    a_added
+                } else {
+                    0
+                };
             }
             "TYA" => {
                 a_slot = y_slot;
-                a_added = if y_slot.is_some() { y_added } else { 0 };
+                a_pulled = y_pulled;
+                a_added = if y_slot.is_some() || y_pulled {
+                    y_added
+                } else {
+                    0
+                };
             }
-            "ADC" if ins.opcode == 0x69 && a_slot.is_some() => {
+            "ADC" if ins.opcode == 0x69 && (a_slot.is_some() || a_pulled) => {
                 a_added = (a_added + ins.operand) & 0xFFFF;
             }
             "STA" if ins.opcode == 0x83 && ins.mode == Mode::Stk => {
@@ -2926,15 +2984,61 @@ pub fn detect_inline_arg_bytes(
                     return Some((a_added & 0xFF) as u8);
                 }
             }
+            "PHA" if a_pulled => {
+                if a_added != 0 {
+                    return Some((a_added & 0xFF) as u8);
+                }
+                a_pulled = false;
+                a_added = 0;
+            }
+            "PLX" => {
+                x_pulled = true;
+                x_added = 0;
+            }
+            "INX" if x_pulled => {
+                x_added = x_added.wrapping_add(1);
+            }
+            "PHX" if x_pulled => {
+                if x_added != 0 {
+                    return Some((x_added & 0xFF) as u8);
+                }
+                x_pulled = false;
+                x_added = 0;
+            }
+            _ if breaks_carrier_flow(ins.opcode) => {
+                a_slot = None;
+                a_pulled = false;
+                a_added = 0;
+                y_slot = None;
+                y_pulled = false;
+                y_added = 0;
+                x_pulled = false;
+                x_added = 0;
+            }
             _ if preserves_a(ins.opcode) => {
                 if mutates_y(ins.opcode) {
                     y_slot = None;
+                    y_pulled = false;
                     y_added = 0;
+                }
+                if mutates_x(ins.opcode) {
+                    x_pulled = false;
+                    x_added = 0;
                 }
             }
             _ => {
                 a_slot = None;
+                a_pulled = false;
                 a_added = 0;
+                if mutates_y(ins.opcode) {
+                    y_slot = None;
+                    y_pulled = false;
+                    y_added = 0;
+                }
+                if mutates_x(ins.opcode) {
+                    x_pulled = false;
+                    x_added = 0;
+                }
             }
         }
         pc = (pc + ins.length as u32) & 0xFFFF;
@@ -3288,6 +3392,92 @@ mod tests {
         assert_eq!(
             detect_inline_arg_bytes(&rom, RomMapping::LoRom, 0, 0x8000, 1, 1),
             Some(8)
+        );
+    }
+
+    #[test]
+    fn detects_accumulator_pop_push_inline_argument_adjustment() {
+        let rom = rom_at_8000(&[
+            0xC2, 0x30, // REP #$30
+            0x68, // PLA
+            0xA8, // TAY
+            0x18, // CLC
+            0x69, 0x03, 0x00, // ADC #$0003
+            0x48, // PHA
+            0x60, // RTS
+        ]);
+        assert_eq!(
+            detect_inline_arg_bytes(&rom, RomMapping::LoRom, 0, 0x8000, 1, 1),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn rejects_accumulator_after_unadjusted_restore() {
+        let rom = rom_at_8000(&[
+            0xC2, 0x30, // REP #$30
+            0x68, // PLA
+            0x48, // PHA
+            0x18, // CLC
+            0x69, 0x03, 0x00, // ADC #$0003
+            0x48, // PHA
+            0x60, // RTS
+        ]);
+        assert_eq!(
+            detect_inline_arg_bytes(&rom, RomMapping::LoRom, 0, 0x8000, 1, 1),
+            None
+        );
+    }
+
+    #[test]
+    fn detects_x_pop_push_inline_argument_adjustment() {
+        let rom = rom_at_8000(&[
+            0xE2, 0x20, // SEP #$20
+            0xC2, 0x10, // REP #$10
+            0xFA, // PLX
+            0x68, // PLA
+            0x48, // PHA
+            0xE8, // INX
+            0xBD, 0x00, 0x00, // LDA $0000,X
+            0xE8, // INX
+            0xDA, // PHX
+            0x6B, // RTL
+        ]);
+        assert_eq!(
+            detect_inline_arg_bytes(&rom, RomMapping::LoRom, 0, 0x8000, 1, 1),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn rejects_x_carrier_after_x_mutation() {
+        let rom = rom_at_8000(&[
+            0xC2, 0x10, // REP #$10
+            0xFA, // PLX
+            0xE8, // INX
+            0xA2, 0x34, 0x12, // LDX #$1234
+            0xDA, // PHX
+            0x6B, // RTL
+        ]);
+        assert_eq!(
+            detect_inline_arg_bytes(&rom, RomMapping::LoRom, 0, 0x8000, 1, 1),
+            None
+        );
+    }
+
+    #[test]
+    fn rejects_x_carrier_across_subroutine_call() {
+        let rom = rom_at_8000(&[
+            0xC2, 0x10, // REP #$10
+            0xFA, // PLX
+            0xE8, // INX
+            0x22, 0x34, 0x12, 0x00, // JSL $001234
+            0xDA, // PHX
+            0x6B, // RTL
+        ]);
+        assert_eq!(
+            detect_inline_arg_bytes(&rom, RomMapping::LoRom, 0, 0x8000, 1, 1),
+            None
         );
     }
 
