@@ -383,6 +383,11 @@ static bool HandleIniConfig(int section, const char *key, char *value) {
     } else if (StringEqualsNoCase(key, "AudioSamples")) {
       g_config.audio_samples = (uint16)strtol(value, (char**)NULL, 10);
       return true;
+    } else if (StringEqualsNoCase(key, "Msu1Enabled")) {
+      return ParseBool(value, &g_config.msu1_enabled);
+    } else if (StringEqualsNoCase(key, "Msu1Dir")) {
+      snprintf(g_config.msu1_dir, sizeof(g_config.msu1_dir), "%s", value);
+      return true;
     }
   } else if (section == 3) {
     if (StringEqualsNoCase(key, "Autosave")) {
@@ -451,6 +456,8 @@ void ParseConfigFile(const char *filename) {
   g_config.audio_freq = 32040;
   g_config.audio_channels = 2;
   g_config.audio_samples = 512;
+  g_config.msu1_enabled = false;
+  g_config.msu1_dir[0] = '\0';
   /* Default to gamepad-enabled so a freshly-extracted release (no
    * config.ini next to the exe) still picks up a plugged-in
    * SDL_GameController via OpenOneGamepad. Explicit `EnableGamepad1
@@ -590,6 +597,8 @@ void WriteConfigFile(const char *filename) {
     { "Graphics", "Widescreen" },
     { "Sound",    "EnableAudio" },
     { "Sound",    "AudioFreq" },
+    { "Sound",    "Msu1Enabled" },
+    { "Sound",    "Msu1Dir" },
     { "GamepadMap", "EnableGamepad1" },
     { "GamepadMap", "EnableGamepad2" },
     { "General",    "SkipLauncher" },
@@ -607,10 +616,12 @@ void WriteConfigFile(const char *filename) {
   snprintf(kvs[3].val, sizeof(kvs[3].val), "%d", g_config.widescreen ? 1 : 0);
   snprintf(kvs[4].val, sizeof(kvs[4].val), "%d", g_config.enable_audio ? 1 : 0);
   snprintf(kvs[5].val, sizeof(kvs[5].val), "%d", g_config.audio_freq);
-  snprintf(kvs[6].val, sizeof(kvs[6].val), "%s", g_config.enable_gamepad[0] ? "true" : "false");
-  snprintf(kvs[7].val, sizeof(kvs[7].val), "%s", g_config.enable_gamepad[1] ? "true" : "false");
-  snprintf(kvs[8].val, sizeof(kvs[8].val), "%d", g_config.skip_launcher ? 1 : 0);
-  snprintf(kvs[9].val, sizeof(kvs[9].val), "%d", g_config.gamepad_deadzone);
+  snprintf(kvs[6].val, sizeof(kvs[6].val), "%d", g_config.msu1_enabled ? 1 : 0);
+  snprintf(kvs[7].val, sizeof(kvs[7].val), "%s", g_config.msu1_dir);
+  snprintf(kvs[8].val, sizeof(kvs[8].val), "%s", g_config.enable_gamepad[0] ? "true" : "false");
+  snprintf(kvs[9].val, sizeof(kvs[9].val), "%s", g_config.enable_gamepad[1] ? "true" : "false");
+  snprintf(kvs[10].val, sizeof(kvs[10].val), "%d", g_config.skip_launcher ? 1 : 0);
+  snprintf(kvs[11].val, sizeof(kvs[11].val), "%d", g_config.gamepad_deadzone);
 
   char *data = NULL;
   long sz = 0;
