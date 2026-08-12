@@ -51,10 +51,6 @@ typedef struct Config {
   uint16 audio_freq;
   uint8 audio_channels;
   uint16 audio_samples;
-  // MSU-1 streamed audio. Games should treat this as persisted launcher state;
-  // a Mods package or game policy owns the effective runtime enable.
-  bool msu1_enabled;
-  char msu1_dir[512];
   bool autosave;
   bool no_sprite_limits;
   // Render genuine extra PPU columns to match the current display aspect.

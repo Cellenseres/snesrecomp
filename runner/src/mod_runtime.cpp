@@ -29,6 +29,7 @@ namespace {
 
 constexpr uint64_t kMaxArchiveBytes = 256ull * 1024ull * 1024ull;
 constexpr uint32_t kMaxArchiveFiles = 4096;
+constexpr const char* kMsu1ResourceIdentity = "snes.msu1.pack";
 
 enum class OptionType {
     Boolean,
@@ -336,6 +337,10 @@ bool validate_option_value(const Option& option, const std::string& value,
     return true;
 }
 
+bool resource_is_directory(const Resource& resource) {
+    return resource.format == "directory" || resource.format == "folder";
+}
+
 bool read_manifest(const fs::path& path, Package& out, std::string* error) {
     std::ifstream file(path);
     if (!file) {
@@ -622,9 +627,9 @@ bool read_manifest(const fs::path& path, Package& out, std::string* error) {
             if (item.file_description.empty())
                 item.file_description = "Nintendo 64 ROM";
         }
-        if (item.file_patterns.empty())
+        if (item.file_patterns.empty() && !resource_is_directory(item))
             item.file_patterns = "*";
-        if (item.file_description.empty())
+        if (item.file_description.empty() && !resource_is_directory(item))
             item.file_description = "Owner resource";
     }
     return true;
@@ -684,17 +689,26 @@ bool validate_resource_file(const Resource& resource,
                             const std::string& path_text,
                             std::string* status) {
     if (path_text.empty()) {
-        if (status) *status = resource.required ? "Required: select a file" :
-                                                  "Not selected";
+        if (status) {
+            *status = resource.required
+                ? (resource_is_directory(resource) ? "Required: select a folder"
+                                                   : "Required: select a file")
+                : "Not selected";
+        }
         return !resource.required;
     }
     const fs::path path(path_text);
     std::error_code ec;
-    if (!fs::is_regular_file(path, ec)) {
+    if (resource_is_directory(resource)) {
+        if (!fs::is_directory(path, ec)) {
+            if (status) *status = "Folder not found";
+            return false;
+        }
+    } else if (!fs::is_regular_file(path, ec)) {
         if (status) *status = "File not found";
         return false;
     }
-    if (resource.size != 0) {
+    if (resource.size != 0 && !resource_is_directory(resource)) {
         const uint64_t actual = (uint64_t)fs::file_size(path, ec);
         if (ec || actual != resource.size) {
             if (status) *status = "File size does not match";
@@ -705,6 +719,61 @@ bool validate_resource_file(const Resource& resource,
         *status = resource.normalized_sha1.empty()
             ? "Selected"
             : "Selected; identity verified at launch";
+    }
+    return true;
+}
+
+bool set_process_env(const char* name, const std::string& value) {
+#ifdef _WIN32
+    return _putenv_s(name, value.c_str()) == 0;
+#else
+    return setenv(name, value.c_str(), 1) == 0;
+#endif
+}
+
+bool unset_process_env(const char* name) {
+#ifdef _WIN32
+    return _putenv_s(name, "") == 0;
+#else
+    return unsetenv(name) == 0;
+#endif
+}
+
+bool apply_committed_resource_environment(Runtime& runtime,
+                                          std::string* error) {
+    std::string msu1_path;
+    for (const auto& [id, versions] : runtime.packages) {
+        (void)id;
+        (void)versions;
+        const Package* package = selected_package(runtime, id);
+        if (!package) continue;
+        for (const Feature& feature : package->features) {
+            if (!feature_enabled(runtime, *package, feature)) continue;
+            for (const Resource& resource : package->resources) {
+                if (resource.feature_id != feature.id ||
+                    resource.identity != kMsu1ResourceIdentity)
+                    continue;
+                std::string status;
+                const std::string path =
+                    resource_path(runtime, *package, feature, resource);
+                if (!validate_resource_file(resource, path, &status)) {
+                    set_error(error, status);
+                    return false;
+                }
+                if (msu1_path.empty()) msu1_path = path;
+            }
+        }
+    }
+    if (msu1_path.empty()) {
+        if (!unset_process_env("SNESRECOMP_MSU1")) {
+            set_error(error, "cannot clear MSU-1 resource environment");
+            return false;
+        }
+        return true;
+    }
+    if (!set_process_env("SNESRECOMP_MSU1", msu1_path)) {
+        set_error(error, "cannot set MSU-1 resource environment");
+        return false;
     }
     return true;
 }
@@ -1906,6 +1975,7 @@ int provider_feature_resource_get(void*, const char* package_id,
     copy_text(out->description, resource.description);
     copy_text(out->path, path);
     copy_text(out->status, status);
+    copy_text(out->format, resource.format);
     copy_text(out->file_patterns, resource.file_patterns);
     copy_text(out->file_description, resource.file_description);
     out->required = resource.required ? 1 : 0;
@@ -2015,6 +2085,10 @@ bool mod_runtime_commit(const fs::path& rom_path, std::string* error) {
         return false;
     }
     runtime.committed = runtime.validation;
+    if (!apply_committed_resource_environment(runtime, &runtime.error)) {
+        set_error(error, runtime.error);
+        return false;
+    }
     runtime.error.clear();
     return true;
 }
