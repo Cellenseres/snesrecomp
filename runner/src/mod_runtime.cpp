@@ -69,6 +69,20 @@ struct Target {
     std::string rom_sha256;
 };
 
+struct Resource {
+    std::string feature_id;
+    std::string id;
+    std::string label;
+    std::string description;
+    std::string format;
+    std::string identity;
+    std::string normalized_sha1;
+    std::string file_patterns;
+    std::string file_description;
+    uint64_t size = 0;
+    bool required = true;
+};
+
 struct Package {
     uint32_t format_version = 0;
     std::string id;
@@ -81,12 +95,14 @@ struct Package {
     std::vector<Target> targets;
     std::vector<Feature> features;
     std::vector<Option> options;
+    std::vector<Resource> resources;
 };
 
 struct FeatureSelection {
     bool enabled = false;
     bool has_enabled = false;
     std::map<std::string, std::string> values;
+    std::map<std::string, std::string> resources;
 };
 
 struct PackageSelection {
@@ -256,6 +272,13 @@ bool valid_sha256(const std::string& value) {
         });
 }
 
+bool valid_sha1(const std::string& value) {
+    return value.size() == 40 &&
+        std::all_of(value.begin(), value.end(), [](unsigned char c) {
+            return std::isdigit(c) || (c >= 'a' && c <= 'f');
+        });
+}
+
 const Feature* find_feature(const Package& package,
                             const std::string& feature_id) {
     const auto it = std::find_if(
@@ -273,6 +296,18 @@ const Option* find_option(const Package& package,
             return option.feature_id == feature_id && option.id == option_id;
         });
     return it == package.options.end() ? nullptr : &*it;
+}
+
+const Resource* find_resource(const Package& package,
+                              const std::string& feature_id,
+                              const std::string& resource_id) {
+    const auto it = std::find_if(
+        package.resources.begin(), package.resources.end(),
+        [&](const Resource& resource) {
+            return resource.feature_id == feature_id &&
+                   resource.id == resource_id;
+        });
+    return it == package.resources.end() ? nullptr : &*it;
 }
 
 bool validate_option_value(const Option& option, const std::string& value,
@@ -315,12 +350,14 @@ bool read_manifest(const fs::path& path, Package& out, std::string* error) {
         Option,
         Choice,
         Plugin,
+        Resource,
     };
     Section section = Section::Package;
     Target* target = nullptr;
     Feature* feature = nullptr;
     Option* option = nullptr;
     Choice* choice = nullptr;
+    Resource* resource = nullptr;
     std::string plugin_feature;
     std::string plugin_id;
 
@@ -358,6 +395,7 @@ bool read_manifest(const fs::path& path, Package& out, std::string* error) {
             feature = nullptr;
             option = nullptr;
             choice = nullptr;
+            resource = nullptr;
             if (name == "target") {
                 section = Section::Target;
                 out.targets.emplace_back();
@@ -381,6 +419,10 @@ bool read_manifest(const fs::path& path, Package& out, std::string* error) {
                 choice = &option->choices.back();
             } else if (name == "plugin") {
                 section = Section::Plugin;
+            } else if (name == "resource" || name == "external_rom") {
+                section = Section::Resource;
+                out.resources.emplace_back();
+                resource = &out.resources.back();
             } else {
                 set_error(error, "unsupported manifest section [[" + name + "]]");
                 return false;
@@ -492,6 +534,26 @@ bool read_manifest(const fs::path& path, Package& out, std::string* error) {
                 else if (key == "id") parsed = string_field(plugin_id);
                 else known = false;
                 break;
+            case Section::Resource:
+                resource = out.resources.empty() ? nullptr : &out.resources.back();
+                if (!resource) parsed = false;
+                else if (key == "feature") parsed = string_field(resource->feature_id);
+                else if (key == "id") parsed = string_field(resource->id);
+                else if (key == "label") parsed = string_field(resource->label);
+                else if (key == "description") parsed = string_field(resource->description);
+                else if (key == "format") parsed = string_field(resource->format);
+                else if (key == "identity") parsed = string_field(resource->identity);
+                else if (key == "normalized_sha1") parsed = string_field(resource->normalized_sha1);
+                else if (key == "file_patterns") parsed = string_field(resource->file_patterns);
+                else if (key == "file_description") parsed = string_field(resource->file_description);
+                else if (key == "size") {
+                    parsed = parse_int(value, int_value) && int_value > 0;
+                    if (parsed) resource->size = (uint64_t)int_value;
+                } else if (key == "required") {
+                    parsed = parse_bool(value, bool_value);
+                    if (parsed) resource->required = bool_value;
+                } else known = false;
+                break;
         }
         if (!known || !parsed) {
             set_error(error, "invalid or unsupported manifest field '" + key +
@@ -541,6 +603,30 @@ bool read_manifest(const fs::path& path, Package& out, std::string* error) {
             return false;
         }
     }
+    std::set<std::pair<std::string, std::string>> resource_ids;
+    for (Resource& item : out.resources) {
+        if (!find_feature(out, item.feature_id) || !valid_id(item.id) ||
+            item.label.empty() ||
+            !resource_ids.insert({item.feature_id, item.id}).second) {
+            set_error(error, "manifest has an invalid resource");
+            return false;
+        }
+        if (!item.normalized_sha1.empty() &&
+            !valid_sha1(item.normalized_sha1)) {
+            set_error(error, "manifest has an invalid resource sha1");
+            return false;
+        }
+        if (item.format == "n64") {
+            if (item.file_patterns.empty())
+                item.file_patterns = "*.z64,*.v64,*.n64";
+            if (item.file_description.empty())
+                item.file_description = "Nintendo 64 ROM";
+        }
+        if (item.file_patterns.empty())
+            item.file_patterns = "*";
+        if (item.file_description.empty())
+            item.file_description = "Owner resource";
+    }
     return true;
 }
 
@@ -584,6 +670,45 @@ std::string option_value(Runtime& runtime, const Package& package,
                                              value->second;
 }
 
+std::string resource_path(Runtime& runtime, const Package& package,
+                          const Feature& feature,
+                          const Resource& resource) {
+    PackageSelection& package_state = package_selection(runtime, package);
+    FeatureSelection& selection = package_state.features[feature.id];
+    const auto value = selection.resources.find(resource.id);
+    return value == selection.resources.end() ? std::string() :
+                                                value->second;
+}
+
+bool validate_resource_file(const Resource& resource,
+                            const std::string& path_text,
+                            std::string* status) {
+    if (path_text.empty()) {
+        if (status) *status = resource.required ? "Required: select a file" :
+                                                  "Not selected";
+        return !resource.required;
+    }
+    const fs::path path(path_text);
+    std::error_code ec;
+    if (!fs::is_regular_file(path, ec)) {
+        if (status) *status = "File not found";
+        return false;
+    }
+    if (resource.size != 0) {
+        const uint64_t actual = (uint64_t)fs::file_size(path, ec);
+        if (ec || actual != resource.size) {
+            if (status) *status = "File size does not match";
+            return false;
+        }
+    }
+    if (status) {
+        *status = resource.normalized_sha1.empty()
+            ? "Selected"
+            : "Selected; identity verified at launch";
+    }
+    return true;
+}
+
 bool target_matches(const Package& package, const Runtime& runtime) {
     return std::any_of(
         package.targets.begin(), package.targets.end(),
@@ -610,6 +735,21 @@ Validation validate(Runtime& runtime) {
                     "This feature does not support the selected stock ROM."
                 });
                 continue;
+            }
+            for (const Resource& resource : package->resources) {
+                if (resource.feature_id != feature.id) continue;
+                if (!resource.required) continue;
+                std::string status;
+                const std::string path =
+                    resource_path(runtime, *package, feature, resource);
+                if (!validate_resource_file(resource, path, &status)) {
+                    result.ok = false;
+                    result.diagnostics.push_back({
+                        package->id, feature.id, {}, {},
+                        "resource:" + resource.id,
+                        status
+                    });
+                }
             }
             for (const std::string& plugin_id : feature.plugins) {
                 const auto registered = registered_plugins().find(plugin_id);
@@ -703,10 +843,11 @@ bool load_state(Runtime& runtime, std::string* error) {
         set_error(error, "cannot read mod state");
         return false;
     }
-    enum class Section { Root, Package, Feature, Values };
+    enum class Section { Root, Package, Feature, Values, Resource };
     Section section = Section::Root;
     std::string current_package;
     std::string current_feature;
+    std::string current_resource;
     std::string raw;
     while (std::getline(file, raw)) {
         const std::string line = trim(strip_comment(raw));
@@ -715,12 +856,21 @@ bool load_state(Runtime& runtime, std::string* error) {
             section = Section::Package;
             current_package.clear();
             current_feature.clear();
+            current_resource.clear();
             continue;
         }
         if (line == "[[feature]]") {
             section = Section::Feature;
             current_package.clear();
             current_feature.clear();
+            current_resource.clear();
+            continue;
+        }
+        if (line == "[[resource]]") {
+            section = Section::Resource;
+            current_package.clear();
+            current_feature.clear();
+            current_resource.clear();
             continue;
         }
         if (line == "[feature.values]") {
@@ -763,6 +913,41 @@ bool load_state(Runtime& runtime, std::string* error) {
             !current_feature.empty() && parse_string(value, parsed)) {
             runtime.selections[current_package]
                 .features[current_feature].values[key] = parsed;
+            continue;
+        }
+        if (section == Section::Resource) {
+            if (key == "package_id" && parse_string(value, current_package)) {
+                runtime.selections[current_package];
+            } else if (key == "feature_id" &&
+                       parse_string(value, current_feature)) {
+                if (!current_package.empty())
+                    runtime.selections[current_package].features[current_feature];
+            } else if (key == "id" && parse_string(value, parsed)) {
+                current_resource = parsed;
+                if (!current_package.empty() && current_feature.empty()) {
+                    const Package* package =
+                        selected_package(runtime, current_package);
+                    if (package) {
+                        for (const Feature& feature : package->features) {
+                            if (find_resource(*package, feature.id, parsed)) {
+                                current_feature = feature.id;
+                                runtime.selections[current_package]
+                                    .features[current_feature];
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (!current_package.empty() && !current_feature.empty())
+                    runtime.selections[current_package]
+                        .features[current_feature].resources[current_resource];
+            } else if (key == "path" && parse_string(value, parsed) &&
+                       !current_package.empty() && !current_feature.empty() &&
+                       !current_resource.empty()) {
+                    runtime.selections[current_package]
+                        .features[current_feature]
+                        .resources[current_resource] = parsed;
+            }
         }
     }
     return true;
@@ -806,6 +991,14 @@ bool save_state(Runtime& runtime, std::string* error) {
                 file << "\n[feature.values]\n";
                 for (const auto& [key, value] : feature.values)
                     file << key << " = " << quote_toml(value) << "\n";
+            }
+            for (const auto& [resource_id, path] : feature.resources) {
+                if (path.empty()) continue;
+                file << "\n[[resource]]\npackage_id = "
+                     << quote_toml(package_id)
+                     << "\nfeature_id = " << quote_toml(feature_id)
+                     << "\nid = " << quote_toml(resource_id)
+                     << "\npath = " << quote_toml(path) << "\n";
             }
         }
     }
@@ -1679,6 +1872,64 @@ int provider_diagnostic_get(
     return 0;
 }
 
+int provider_feature_resource_count(void*, const char* package_id,
+                                    const char* feature_id) {
+    if (!package_id || !feature_id) return 0;
+    const Package* package = selected_package(state(), package_id);
+    if (!package || !find_feature(*package, feature_id)) return 0;
+    return (int)std::count_if(
+        package->resources.begin(), package->resources.end(),
+        [&](const Resource& resource) {
+            return resource.feature_id == feature_id;
+        });
+}
+
+int provider_feature_resource_get(void*, const char* package_id,
+                                  const char* feature_id, int index,
+                                  RecompLauncherCModResource* out) {
+    if (!package_id || !feature_id || !out || index < 0) return 0;
+    const Package* package = selected_package(state(), package_id);
+    if (!package) return 0;
+    const Feature* feature = find_feature(*package, feature_id);
+    if (!feature) return 0;
+    std::vector<const Resource*> resources;
+    for (const Resource& resource : package->resources)
+        if (resource.feature_id == feature_id) resources.push_back(&resource);
+    if ((size_t)index >= resources.size()) return 0;
+    const Resource& resource = *resources[(size_t)index];
+    const std::string path = resource_path(state(), *package, *feature, resource);
+    std::string status;
+    const bool verified = validate_resource_file(resource, path, &status);
+    std::memset(out, 0, sizeof(*out));
+    copy_text(out->id, resource.id);
+    copy_text(out->label, resource.label);
+    copy_text(out->description, resource.description);
+    copy_text(out->path, path);
+    copy_text(out->status, status);
+    copy_text(out->file_patterns, resource.file_patterns);
+    copy_text(out->file_description, resource.file_description);
+    out->required = resource.required ? 1 : 0;
+    out->verified = verified ? 1 : 0;
+    return 1;
+}
+
+int provider_feature_resource_set_path(void*, const char* package_id,
+                                       const char* feature_id,
+                                       const char* resource_id,
+                                       const char* path) {
+    if (!package_id || !feature_id || !resource_id || !path) return 0;
+    const Package* package = selected_package(state(), package_id);
+    if (!package || !find_feature(*package, feature_id) ||
+        !find_resource(*package, feature_id, resource_id))
+        return 0;
+    package_selection(state(), *package)
+        .features[feature_id]
+        .resources[resource_id] = path;
+    refresh_validation();
+    state().error.clear();
+    return 1;
+}
+
 RecompLauncherCModProvider provider = {
     nullptr,
     provider_package_count,
@@ -1704,6 +1955,10 @@ RecompLauncherCModProvider provider = {
     provider_diagnostic_get,
     ".snesmod",
     "SNESRecomp mod package (.snesmod)",
+    nullptr,
+    provider_feature_resource_count,
+    provider_feature_resource_get,
+    provider_feature_resource_set_path,
 };
 #endif
 
