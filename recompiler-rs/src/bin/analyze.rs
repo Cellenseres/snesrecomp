@@ -131,6 +131,21 @@ fn arg_values(args: &[String], flag: &str) -> Vec<String> {
         .collect()
 }
 
+fn arg_file_values(args: &[String], flag: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    for path in arg_values(args, flag) {
+        let text =
+            fs::read_to_string(&path).unwrap_or_else(|err| panic!("read {flag} {path:?}: {err}"));
+        values.extend(
+            text.lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                .map(str::to_string),
+        );
+    }
+    values
+}
+
 fn has_arg(args: &[String], flag: &str) -> bool {
     args.iter().any(|arg| arg == flag)
 }
@@ -1580,12 +1595,18 @@ fn main() {
         has_arg(&args, "--all-cfg-roots"),
     )
     .expect("load cfgs");
-    for value in arg_values(&args, "--root") {
+    for value in arg_values(&args, "--root")
+        .into_iter()
+        .chain(arg_file_values(&args, "--roots-file"))
+    {
         inputs
             .roots
             .insert(parse_root(&value).expect("parse --root"));
     }
-    for value in arg_values(&args, "--force-lle") {
+    for value in arg_values(&args, "--force-lle")
+        .into_iter()
+        .chain(arg_file_values(&args, "--force-lle-file"))
+    {
         let pc24 = parse_pc24(&value, "--force-lle").expect("parse --force-lle");
         inputs.force_lle.insert(pc24);
         if let Some(mirror) = mirror_pc24(pc24) {

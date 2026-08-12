@@ -80,6 +80,17 @@ def build_manifest_native(*, rom_path, cfg_dir, all_cfg_roots=False,
     fd, temporary = tempfile.mkstemp(
         prefix="snesrecomp-native-analysis-", suffix=".json")
     os.close(fd)
+    temporary_paths = [temporary]
+
+    def write_arg_file(prefix, values):
+        fd, path = tempfile.mkstemp(prefix=prefix, suffix=".txt")
+        with os.fdopen(fd, "w", encoding="ascii", newline="\n") as handle:
+            for value in values:
+                handle.write(value)
+                handle.write("\n")
+        temporary_paths.append(path)
+        return path
+
     command = [
         str(executable),
         "--rom", str(pathlib.Path(rom_path).resolve()),
@@ -90,10 +101,24 @@ def build_manifest_native(*, rom_path, cfg_dir, all_cfg_roots=False,
     ]
     if all_cfg_roots:
         command.append("--all-cfg-roots")
-    for key in sorted(set(additional_roots)):
-        command.extend(("--root", f"{key.pc24:06X}:{key.m}:{key.x}"))
-    for pc24 in sorted(set(force_lle)):
-        command.extend(("--force-lle", f"{pc24 & 0xFFFFFF:06X}"))
+    root_values = [
+        f"{key.pc24:06X}:{key.m}:{key.x}"
+        for key in sorted(set(additional_roots))
+    ]
+    if root_values:
+        command.extend((
+            "--roots-file",
+            write_arg_file("snesrecomp-native-roots-", root_values),
+        ))
+    force_lle_values = [
+        f"{pc24 & 0xFFFFFF:06X}"
+        for pc24 in sorted(set(force_lle))
+    ]
+    if force_lle_values:
+        command.extend((
+            "--force-lle-file",
+            write_arg_file("snesrecomp-native-force-lle-", force_lle_values),
+        ))
     try:
         completed = subprocess.run(
             command, text=True, capture_output=True, check=False)
@@ -104,10 +129,11 @@ def build_manifest_native(*, rom_path, cfg_dir, all_cfg_roots=False,
         value = json.loads(pathlib.Path(temporary).read_text(
             encoding="utf-8"))
     finally:
-        try:
-            os.unlink(temporary)
-        except OSError:
-            pass
+        for path in temporary_paths:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
     manifest = ProgramManifest.from_dict(value)
     metadata = value.get("native_analysis", {})
     helpers = {
