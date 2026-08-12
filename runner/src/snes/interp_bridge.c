@@ -271,6 +271,8 @@ static struct {
     InterpPreOpcodeHook hook;
 } s_pre_opcode_hooks[kInterpPreOpcodeHookSlots];
 static int s_pre_opcode_hook_count;
+static int s_pre_opcode_redirect_valid;
+static uint32_t s_pre_opcode_redirect_pc24;
 
 void interp_bridge_set_pre_opcode_hook(uint32_t pc24,
                                        InterpPreOpcodeHook hook) {
@@ -299,6 +301,11 @@ void interp_bridge_set_pre_opcode_hook(uint32_t pc24,
                     kInterpPreOpcodeHookSlots, (unsigned)pc24);
         }
     }
+}
+
+void interp_bridge_pre_opcode_redirect(uint32_t pc24) {
+    s_pre_opcode_redirect_pc24 = pc24 & 0xFFFFFFu;
+    s_pre_opcode_redirect_valid = 1;
 }
 
 /* BRK bridge seam. The bounce is via explicit JSR/JSL interception below, not
@@ -801,8 +808,15 @@ static int _interp_run_core(CpuState *cpu, uint32_t entry_pc24,
             for (int hi = 0; hi < s_pre_opcode_hook_count; hi++) {
                 if (s_pre_opcode_hooks[hi].pc24 == key) {
                     sync_interp_to_cpu(&in, cpu);
+                    s_pre_opcode_redirect_valid = 0;
                     s_pre_opcode_hooks[hi].hook(cpu, pc_before);
                     sync_cpu_to_interp(cpu, &in);
+                    if (s_pre_opcode_redirect_valid) {
+                        in.k = (uint8_t)((s_pre_opcode_redirect_pc24 >> 16) & 0xFF);
+                        in.pc = (uint16_t)(s_pre_opcode_redirect_pc24 & 0xFFFF);
+                        s_pre_opcode_redirect_valid = 0;
+                        continue;
+                    }
                     break;
                 }
             }

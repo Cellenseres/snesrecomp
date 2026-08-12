@@ -51,6 +51,7 @@ static inline bool interp_bridge_use_absolute_apu_timeline(
 typedef void (*InterpPreOpcodeHook)(CpuState *cpu, uint32_t pc24);
 void interp_bridge_set_pre_opcode_hook(uint32_t pc24,
                                        InterpPreOpcodeHook hook);
+void interp_bridge_pre_opcode_redirect(uint32_t pc24);
 
 /*
  * Run the interpreter over guest code at entry_pc24, in the context of `cpu`.
