@@ -30,3 +30,15 @@ uint8_t joypad_read_serial(Snes *snes, unsigned port) {
   if (*index < 16) (*index)++;
   return value;
 }
+
+uint16_t joypad_auto_read_word(uint16_t state) {
+  uint16_t word = 0;
+  for (int i = 0; i < 16; i++, state >>= 1)
+    word = (uint16_t)(word * 2u + (state & 1u));
+  return word;
+}
+
+uint8_t joypad_auto_read_reg(uint16_t state, unsigned reg) {
+  uint16_t word = joypad_auto_read_word(state);
+  return (uint8_t)((reg & 1u) ? (word >> 8) : (word & 0xffu));
+}
