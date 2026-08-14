@@ -722,16 +722,18 @@ fn discover_inline_args(
             continue;
         }
         let mut counts = BTreeSet::new();
-        for (m, x) in [(0, 0), (1, 1)] {
+        let mut probe_count = 0;
+        for (m, x) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
             if let Some(count) =
                 detect_inline_arg_bytes(rom, mapping, (target >> 16) & 0xFF, target & 0xFFFF, m, x)
             {
                 if count != 0 {
                     counts.insert(count);
+                    probe_count += 1;
                 }
             }
         }
-        if counts.len() == 1 {
+        if probe_count == 4 && counts.len() == 1 {
             result.insert(target, i32::from(*counts.first().unwrap()));
         }
     }

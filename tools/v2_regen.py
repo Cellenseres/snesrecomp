@@ -1394,11 +1394,13 @@ def main() -> int:
         tbank = (tgt >> 16) & 0xFF
         taddr = tgt & 0xFFFF
         seen_n: set = set()
-        for em, ex in ((0, 0), (1, 1)):
+        seen_probe_count = 0
+        for em, ex in ((0, 0), (0, 1), (1, 0), (1, 1)):
             n = detect_inline_arg_bytes(rom, tbank, taddr, em, ex)
             if n:
                 seen_n.add(n)
-        if len(seen_n) == 1:
+                seen_probe_count += 1
+        if seen_probe_count == 4 and len(seen_n) == 1:
             inline_arg_map[tgt] = seen_n.pop()
     if inline_arg_map:
         print(f"  detected {len(inline_arg_map)} inline-argument routine(s):")

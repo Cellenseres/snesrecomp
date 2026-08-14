@@ -48,6 +48,87 @@ def test_detects_y_carried_stack_return_address_adjustment():
     assert detect_inline_arg_bytes(rom, 0, 0x8000, entry_m=1, entry_x=1) == 8
 
 
+def test_detects_accumulator_pop_push_return_address_adjustment():
+    rom = make_lorom_bank0({
+        0x8000: bytes([
+            0xC2, 0x30,        # REP #$30
+            0x68,              # PLA
+            0xA8,              # TAY
+            0x18,              # CLC
+            0x69, 0x03, 0x00,  # ADC #$0003
+            0x48,              # PHA
+            0x60,              # RTS
+        ]),
+    })
+
+    assert detect_inline_arg_bytes(rom, 0, 0x8000, entry_m=1, entry_x=1) == 3
+
+
+def test_rejects_accumulator_after_unadjusted_restore():
+    rom = make_lorom_bank0({
+        0x8000: bytes([
+            0xC2, 0x30,        # REP #$30
+            0x68,              # PLA
+            0x48,              # PHA
+            0x18,              # CLC
+            0x69, 0x03, 0x00,  # ADC #$0003
+            0x48,              # PHA
+            0x60,              # RTS
+        ]),
+    })
+
+    assert detect_inline_arg_bytes(rom, 0, 0x8000, entry_m=1, entry_x=1) is None
+
+
+def test_detects_x_pop_push_return_address_adjustment():
+    rom = make_lorom_bank0({
+        0x8000: bytes([
+            0xE2, 0x20,        # SEP #$20
+            0xC2, 0x10,        # REP #$10
+            0xFA,              # PLX
+            0x68,              # PLA
+            0x48,              # PHA
+            0xE8,              # INX
+            0xBD, 0x00, 0x00,  # LDA $0000,X
+            0xE8,              # INX
+            0xDA,              # PHX
+            0x6B,              # RTL
+        ]),
+    })
+
+    assert detect_inline_arg_bytes(rom, 0, 0x8000, entry_m=1, entry_x=1) == 2
+
+
+def test_x_carrier_is_invalidated_by_x_mutation():
+    rom = make_lorom_bank0({
+        0x8000: bytes([
+            0xC2, 0x10,        # REP #$10
+            0xFA,              # PLX
+            0xE8,              # INX
+            0xA2, 0x34, 0x12,  # LDX #$1234
+            0xDA,              # PHX
+            0x6B,              # RTL
+        ]),
+    })
+
+    assert detect_inline_arg_bytes(rom, 0, 0x8000, entry_m=1, entry_x=1) is None
+
+
+def test_x_carrier_is_invalidated_by_subroutine_call():
+    rom = make_lorom_bank0({
+        0x8000: bytes([
+            0xC2, 0x10,              # REP #$10
+            0xFA,                    # PLX
+            0xE8,                    # INX
+            0x22, 0x34, 0x12, 0x00,  # JSL $001234
+            0xDA,                    # PHX
+            0x6B,                    # RTL
+        ]),
+    })
+
+    assert detect_inline_arg_bytes(rom, 0, 0x8000, entry_m=1, entry_x=1) is None
+
+
 def test_y_carrier_is_invalidated_by_y_mutation():
     rom = make_lorom_bank0({
         0x8000: bytes([
