@@ -69,6 +69,8 @@ extern uint8 g_ram[0x20000];
 extern uint8 *g_sram;
 extern int g_sram_size;
 void snes_saveload(Snes *snes, SaveLoadInfo *sli);
+void RtlApuLock(void);
+void RtlApuUnlock(void);
 
 // Note: g_snes->ram == g_ram (same pointer, see snes_init). The dual-WRAM
 // pattern this file once bridged was phantom — both "sides" always pointed
@@ -2546,14 +2548,23 @@ static void cmd_ws_shadow_stats(const char *args) {
             "\"worldX\":%u,\"worldY\":%u,\"scrollX\":%u,\"scrollY\":%u,"
             "\"westHit\":%llu,\"westMiss\":%llu,"
             "\"eastHit\":%llu,\"eastMiss\":%llu,"
-            "\"prefillSeed\":%llu,\"prefillRefresh\":%llu}",
+            "\"prefillSeed\":%llu,\"prefillRefresh\":%llu,"
+            "\"westFold\":%llu,\"eastFold\":%llu,"
+            "\"westBlank\":%llu,\"eastBlank\":%llu,"
+            "\"westRawFallback\":%llu,\"eastRawFallback\":%llu}",
             l ? "," : "", l, WsShadowLayerActive(l) ? "true" : "false",
             (unsigned)WsShadowWorldX(l), (unsigned)WsShadowWorldY(l),
             (unsigned)WsShadowScrollX(l), (unsigned)WsShadowScrollY(l),
             (unsigned long long)st.westHit, (unsigned long long)st.westMiss,
             (unsigned long long)st.eastHit, (unsigned long long)st.eastMiss,
             (unsigned long long)st.prefillSeed,
-            (unsigned long long)st.prefillRefresh);
+            (unsigned long long)st.prefillRefresh,
+            (unsigned long long)st.westFold,
+            (unsigned long long)st.eastFold,
+            (unsigned long long)st.westBlank,
+            (unsigned long long)st.eastBlank,
+            (unsigned long long)st.westRawFallback,
+            (unsigned long long)st.eastRawFallback);
     }
     pos += snprintf(buf + pos, sizeof(buf) - pos, "]}");
     send_line(buf);
@@ -7409,7 +7420,6 @@ static void cmd_spc_dump(const char *args) {
         return;
     }
     static uint8_t img[0x10200];
-    void RtlApuLock(void); void RtlApuUnlock(void);
     RtlApuLock();
     Apu *apu = g_snes->apu;
     Spc *spc = apu->spc;

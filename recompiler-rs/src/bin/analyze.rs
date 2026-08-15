@@ -283,6 +283,14 @@ fn load_inputs(cfg_dir: &Path, rom: &mut Vec<u8>, all_cfg_roots: bool) -> Result
             entries.entry(pc24).or_insert_with(|| entry.clone());
             if all_cfg_roots {
                 roots.insert(VariantKey::new(pc24, entry.entry_m, entry.entry_x));
+                if let Some(force_variants) = &entry.force_variants {
+                    for &(m, x) in force_variants {
+                        roots.insert(VariantKey::new(pc24, m, x));
+                        if let Some(mirror_pc24) = mirror_pc24(pc24) {
+                            roots.insert(VariantKey::new(mirror_pc24, m, x));
+                        }
+                    }
+                }
             }
             if let Some(skip) = entry.inline_skip {
                 inline_skip.insert(pc24, skip);
@@ -292,6 +300,15 @@ fn load_inputs(cfg_dir: &Path, rom: &mut Vec<u8>, all_cfg_roots: bool) -> Result
             }
         }
         for &site_pc16 in &cfg.terminal_jsr {
+            let site = (bank << 16) | (site_pc16 & 0xFFFF);
+            terminal_jsr_sites.insert(site);
+            if let Some(mirror) = mirror_pc24(site) {
+                terminal_jsr_sites.insert(mirror);
+            }
+        }
+        // Both contracts suppress lexical fall-through for fixed-point
+        // analysis.  Python emission keeps their distinct stack semantics.
+        for &site_pc16 in &cfg.noreturn_jsr {
             let site = (bank << 16) | (site_pc16 & 0xFFFF);
             terminal_jsr_sites.insert(site);
             if let Some(mirror) = mirror_pc24(site) {
