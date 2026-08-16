@@ -1578,6 +1578,8 @@ void RtlMigrateLegacySram(const char *legacy_title) {
 }
 
 void RtlReadSram(void) {
+  if (!g_sram || g_sram_size <= 0)
+    return;
   char path[128];
   RtlMigrateLegacySram(g_rtl_game_info->title);
   RtlSramFilePath(path, sizeof(path));
@@ -1590,6 +1592,8 @@ void RtlReadSram(void) {
 }
 
 void RtlWriteSram(void) {
+  if (!g_sram || g_sram_size <= 0)
+    return;
   char path[128], bak[140];
   RtlEnsureSaveDir();
   RtlSramFilePath(path, sizeof(path));

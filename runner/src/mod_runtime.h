@@ -80,6 +80,14 @@ int snes_mod_register_apu_write_callback(SNESModApuWriteCallback callback);
 void snes_mod_runtime_frame_tick_c(void);
 int snes_mod_runtime_filter_apu_write_c(uint16_t reg, uint8_t value);
 
+/*
+ * Request battery-backed SRAM for a stock cart that declares none. This is
+ * for enhancement mods that add guest-visible saves to password-only games.
+ * Existing cartridge SRAM is never resized by a mod.
+ */
+int snes_mod_request_synthetic_sram_c(uint32_t bytes);
+uint32_t snes_mod_runtime_synthetic_sram_size_c(void);
+
 #if defined(_MSC_VER)
 #pragma section(".CRT$XCU", read)
 #define SNES_MOD_CONSTRUCTOR(name)                                          \

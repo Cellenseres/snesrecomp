@@ -9,6 +9,9 @@
 #include "cart.h"
 #include "ppu.h"
 #include "dsp.h"
+#if SNESRECOMP_ENABLE_MODS
+#include "mod_runtime.h"
+#endif
 
 typedef struct CartHeader {
   // normal header
@@ -157,6 +160,14 @@ bool snes_loadRom(Snes* snes, const uint8_t* data, int length) {
     cart_ram_size = headers[used].ramSize > 1024 ? headers[used].ramSize : 0;
   else
     cart_ram_size = headers[used].chips > 0 ? headers[used].ramSize : 0;
+
+#if SNESRECOMP_ENABLE_MODS
+  if (cart_ram_size == 0) {
+    uint32_t synthetic_sram_size = snes_mod_runtime_synthetic_sram_size_c();
+    if (synthetic_sram_size > 0)
+      cart_ram_size = (int)synthetic_sram_size;
+  }
+#endif
 
   cart_load(
     snes->cart, headers[used].cartType,

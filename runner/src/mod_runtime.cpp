@@ -157,6 +157,11 @@ std::vector<SNESModApuWriteCallback>& apu_write_callbacks() {
     return value;
 }
 
+uint32_t& synthetic_sram_size() {
+    static uint32_t value = 0;
+    return value;
+}
+
 struct Runtime {
     fs::path root;
     std::string game_id;
@@ -2098,6 +2103,7 @@ void mod_runtime_activate_plugins() {
     if (!runtime.initialized) return;
     frame_callbacks().clear();
     apu_write_callbacks().clear();
+    synthetic_sram_size() = 0;
     for (SNESModActivationCallback callback : reset_callbacks())
         if (callback) callback();
     for (const ResolvedPlugin& plugin : runtime.committed.plugins)
@@ -2164,6 +2170,20 @@ extern "C" int snes_mod_runtime_filter_apu_write_c(
             return 1;
     }
     return 0;
+}
+
+extern "C" int snes_mod_request_synthetic_sram_c(uint32_t bytes) {
+    if (bytes < 1024 || bytes > 128 * 1024 || (bytes & (bytes - 1)) != 0)
+        return 0;
+    uint32_t& requested = SNESRecomp::synthetic_sram_size();
+    if (requested != 0 && requested != bytes)
+        return 0;
+    requested = bytes;
+    return 1;
+}
+
+extern "C" uint32_t snes_mod_runtime_synthetic_sram_size_c(void) {
+    return SNESRecomp::synthetic_sram_size();
 }
 
 extern "C" int snes_mod_runtime_initialize_c(
