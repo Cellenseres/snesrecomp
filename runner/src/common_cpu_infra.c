@@ -7,6 +7,7 @@
 #include "snes/snes.h"
 #include "snes/msu1.h"
 #include "snes/interp_bridge.h"
+#include "snes/tier2_capture.h"
 #include "util.h"
 #include "cpu_trace.h"
 #include "debug_server.h"
@@ -24,14 +25,17 @@ Cpu *g_snes_cpu;
 bool g_fail;
 const RtlGameInfo *g_rtl_game_info;
 
-/* Interp-coverage feedback manifest, written on process exit. The always-on
- * tier-2 gap recorder in the interp bridge names every entry the interpreter
+/* Interp-coverage feedback manifest, written on process exit only when tier2
+ * capture is enabled. The tier-2 gap recorder in the interp bridge names every
+ * entry the interpreter
  * had to resolve at runtime; this serializes that promotion worklist (schema
  * "snesrecomp tier2 coverage v1") so tools/tier2_ingest.py can fold it back
  * into the cfg and the next regen promotes those entries to AOT — the LLE-first
- * burn-down loop. SNESRECOMP_TIER2_MANIFEST can override the unique per-run
- * path. First sightings are also flushed to an append-only JSONL journal, so
- * earlier sessions and crash-time discoveries are preserved. */
+ * burn-down loop. SNESRECOMP_TIER2_CAPTURE=1 enables ad-hoc developer runs,
+ * and SNESRECOMP_TIER2_MANIFEST can override the unique per-run path. First
+ * sightings are also flushed to an append-only JSONL journal, so earlier
+ * sessions and crash-time discoveries are preserved. Disabled by default so
+ * release builds do not emit artifacts. */
 static void rtl_write_tier2_coverage_manifest(void) {
   Tier2CoverageWriteDefaultManifest(g_rtl_game_info ? g_rtl_game_info->title
                                                      : "unknown");
@@ -47,17 +51,18 @@ const char *rtl_game_title(void) {
 
 void RtlRegisterGame(const RtlGameInfo *info) {
   g_rtl_game_info = info;
+  tier2_capture_set_default_enabled(info && info->tier2_capture);
   /* Arm MSU-1 from the environment for every game, with no per-game
    * wiring. Inert (default-OFF) unless SNESRECOMP_MSU1 is set. A game's
    * main.c may additionally call msu1_set_rom_path() to enable the
    * "auto" base-from-ROM-name mode. */
   msu1_init();
-  /* Harvest the interp-coverage manifest on exit for every game, same
-   * no-per-game-wiring policy as MSU-1 above. Registered once regardless of
-   * how many times a game re-registers (e.g. a reset path). */
+  /* Harvest the interp-coverage manifest on exit only when the game or
+   * developer environment opts in. Registered once regardless of how many times
+   * a game re-registers (e.g. a reset path). */
   {
     static int coverage_atexit_registered = 0;
-    if (!coverage_atexit_registered) {
+    if (tier2_capture_enabled() && !coverage_atexit_registered) {
       coverage_atexit_registered = 1;
       atexit(rtl_write_tier2_coverage_manifest);
     }

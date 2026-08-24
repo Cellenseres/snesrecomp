@@ -24,6 +24,7 @@ static int s_close_registered;
 static int s_announced;
 static int s_verbose_checked;
 static int s_verbose;
+static int s_default_enabled;
 
 static int tier2_verbose(void) {
     if (!s_verbose_checked) {
@@ -32,6 +33,30 @@ static int tier2_verbose(void) {
         s_verbose_checked = 1;
     }
     return s_verbose;
+}
+
+static int env_truthy(const char *value) {
+    if (!value || !*value) return 0;
+    return value[0] != '0' && value[0] != 'f' && value[0] != 'F' &&
+           value[0] != 'n' && value[0] != 'N' && value[0] != 'o' &&
+           value[0] != 'O';
+}
+
+static int env_present(const char *value) {
+    return value && *value;
+}
+
+void tier2_capture_set_default_enabled(int enabled) {
+    s_default_enabled = enabled ? 1 : 0;
+}
+
+int tier2_capture_enabled(void) {
+    const char *value = getenv("SNESRECOMP_TIER2_CAPTURE");
+    if (!env_present(value))
+        value = getenv("SNESRECOMP_TIER2");
+    if (env_present(value))
+        return env_truthy(value);
+    return s_default_enabled;
 }
 
 static void sanitize_romid(const char *title, char *out, size_t cap) {
@@ -130,6 +155,8 @@ int tier2_capture_append_discovery(const char *rom_title,
                                    const char *site_kind,
                                    int outcome,
                                    int32_t frame) {
+    if (!tier2_capture_enabled())
+        return 1;
     init_paths(rom_title);
     if (!s_journal) {
         s_journal = fopen(s_journal_path, "a");

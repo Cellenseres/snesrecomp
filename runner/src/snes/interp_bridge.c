@@ -2224,6 +2224,8 @@ void Tier2CoverageWriteManifest(const char *path, const char *rom_title) {
 }
 
 void Tier2CoverageWriteDefaultManifest(const char *rom_title) {
+    if (!tier2_capture_enabled())
+        return;
     const char *path = tier2_capture_manifest_path(rom_title);
     Tier2CoverageWriteManifest(path, rom_title);
     if (tier2_verbose())
