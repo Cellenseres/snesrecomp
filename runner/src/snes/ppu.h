@@ -531,6 +531,8 @@ const uint8_t *PpuGetMode2Bg1Palette(const Ppu *ppu);
 
 // Per-layer widescreen clamp: bit L keeps BG(L+1) in the authentic 256
 // columns while other layers extend into the margins. Re-apply per frame.
+// Requires PpuBeginDrawing(..., kPpuRenderFlags_NewRenderer); the legacy
+// renderer stores this policy but does not apply it.
 void PpuSetWidescreenLayerClamp(Ppu *ppu, uint8_t mask);
 
 // Extend selected game-authored PPU windows by the current widescreen margins
@@ -542,12 +544,14 @@ void PpuSetWidescreenWindowExpansion(Ppu *ppu, uint8_t layer_mask,
 // Fill Mode-1 background margins by reflecting or cyclically repeating the
 // authentic rendered scanline. Rendering remains layer-, priority-, window-,
 // and color-math-correct. Repeat wins if both bits are set. Re-apply per frame.
+// Requires kPpuRenderFlags_NewRenderer; the legacy renderer ignores these
+// policies.
 void PpuSetWidescreenLayerMirror(Ppu *ppu, uint8_t mask);
 void PpuSetWidescreenLayerRepeat(Ppu *ppu, uint8_t mask);
 
 // Apply clamp, cyclic-repeat, or stretch only on scanlines [y0,y1).
 // y1<=y0 disables. Repeat/stretch bands apply to Mode-1 4bpp and 2bpp
-// background paths.
+// background paths. Requires kPpuRenderFlags_NewRenderer.
 void PpuSetWidescreenLayerClampBand(Ppu *ppu, uint8_t layer, uint8_t y0,
                                     uint8_t y1);
 void PpuSetWidescreenLayerRepeatBand(Ppu *ppu, uint8_t layer, uint8_t y0,
