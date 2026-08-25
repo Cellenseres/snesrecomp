@@ -27,6 +27,7 @@
  * poll, so the SPC stayed frozen (co-sim: A outPorts=0000 vs B outPorts=AABB).
  * Scoped to the interp tier — the compiled path never enters here. */
 extern Snes *g_snes;
+extern int snes_frame_counter;
 extern uint64_t g_apu_last_sync_master;   /* common_rtl.c — keep synced so a bounce's accurate-mode delta excludes interp opcodes */
 extern int g_interp_apu_driving;          /* common_rtl.c — suppresses the per-touch synthetic catch-up while set */
 #ifdef SNES_COSIM
@@ -61,6 +62,20 @@ static uint64_t bridge_bounce_flush_thresh(void) {
         if (s_t < 0) s_t = 0;
     }
     return (uint64_t)s_t;
+}
+/* SNESRECOMP_YIELD_STACK_DIAG enables immediately. Set
+ * SNESRECOMP_YIELD_STACK_DIAG_FROM=<frame> to delay noisy captures. */
+static int bridge_yield_stack_diag_enabled(void) {
+    const char *diag = getenv("SNESRECOMP_YIELD_STACK_DIAG");
+    if (!diag || !diag[0]) return 0;
+
+    const char *from = getenv("SNESRECOMP_YIELD_STACK_DIAG_FROM");
+    if (!from || !from[0]) return 1;
+
+    char *end = NULL;
+    long first_frame = strtol(from, &end, 0);
+    if (end == from) return 1;
+    return snes_frame_counter >= first_frame;
 }
 static void bridge_apu_flush(CpuState *cpu) {
     if (!s_apu_pending_master) return;
@@ -1285,8 +1300,7 @@ static int _interp_run_core(CpuState *cpu, uint32_t entry_pc24,
                 if (_air != RECOMP_RETURN_NORMAL) {
                     if (s_lle_unwind_active) {
                         if (s_lle_unwind_owner_depth == s_interp_bridge_depth) {
-                            if (getenv("SNESRECOMP_YIELD_STACK_DIAG") &&
-                                snes_frame_counter >= 5390) {
+                            if (bridge_yield_stack_diag_enabled()) {
                                 fprintf(stderr,
                                         "[yield_stack] frame=%d bounce=$%06X "
                                         "sp_pre=$%04X sp_unwind=$%04X "

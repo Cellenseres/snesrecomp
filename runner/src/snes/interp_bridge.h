@@ -102,7 +102,10 @@ void interp_bridge_set_master_deadline(uint64_t master_clock);
 int interp_bridge_lle_master_deadline_reached(const CpuState *cpu);
 
 /* Execute an architectural interrupt handler through its terminal RTI. The
- * caller has already materialized the hardware interrupt frame. */
+ * caller has already materialized the hardware interrupt frame, usually with
+ * cpu_push_interrupt_frame_at(). Do not enter an interrupt body directly from a
+ * host scheduler unless that frame is on the guest stack for the terminal RTI
+ * to consume. */
 int interp_bridge_run_interrupt(CpuState *cpu, uint32_t entry_pc24);
 
 /* Save-state task resume: interpret a suspended cooperative task from its
