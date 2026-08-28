@@ -15,6 +15,7 @@
 #include "joypad.h"
 #include "variables.h"
 #include "../common_rtl.h"
+#include "../cpu_state.h"
 #include "../debug_server.h"
 #include "../audio_trace.h"
 #include "../cpu_trace.h"
@@ -228,6 +229,7 @@ void snes_writeBBus(Snes* snes, uint8_t adr, uint8_t val) {
       uint32_t wa = snes->ramAdr & 0x1ffffu;
       uint8_t old = snes->ram[wa];
       snes->ram[wa] = val;
+      wlog_addr_note_direct(wa, val, "wmdata");
 #if SNESRECOMP_TRACE
       snes_trace_direct_wram_write(wa, old, val);
 #endif
@@ -554,6 +556,7 @@ void snes_write(Snes* snes, uint32_t adr, uint8_t val) {
     uint32_t addr = ((bank & 1) << 16) | adr;
     uint8_t old = snes->ram[addr];
     snes->ram[addr] = val; // ram
+    wlog_addr_note_direct(addr, val, "snes_write");
 #if SNESRECOMP_TRACE
     snes_trace_direct_wram_write(addr, old, val);
 #endif
@@ -566,6 +569,7 @@ void snes_write(Snes* snes, uint32_t adr, uint8_t val) {
     if(adr < 0x2000) {
       uint8_t old = snes->ram[adr];
       snes->ram[adr] = val; // ram mirror
+      wlog_addr_note_direct((uint32_t)adr, val, "snes_write_mirror");
 #if SNESRECOMP_TRACE
       snes_trace_direct_wram_write((uint32_t)adr, old, val);
 #endif

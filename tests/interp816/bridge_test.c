@@ -71,6 +71,9 @@ void snes_sync_master_clock(Snes *snes, uint64_t master_clock) {
 void cart_sync_coprocessors(Cart *cart, uint64_t master_clock) {
     (void)cart; (void)master_clock;
 }
+/* cpu_state.c isn't linked here; the bridge's constructor installs its
+ * step-ring dump into this hook, so provide the slot. */
+void (*g_interp_recent_dump_hook)(int n, FILE *out) = 0;
 uint8 cpu_read8(CpuState *cpu, uint8 bank, uint16 addr) {
     (void)cpu; return RAM[(((uint32)bank << 16) | addr) & 0xFFFFFF];
 }
