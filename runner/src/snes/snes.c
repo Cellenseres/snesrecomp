@@ -37,6 +37,35 @@ static void snes_trace_direct_wram_write(uint32_t off, uint8_t old, uint8_t val)
 }
 #endif
 
+static SnesMasterClockChargeHook s_master_clock_charge_hook;
+static SnesWramWriteLogHook s_wram_write_log_hook;
+
+void snes_set_master_clock_charge_hook(SnesMasterClockChargeHook hook) {
+  s_master_clock_charge_hook = hook;
+}
+
+void snes_set_wram_write_log_hook(SnesWramWriteLogHook hook) {
+  s_wram_write_log_hook = hook;
+}
+
+static void snes_charge_master_cycles(Snes *snes, uint64_t clocks) {
+  if (s_master_clock_charge_hook) {
+    s_master_clock_charge_hook(snes, clocks);
+    return;
+  }
+  while (clocks) {
+    uint32_t chunk = clocks > 0xffffffffull ? 0xffffffffu : (uint32_t)clocks;
+    snes_advance_master_cycles(snes, chunk);
+    clocks -= chunk;
+  }
+}
+
+static void snes_note_direct_wram_write(uint32_t ram_off, uint8_t value,
+                                        const char *via) {
+  if (s_wram_write_log_hook)
+    s_wram_write_log_hook(ram_off, value, via);
+}
+
 Snes* snes_init(uint8_t *ram) {
   Snes* snes = calloc(1, sizeof(Snes));  /* zero padding: saveload/co-sim hash determinism */
   snes->ram = ram;
@@ -245,7 +274,7 @@ void snes_writeBBus(Snes* snes, uint8_t adr, uint8_t val) {
       uint32_t wa = snes->ramAdr & 0x1ffffu;
       uint8_t old = snes->ram[wa];
       snes->ram[wa] = val;
-      wlog_addr_note_direct(wa, val, "wmdata");
+      snes_note_direct_wram_write(wa, val, "wmdata");
 #if SNESRECOMP_TRACE
       snes_trace_direct_wram_write(wa, old, val);
 #endif
@@ -301,6 +330,8 @@ static uint32_t snes_advance_beam(Snes *snes, uint32_t clocks, bool check_irq) {
     return 0;                      /* frozen until the pending IRQ is taken */
   while (clocks) {
     uint32_t span = 1364u - h;
+    if (check_irq && v < 225u && h < 1024u && span > 1024u - h)
+      span = 1024u - h;
     if (span > clocks) span = clocks;
 
     /* Automatic joypad polling begins at vblank and keeps HVBJOY.0 asserted
@@ -352,11 +383,15 @@ static uint32_t snes_advance_beam(Snes *snes, uint32_t clocks, bool check_irq) {
     h += span;
     clocks -= span;
     consumed += span;
+    if (check_irq && v < 225u && h == 1024u)
+      dma_doHdma(snes->dma);
     if (h >= 1364u) {
       h = 0;
       v++;
       if (v >= 262u) {
         v = 0;
+        if (check_irq)
+          dma_initHdma(snes->dma);
         /* End of field. Armed the whole way round and nothing latched means
          * the beam swept past the target without firing — a LOST interrupt,
          * not a pending one. */
@@ -691,7 +726,6 @@ void snes_writeReg(Snes* snes, uint16_t adr, uint8_t val) {
        * gundamwing-parity-root-cause. HDMA stays uncharged here (per-line,
        * far smaller; out of scope for this fix). */
       {
-        extern CpuState g_cpu;
         uint64_t dma_master = 12;
         for (int ch = 0; ch < 8; ch++) {
           if (val & (1 << ch)) {
@@ -700,8 +734,7 @@ void snes_writeReg(Snes* snes, uint16_t adr, uint8_t val) {
             dma_master += 8 + (uint64_t)n * 8;
           }
         }
-        g_cpu.master_cycles += dma_master;
-        snes_sync_master_clock(snes, g_cpu.master_cycles);
+        snes_charge_master_cycles(snes, dma_master);
       }
       dma_startDma(snes->dma, val, false);
       while (dma_cycle(snes->dma)) {}
@@ -754,7 +787,7 @@ void snes_write(Snes* snes, uint32_t adr, uint8_t val) {
     uint32_t addr = ((bank & 1) << 16) | adr;
     uint8_t old = snes->ram[addr];
     snes->ram[addr] = val; // ram
-    wlog_addr_note_direct(addr, val, "snes_write");
+    snes_note_direct_wram_write(addr, val, "snes_write");
 #if SNESRECOMP_TRACE
     snes_trace_direct_wram_write(addr, old, val);
 #endif
@@ -767,7 +800,7 @@ void snes_write(Snes* snes, uint32_t adr, uint8_t val) {
     if(adr < 0x2000) {
       uint8_t old = snes->ram[adr];
       snes->ram[adr] = val; // ram mirror
-      wlog_addr_note_direct((uint32_t)adr, val, "snes_write_mirror");
+      snes_note_direct_wram_write((uint32_t)adr, val, "snes_write_mirror");
 #if SNESRECOMP_TRACE
       snes_trace_direct_wram_write((uint32_t)adr, old, val);
 #endif
