@@ -1500,7 +1500,7 @@ static char s_frange_dir[400];
 typedef struct DebugPpuHostState {
     uint8_t *render_buffer;
     uint32_t render_pitch, render_flags;
-    uint8_t extra_left_cur, extra_right_cur, extra_left_right;
+    uint16_t extra_left_cur, extra_right_cur, extra_left_right;
     uint8_t extra_bottom_cur;
     PpuWidescreenLineEnhancer *enhancer;
     void *enhancer_context;
