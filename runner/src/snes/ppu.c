@@ -129,8 +129,13 @@ bool PpuSetOverlayCapture(Ppu *ppu, PpuOverlaySource source,
   capture->y0 = (int16_t)y0;
   capture->y1 = (int16_t)y1;
   capture->flags = flags & kPpuOverlayFlag_RemoveFromGame;
-  capture->oamFirst = 0;
-  capture->oamCount = 0;
+  if (source == kPpuOverlaySource_Obj) {
+    capture->oamFirst = 0;
+    capture->oamCount = 128;
+  } else {
+    capture->oamFirst = 0;
+    capture->oamCount = 0;
+  }
   return true;
 }
 

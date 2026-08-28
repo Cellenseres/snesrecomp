@@ -115,6 +115,15 @@ static void render_one_line(Ppu *ppu) {
     ppu_runLine(ppu, 1);
 }
 
+static unsigned count_argb_pixels(const uint32_t *pixels, size_t count) {
+    unsigned nonzero = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (pixels[i] != 0)
+            nonzero++;
+    }
+    return nonzero;
+}
+
 int main(void) {
     enum { kPitch = kPpuXPixels * 4 };
     uint8_t pixels[kPitch];
@@ -189,6 +198,63 @@ int main(void) {
                           "Mode 2 half-color subscreen keeps authentic columns with extra space");
         failures += check(wide_pixels[kExtra] != 0,
                           "Mode 2 half-color subscreen draws widened first authentic column");
+    }
+
+    /* An armed OBJ overlay captures all OAM slots by default. Hosts may still
+     * narrow the slot range explicitly, but the default should not silently
+     * export an empty surface. */
+    {
+        uint32_t frame_pixels[kPpuBufWidth] = {0};
+        uint32_t obj_pixels[kPpuXPixels] = {0};
+
+        ppu_reset(ppu);
+        PpuBeginDrawing(ppu, (uint8_t *)frame_pixels,
+                        sizeof(uint32_t) * kPpuBufWidth,
+                        kPpuRenderFlags_NewRenderer);
+        failures += check(PpuBindOverlaySurface(
+                              ppu, kPpuOverlaySource_Obj,
+                              (uint8_t *)obj_pixels,
+                              sizeof(uint32_t) * kPpuXPixels),
+                          "OBJ overlay surface binds");
+        failures += check(PpuSetOverlayCapture(
+                              ppu, kPpuOverlaySource_Obj, 0, 0, 8, 1,
+                              kPpuOverlayFlag_RemoveFromGame),
+                          "OBJ overlay capture arms");
+        setup_one_sprite_line(ppu, 0);
+        ppu_runLine(ppu, 0);
+        ppu_runLine(ppu, 1);
+        failures += check(count_argb_pixels(obj_pixels, 8) == 8,
+                          "default OBJ capture exports selected pixels");
+        failures += check((ppu->objBuffer.data[kPpuExtraLeftRight] & 0xff) == 0,
+                          "RemoveFromGame drops captured OBJ from frame");
+
+        memset(frame_pixels, 0, sizeof frame_pixels);
+        memset(obj_pixels, 0, sizeof obj_pixels);
+        ppu_reset(ppu);
+        PpuBeginDrawing(ppu, (uint8_t *)frame_pixels,
+                        sizeof(uint32_t) * kPpuBufWidth,
+                        kPpuRenderFlags_NewRenderer);
+        failures += check(PpuBindOverlaySurface(
+                              ppu, kPpuOverlaySource_Obj,
+                              (uint8_t *)obj_pixels,
+                              sizeof(uint32_t) * kPpuXPixels),
+                          "OBJ overlay surface rebinds");
+        failures += check(PpuSetOverlayCapture(
+                              ppu, kPpuOverlaySource_Obj, 0, 0, 8, 1,
+                              kPpuOverlayFlag_RemoveFromGame),
+                          "OBJ overlay capture rearms");
+        failures += check(PpuSetOverlayOamRange(ppu, 1, 1),
+                          "OBJ overlay range narrows capture");
+        setup_one_sprite_line(ppu, 0);
+        ppu_runLine(ppu, 0);
+        ppu_runLine(ppu, 1);
+        failures += check(count_argb_pixels(obj_pixels, 8) == 0,
+                          "narrowed OBJ capture excludes other slots");
+        failures += check((ppu->objBuffer.data[kPpuExtraLeftRight] & 0xff) != 0,
+                          "excluded OBJ remains in frame");
+        failures += check(PpuBindOverlaySurface(
+                              ppu, kPpuOverlaySource_Obj, NULL, 0),
+                          "OBJ overlay surface unbinds");
     }
 
     /* Existing line-enhancer users rely on BG1 staying inside its authentic
