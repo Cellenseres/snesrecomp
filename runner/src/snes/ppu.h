@@ -31,9 +31,9 @@ enum {
   // Maximum widescreen expansion *per side*, baked into the priority-buffer
   // capacity. This is a compile-time ceiling only; the actual extra columns
   // rendered each frame are the runtime ppu->extraLeftCur/extraRightCur, which
-  // default to 0 (authentic 256-wide output). 96 per side allows up to a
-  // 448-pixel internal width, comfortably past 16:9 at 224 lines.
-  kPpuExtraLeftRight = 96,
+  // default to 0 (authentic 256-wide output). 272 per side allows up to an
+  // 800-pixel internal width, matching Star Fox Enhanced's 32:9 mode.
+  kPpuExtraLeftRight = 272,
   // Full internal width of the priority buffers (logical 256 + both borders).
   kPpuBufWidth = kPpuXPixels + kPpuExtraLeftRight * 2,
   // Split-screen games can assign distinct anchor layouts to each viewport.
@@ -182,7 +182,8 @@ struct Ppu {
   // pixel buffer (xbgr)
   // times 2 for even and odd frame
 
-  uint8_t extraLeftCur, extraRightCur, extraLeftRight, extraBottomCur;
+  uint16_t extraLeftCur, extraRightCur, extraLeftRight;
+  uint8_t extraBottomCur;
   // Widescreen BG3 HUD split (see PpuSetWidescreenHudSplit). 0 height = off.
   uint8_t wsHudSplitHeight, wsHudLeftEnd, wsHudRightStart;
   // Widescreen HUD OAM anchor (see PpuSetWsHudOamShiftRange): an OAM slot
@@ -454,12 +455,12 @@ bool PpuSetOverlayOamRange(Ppu *ppu, uint8_t first, uint8_t count);
 // kPpuExtraLeftRight). 0 restores authentic 256-wide rendering. The internal
 // render width becomes 256 + 2*extra. Drives the dormant extraLeftCur/
 // extraRightCur/extraLeftRight machinery used by the line renderer.
-void PpuSetExtraSpace(Ppu *ppu, uint8_t extra);
+void PpuSetExtraSpace(Ppu *ppu, uint16_t extra);
 
 // Render authentic 256-wide content centered within a `budget`-per-side wider
 // framebuffer (no border columns drawn). For bounded screens; caller blacks
 // out the side margins to pillarbox.
-void PpuSetExtraSpaceCentered(Ppu *ppu, uint8_t budget);
+void PpuSetExtraSpaceCentered(Ppu *ppu, uint16_t budget);
 
 // Asymmetric per-side widescreen margin (the snesrev/zelda3 model, see
 // attribution in IMPROVEMENTS.md). The centering budget (extraLeftRight) must

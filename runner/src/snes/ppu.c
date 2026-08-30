@@ -183,7 +183,7 @@ int PpuWsExtraOverride(void) {
   return s_ov;
 }
 
-void PpuSetExtraSpace(Ppu *ppu, uint8_t extra) {
+void PpuSetExtraSpace(Ppu *ppu, uint16_t extra) {
   if (extra > kPpuExtraLeftRight)
     extra = kPpuExtraLeftRight;
   // Symmetric border: equal columns added on each side. extraLeftRight is the
@@ -195,7 +195,7 @@ void PpuSetExtraSpace(Ppu *ppu, uint8_t extra) {
   PpuResetLayerPolicies(ppu);
 }
 
-void PpuSetExtraSpaceCentered(Ppu *ppu, uint8_t budget) {
+void PpuSetExtraSpaceCentered(Ppu *ppu, uint16_t budget) {
   if (budget > kPpuExtraLeftRight)
     budget = kPpuExtraLeftRight;
   // Render only the authentic 256 columns but keep the centering budget so the
@@ -214,8 +214,8 @@ void PpuSetExtraSideSpace(Ppu *ppu, int left, int right, int bottom) {
   // the line renderer's window edges stay inside the priority buffers, bottom
   // clamps to the 16px overscan band. See ppu.h for the symmetric-vs-dynamic
   // distinction.
-  ppu->extraLeftCur = (uint8_t)IntMin(IntMax(left, 0), ppu->extraLeftRight);
-  ppu->extraRightCur = (uint8_t)IntMin(IntMax(right, 0), ppu->extraLeftRight);
+  ppu->extraLeftCur = (uint16_t)IntMin(IntMax(left, 0), ppu->extraLeftRight);
+  ppu->extraRightCur = (uint16_t)IntMin(IntMax(right, 0), ppu->extraLeftRight);
   ppu->extraBottomCur = (uint8_t)IntMin(IntMax(bottom, 0), 16);
 }
 
