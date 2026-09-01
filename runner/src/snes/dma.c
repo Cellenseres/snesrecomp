@@ -389,10 +389,10 @@ void dma_startDma(Dma* dma, uint8_t val, bool hdma) {
         sdd1_dma_init(dma->snes->cart->sdd1, i,
                       ((uint32_t)ch->aBank << 16) | ch->aAdr, ch->size);
 #if defined(SNESRECOMP_TRACE) && SNESRECOMP_TRACE
-        if (sdd1_dma_active(dma->snes->cart->sdd1, i)) {
+        if (dma_debug_enabled() && sdd1_dma_active(dma->snes->cart->sdd1, i)) {
           fprintf(stderr, "[sdd1] DMA session armed ch=%d src=%06x size=%u\n",
                   i, ((uint32_t)ch->aBank << 16) | ch->aAdr, ch->size);
-        } else {
+        } else if (dma_debug_enabled()) {
           fprintf(stderr, "[sdd1] DMA arm REJECTED ch=%d src=%06x size=%u\n",
                   i, ((uint32_t)ch->aBank << 16) | ch->aAdr, ch->size);
         }
