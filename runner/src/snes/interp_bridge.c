@@ -132,6 +132,13 @@ static int s_interp_bus_timing_active;
 typedef struct BridgeDynamicValue { uint32_t address; uint8_t value, valid; } BridgeDynamicValue;
 static BridgeDynamicValue s_bridge_dynamic_values[64];
 
+void interp_bridge_reset_dynamic_cache(void) {
+    memset(s_bridge_dynamic_values, 0, sizeof(s_bridge_dynamic_values));
+    s_interp_continuous_read_epoch = 0;
+    s_interp_dynamic_progress_epoch = 0;
+    g_interp_bridge_write_epoch = 0;
+}
+
 /* Match Recompiler/snes_cycles.py::region_speed. During an interpreted
  * instruction the callbacks see every real bus transfer (opcode/operand
  * fetches, data, stack and vectors), so charging those addresses directly and
@@ -477,6 +484,7 @@ int rtl_aot_node_denied(uint32 pc24) {
 
 int interp_bridge_in_lle_scheduler(void) { return s_lle_sched_depth > 0; }
 uint32 interp_bridge_lle_resume_pc(void) { return s_lle_resume_pc24; }
+void interp_bridge_set_lle_resume_pc(uint32_t pc) { s_lle_resume_pc24 = pc; }
 
 int interp_bridge_lle_took_wai(void) {
     const int v = s_lle_wai_yield;
@@ -903,6 +911,11 @@ static int _interp_run_core(CpuState *cpu, uint32_t entry_pc24,
      * the bus-timing window (s_interp_bus_timing_active), so they never
      * contributed to master_cycles. */
     static int s_poll_gate = -1;
+    static int s_d9ff = -1;
+    if (s_d9ff < 0) {
+        const char *_e = getenv("SNESRECOMP_NO_D9FF");
+        s_d9ff = (_e && _e[0] && _e[0] != '0') ? 0 : 1;
+    }
     if (s_poll_gate < 0) {
         const char *_e = getenv("SNESRECOMP_NO_POLLGATE");
         s_poll_gate = (_e && _e[0] && _e[0] != '0') ? 0 : 1;
@@ -975,6 +988,101 @@ static int _interp_run_core(CpuState *cpu, uint32_t entry_pc24,
             bridge_apu_flush(cpu);
             return 1;
         }
+        /* Star Ocean battle $00D9 work-wait specialization. This does not skip
+         * the wait; it executes the LDA $00D9 / BEQ loop with the same master
+         * timing and IRQ/deadline sampling, but avoids the full interpreter bus
+         * dispatch overhead in the battle vIRQ case. */
+        if (s_d9ff && auto_quiescent && g_snes && !in.i &&
+            !s_interp_bus_timing_active && in.mf && !in.e && !in.dp &&
+            in.k == 0xC0u && (in.pc == 0x84B2u || in.pc == 0x84B4u) &&
+            g_snes->vIrqEnabled && g_snes->vTimer == 216u) {
+            static int s_d9_bytes_ok = -1;
+            if (s_d9_bytes_ok < 0) {
+                s_d9_bytes_ok =
+                    bridge_bus_read(cpu, 0xC084B2u) == 0xA5u &&
+                    bridge_bus_read(cpu, 0xC084B3u) == 0xD9u &&
+                    bridge_bus_read(cpu, 0xC084B4u) == 0xF0u &&
+                    bridge_bus_read(cpu, 0xC084B5u) == 0xFCu;
+            }
+            if (s_d9_bytes_ok) {
+                for (;;) {
+                    if (auto_quiescent && !in.i && g_snes && g_snes->inIrq) {
+                        s_lle_resume_pc24 = ((uint32_t)in.k << 16) | in.pc;
+                        sync_interp_to_cpu(&in, cpu);
+                        bridge_apu_flush(cpu);
+                        return 1;
+                    }
+                    if (auto_quiescent && s_lle_master_deadline &&
+                        cpu->master_cycles >= s_lle_master_deadline) {
+                        s_lle_resume_pc24 = ((uint32_t)in.k << 16) | in.pc;
+                        sync_interp_to_cpu(&in, cpu);
+                        bridge_apu_flush(cpu);
+                        return 1;
+                    }
+                    if (in.pc == 0x84B4u) {
+                        if (in.z) {
+                            cpu->cycles += 3u;
+                            cpu->master_cycles += 18u;
+                            in.pc = 0x84B2u;
+                        } else {
+                            cpu->cycles += 2u;
+                            cpu->master_cycles += 12u;
+                            in.pc = 0x84B5u;
+                        }
+                        if (g_snes) snes_sync_master_clock(g_snes, cpu->master_cycles);
+                        if (g_snes && g_snes->cart)
+                            cart_sync_coprocessors(g_snes->cart, cpu->master_cycles);
+                        cpu->coprocessor_master_cycles = cpu->master_cycles;
+                        if (in.pc == 0x84B5u) break;
+                        continue;
+                    }
+
+                    cpu->cycles += 3u;
+                    cpu->master_cycles += 18u;
+                    {
+                        const uint8_t v = (uint8_t)cpu->ram[0x00D9u];
+                        in.a = (uint16_t)((in.a & 0xFF00u) | v);
+                        in.z = (v == 0);
+                        in.n = (v & 0x80u) != 0;
+                    }
+                    if (g_snes) snes_sync_master_clock(g_snes, cpu->master_cycles);
+                    if (g_snes && g_snes->cart)
+                        cart_sync_coprocessors(g_snes->cart, cpu->master_cycles);
+                    cpu->coprocessor_master_cycles = cpu->master_cycles;
+                    if (auto_quiescent && !in.i && g_snes && g_snes->inIrq) {
+                        s_lle_resume_pc24 = 0xC084B4u;
+                        sync_interp_to_cpu(&in, cpu);
+                        bridge_apu_flush(cpu);
+                        return 1;
+                    }
+                    if (auto_quiescent && s_lle_master_deadline &&
+                        cpu->master_cycles >= s_lle_master_deadline) {
+                        s_lle_resume_pc24 = 0xC084B4u;
+                        sync_interp_to_cpu(&in, cpu);
+                        bridge_apu_flush(cpu);
+                        return 1;
+                    }
+                    if (in.z) {
+                        cpu->cycles += 3u;
+                        cpu->master_cycles += 18u;
+                        if (g_snes) snes_sync_master_clock(g_snes, cpu->master_cycles);
+                        if (g_snes && g_snes->cart)
+                            cart_sync_coprocessors(g_snes->cart, cpu->master_cycles);
+                        cpu->coprocessor_master_cycles = cpu->master_cycles;
+                    } else {
+                        cpu->cycles += 2u;
+                        cpu->master_cycles += 12u;
+                        in.pc = 0x84B5u;
+                        if (g_snes) snes_sync_master_clock(g_snes, cpu->master_cycles);
+                        if (g_snes && g_snes->cart)
+                            cart_sync_coprocessors(g_snes->cart, cpu->master_cycles);
+                        cpu->coprocessor_master_cycles = cpu->master_cycles;
+                        break;
+                    }
+                }
+                continue;
+            }
+        }
         /* --- Star Ocean vblank-spin fast-forward ---
          * The game has several copies of the same beam-wait routine: the
          * main loop ($C8:F40F/F414/F425/F42A), battle engine ($CC:0538/3D/4E/53),
@@ -1018,7 +1126,9 @@ static int _interp_run_core(CpuState *cpu, uint32_t entry_pc24,
                * Added 20260830: game ground-truth profile showed this spin
                * at ~57% of the field's interpreted opcodes (PC-watch:
                * $C20B87/$C20B8A), with NO guard covering it. */
-              || pc_before == 0xC20B82u || pc_before == 0xC20B87u))) {
+              || pc_before == 0xC20B82u || pc_before == 0xC20B87u
+              || pc_before == 0xC0849Eu || pc_before == 0xC084A1u
+              || pc_before == 0xC084A3u || pc_before == 0xC084A6u))) {
             static int s_vff_ok = -1;
             static int s_vff_log = -1;
             if (s_vff_ok < 0) {
@@ -1075,6 +1185,17 @@ static int _interp_run_core(CpuState *cpu, uint32_t entry_pc24,
                                 if (d >= step)
                                     target = cpu->master_cycles +
                                              step * ((d + step - 1u) / step);
+                            } else {
+                                const uint64_t trig =
+                                    (uint64_t)g_snes->vTimer * 1364u;
+                                const uint64_t pos =
+                                    cpu->master_cycles % 357368u;
+                                if (trig > pos) {
+                                    const uint64_t d = trig - pos;
+                                    const uint64_t k = (d - 1u) / step;
+                                    if (k >= 1u)
+                                        target = cpu->master_cycles + step * k;
+                                }
                             }
                         } else if (is_bmi && v >= 225u && v <= 261u) {
                             if (!(g_snes->vIrqEnabled && g_snes->vTimer >= v &&

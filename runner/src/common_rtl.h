@@ -49,6 +49,8 @@ extern uint64_t g_apu_last_sync_master;
  * Interpreter fallback must not also add its legacy relative catch-up for the
  * same elapsed master cycles. */
 bool rtl_apu_frame_timeline_active(void);
+void rtl_apu_snapshot_pacing(uint64_t *frame_start_master, uint8_t *frame_time_valid);
+void rtl_apu_restore_pacing(uint64_t frame_start_master, uint8_t frame_time_valid);
 void rtl_accumulate_apu_catchup(void);
 /* Caller holds RtlApuLock. Before the first frame, retain bootstrap synthetic
  * pacing; afterward synchronize reads to the authoritative guest timestamp. */
