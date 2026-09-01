@@ -146,8 +146,9 @@ uint8_t dma_read(Dma* dma, uint16_t adr) {
 
 void dma_write(Dma* dma, uint16_t adr, uint8_t val) {
 #if defined(SNESRECOMP_TRACE) && SNESRECOMP_TRACE
-  fprintf(stderr, "[dma] write $43%02x=%02x (ch=%d)\n", adr & 0xff, val,
-          (adr & 0x70) >> 4);
+  if (dma_debug_enabled())
+    fprintf(stderr, "[dma] write $43%02x=%02x (ch=%d)\n", adr & 0xff, val,
+            (adr & 0x70) >> 4);
 #endif
   uint8_t c = (adr & 0x70) >> 4;
   switch(adr & 0xf) {
