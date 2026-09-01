@@ -12,6 +12,8 @@
 #include "sa1.h"
 #include "sdd1.h"
 
+extern uint32_t g_interp816_cur_pc;
+
 static uint8_t cart_readLorom(Cart* cart, uint8_t bank, uint16_t adr);
 static void cart_writeLorom(Cart* cart, uint8_t bank, uint16_t adr, uint8_t val);
 static uint8_t cart_readHirom(Cart* cart, uint8_t bank, uint16_t adr);
@@ -100,12 +102,11 @@ void cart_load(Cart* cart, int type, uint8_t* rom, int romSize, int ramSize) {
     cart->dsp1 = dsp1_create();
     (void)dsp1_load_firmware(cart->dsp1, NULL);
   }
+  if (type == CART_SDD1)
+    cart->sdd1 = sdd1_create(cart->rom, cart->romSize, cart->ram, cart->ramSize);
   if (type == CART_SA1)
     cart->sa1 = sa1_create(cart->rom, cart->romSize,
                            cart->ram, cart->ramSize);
-  if (type == CART_SDD1)
-    cart->sdd1 = sdd1_create(cart->rom, cart->romSize,
-                             cart->ram, cart->ramSize);
 }
 
 void cart_sync_coprocessors(Cart *cart, uint64_t master_clock) {
@@ -137,6 +138,7 @@ static uint64_t cart_master_clock(const Cart *cart) {
 uint8_t *cart_getRomPtr(Cart *cart, uint8_t bank, uint16_t adr) {
   if (!cart || !cart->rom || cart->romSize == 0) return NULL;
   if (bank == 0x7e || bank == 0x7f) return NULL;
+  /* Resolve the linear offset for the caller (SDD1 MMC path computes its own) */
   uint32_t off;
   switch (cart->type) {
     case CART_LOROM: {
@@ -171,7 +173,7 @@ uint8_t *cart_getRomPtr(Cart *cart, uint8_t bank, uint16_t adr) {
       off = ((uint32_t)(canonical & 0x3f) << 16) | adr;
       break;
     }
-    case CART_CX4: {
+case CART_CX4: {
       /* Cx4 carts are LoROM. The $6000-$7FFF window in banks $00-$3F/$80-$BF
        * belongs to the coprocessor, not the ROM — return NULL so callers route
        * it through cart_read/cart_write. */
@@ -181,16 +183,40 @@ uint8_t *cart_getRomPtr(Cart *cart, uint8_t bank, uint16_t adr) {
       break;
     }
     case CART_SDD1: {
-      if (cart_is_sdd1_window(cart, bank, adr))
+      /* S-DD1 carts are LoROM. The $4800-$4807 window in banks $00-$3F/$80-$BF
+       * belongs to the decompression chip, not the ROM — return NULL so callers
+       * route it through cart_read/cart_write. */
+      if (bank >= 0xC0 && bank <= 0xFF) {
+        /* MMC banking for banks C0-FF via $4804-$4807. Resolve to the linear
+         * ROM byte backing this address and return a pointer to it (RomPtr and
+         * cart_readLorom dereference the result); NULL when disabled. */
+        if (cart->sdd1) {
+          uint32_t off = sdd1_mmc_offset(cart->sdd1, ((uint32_t)bank << 16) | adr);
+          if (off != UINT32_MAX) {
+#if defined(SNESRECOMP_TRACE) && SNESRECOMP_TRACE
+            static int gpr_trace_on = -1;
+            if (gpr_trace_on < 0) gpr_trace_on = getenv("SNESRECOMP_ROM_PTR_TRACE") ? 1 : 0;
+            if (gpr_trace_on && off >= 0x5E0000 && off < 0x600000) {
+              static unsigned long n;
+              if (n++ < 2000000)
+                fprintf(stderr, "[romptr] pc=%06X bank=%02X adr=%04X off=%06X val=%02X\n",
+                        (unsigned)g_interp816_cur_pc, bank, adr, off, cart->rom[off % cart->romSize]);
+            }
+#endif
+            return &cart->rom[off % cart->romSize];
+          }
+        }
         return NULL;
-      if (bank >= 0xc0) {
-        uint32_t mmc_off = sdd1_mmc_offset(cart->sdd1,
-            ((uint32_t)bank << 16) | adr);
-        return mmc_off == UINT32_MAX ? NULL : &cart->rom[mmc_off % cart->romSize];
       }
-      uint32_t lorom_off = sdd1_lorom_window_offset(cart->sdd1, bank, adr);
-      if (lorom_off != UINT32_MAX)
-        return &cart->rom[lorom_off % cart->romSize];
+      /* Banks $00-$3F/$80-$BF: standard LoROM mapping with the S-DD1 bit-7
+       * MMC override from bsnes's mcuRead (banks 20-3F alias the first 1MB
+       * when r4805 & 0x80, banks A0-BF when r4807 & 0x80). */
+      if (cart->sdd1) {
+        uint32_t off2 = sdd1_lorom_window_offset(cart->sdd1, bank, adr);
+        if (off2 != UINT32_MAX)
+          return &cart->rom[off2 % cart->romSize];
+      }
+      /* Legacy LoROM mapping for the remaining banks (40-7F, or no chip) */
       uint8_t canonical = bank & 0x7f;
       if (adr < 0x8000 && canonical < 0x40) return NULL;
       off = ((uint32_t)canonical << 15) | (adr & 0x7fff);
@@ -221,7 +247,7 @@ uint8_t cart_read(Cart* cart, uint8_t bank, uint16_t adr) {
       return cart->type == CART_DSP1_HIROM
           ? cart_readHirom(cart, bank, adr)
           : cart_readLorom(cart, bank, adr);
-    case CART_CX4:
+case CART_CX4:
       /* Catch the DSP up before observing it: unlike a command-level model,
        * an instruction-level Cx4 produces results as its clock advances. */
       cart_sync_coprocessors(cart, cart_master_clock(cart));
@@ -237,11 +263,21 @@ uint8_t cart_read(Cart* cart, uint8_t bank, uint16_t adr) {
       cart_sync_coprocessors(cart, cart_master_clock(cart));
       if (cart_is_sdd1_window(cart, bank, adr))
         return sdd1_read(cart->sdd1, adr);
+      /* S-DD1 CPU-read decompression: when the CPU reads from $C0-$FF:$8000-$FFFF,
+       * check if an active S-DD1 channel matches this address and return
+       * decompressed data (bsnes SDD1::read emulation). */
       if (bank >= 0xc0 && adr >= 0x8000 && cart->sdd1) {
-        uint8_t data;
-        if (sdd1_cpu_read(cart->sdd1, ((uint32_t)bank << 16) | adr, &data))
-          return data;
+        uint8_t cpu_data;
+        uint32_t addr24 = ((uint32_t)bank << 16) | adr;
+        if (sdd1_cpu_read(cart->sdd1, addr24, &cpu_data))
+          return cpu_data;
       }
+      /* S-DD1 MMC window: every read from banks $C0-$FF goes through the
+       * MMC pages ($4804-$4807) exactly like bsnes SDD1::read, regardless of
+       * whether decompression is active. The plain LoROM mapping is WRONG here
+       * for addresses below $8000 (e.g. bridge palette DMA source FD:5419
+       * resolves to MMC offset $3D5419, not LoROM $1ED419) — using it corrupts
+       * CGRAM palettes loaded from these banks. */
       if (bank >= 0xc0 && cart->sdd1)
         return sdd1_mmc_read(cart->sdd1, ((uint32_t)bank << 16) | adr);
       return cart_readLorom(cart, bank, adr);
@@ -286,7 +322,7 @@ void cart_write(Cart* cart, uint8_t bank, uint16_t adr, uint8_t val) {
       else
         cart_writeLorom(cart, bank, adr, val);
       break;
-    case CART_CX4:
+case CART_CX4:
       cart_sync_coprocessors(cart, cart_master_clock(cart));
       if (cart_is_cx4_window(cart, bank, adr))
         cx4_write(cart->cx4, adr, val);
@@ -323,7 +359,9 @@ static uint8_t cart_readLorom(Cart* cart, uint8_t bank, uint16_t adr) {
     return cart->ram[(((bank & 0xf) << 15) | adr) & (cart->ramSize - 1)];
   }
   uint8_t *rom = cart_getRomPtr(cart, bank, adr);
-  if (rom) return *rom;
+  if (rom) {
+    return *rom;
+  }
   /* Out-of-range cart read. No printf — the ring buffer is the
    * channel. cpu_trace_offrails dumps trace at hit#1 + every 64th
    * so we see the chain WITHOUT million-line stderr floods. */

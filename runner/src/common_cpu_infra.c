@@ -7,7 +7,6 @@
 #include "snes/snes.h"
 #include "snes/msu1.h"
 #include "snes/interp_bridge.h"
-#include "snes/tier2_capture.h"
 #include "util.h"
 #include "cpu_trace.h"
 #include "debug_server.h"
@@ -25,17 +24,14 @@ Cpu *g_snes_cpu;
 bool g_fail;
 const RtlGameInfo *g_rtl_game_info;
 
-/* Interp-coverage feedback manifest, written on process exit only when tier2
- * capture is enabled. The tier-2 gap recorder in the interp bridge names every
- * entry the interpreter
+/* Interp-coverage feedback manifest, written on process exit. The always-on
+ * tier-2 gap recorder in the interp bridge names every entry the interpreter
  * had to resolve at runtime; this serializes that promotion worklist (schema
  * "snesrecomp tier2 coverage v1") so tools/tier2_ingest.py can fold it back
  * into the cfg and the next regen promotes those entries to AOT — the LLE-first
- * burn-down loop. SNESRECOMP_TIER2_CAPTURE=1 enables ad-hoc developer runs,
- * and SNESRECOMP_TIER2_MANIFEST can override the unique per-run path. First
- * sightings are also flushed to an append-only JSONL journal, so earlier
- * sessions and crash-time discoveries are preserved. Disabled by default so
- * release builds do not emit artifacts. */
+ * burn-down loop. SNESRECOMP_TIER2_MANIFEST can override the unique per-run
+ * path. First sightings are also flushed to an append-only JSONL journal, so
+ * earlier sessions and crash-time discoveries are preserved. */
 static void rtl_write_tier2_coverage_manifest(void) {
   Tier2CoverageWriteDefaultManifest(g_rtl_game_info ? g_rtl_game_info->title
                                                      : "unknown");
@@ -49,25 +45,19 @@ const char *rtl_game_title(void) {
                                                      : "unknown";
 }
 
-static void rtl_snes_charge_master_cycles(Snes *snes, uint64_t clocks) {
-  g_cpu.master_cycles += clocks;
-  snes_sync_master_clock(snes, g_cpu.master_cycles);
-}
-
 void RtlRegisterGame(const RtlGameInfo *info) {
   g_rtl_game_info = info;
-  tier2_capture_set_default_enabled(info && info->tier2_capture);
   /* Arm MSU-1 from the environment for every game, with no per-game
    * wiring. Inert (default-OFF) unless SNESRECOMP_MSU1 is set. A game's
    * main.c may additionally call msu1_set_rom_path() to enable the
    * "auto" base-from-ROM-name mode. */
   msu1_init();
-  /* Harvest the interp-coverage manifest on exit only when the game or
-   * developer environment opts in. Registered once regardless of how many times
-   * a game re-registers (e.g. a reset path). */
+  /* Harvest the interp-coverage manifest on exit for every game, same
+   * no-per-game-wiring policy as MSU-1 above. Registered once regardless of
+   * how many times a game re-registers (e.g. a reset path). */
   {
     static int coverage_atexit_registered = 0;
-    if (tier2_capture_enabled() && !coverage_atexit_registered) {
+    if (!coverage_atexit_registered) {
       coverage_atexit_registered = 1;
       atexit(rtl_write_tier2_coverage_manifest);
     }
@@ -350,7 +340,100 @@ static int wlog_func_matches(const char *name) {
 
 void RecompStackDump(void);
 
+/* ── AOT host-time attribution sampler (cosim-only, env SNESRECOMP_AOT_PROF=1) ──
+ * Hooks RecompStackPush/Pop to attribute every host millisecond to the AOT
+ * function on top of the recomp stack. The frame end (called from the harness)
+ * attributes the tail, dumps the frame's top-N to stderr (windowed with
+ * SNESRECOMP_AOT_PROF_FROM/_TO), and resets the per-frame accumulators. This
+ * is how we see which generated function eats a whole guest frame (e.g. the
+ * ~8.4s boot frame, which runs 100% AOT / 0 interpreter steps). Compiles to
+ * nothing outside the cosim profile build. */
+#ifdef SNESRECOMP_INTERP_PROFILE
+#define AOTPROF_CAP 4096
+typedef struct { const char *name; double ms_frame; uint64_t calls_frame; } AotProfEntry;
+static AotProfEntry g_aotprof[AOTPROF_CAP];
+static clock_t g_aotprof_last_t;
+static int g_aotprof_on = -1;
+static long g_aotprof_from, g_aotprof_to;
+
+static void aotprof_latch_env(void) {
+  const char *e = getenv("SNESRECOMP_AOT_PROF");
+  g_aotprof_on = (e && e[0] && e[0] != '0') ? 1 : 0;
+  const char *f = getenv("SNESRECOMP_AOT_PROF_FROM");
+  g_aotprof_from = f ? atol(f) : 0;
+  const char *t = getenv("SNESRECOMP_AOT_PROF_TO");
+  g_aotprof_to = t ? atol(t) : 100000000L;
+  g_aotprof_last_t = clock();
+}
+
+static AotProfEntry *aotprof_find(const char *name) {
+  unsigned h = (unsigned)(((uintptr_t)name >> 4) & (AOTPROF_CAP - 1));
+  for (int i = 0; i < AOTPROF_CAP; i++) {
+    unsigned idx = (h + i) & (AOTPROF_CAP - 1);
+    if (g_aotprof[idx].name == name) return &g_aotprof[idx];
+    if (g_aotprof[idx].name == NULL) { g_aotprof[idx].name = name; return &g_aotprof[idx]; }
+  }
+  return NULL;
+}
+
+static void aotprof_attr(const char *name, double dms) {
+  if (dms <= 0.0) return;
+  AotProfEntry *e = aotprof_find(name ? name : "(root)");
+  if (!e) return;
+  e->ms_frame += dms;
+  e->calls_frame++;
+}
+
+void aot_prof_frame_end(int frame) {
+  if (g_aotprof_on < 0) aotprof_latch_env();
+  if (g_aotprof_on != 1) return;
+  {
+    clock_t now = clock();
+    double d = 1000.0 * (double)(now - g_aotprof_last_t) / CLOCKS_PER_SEC;
+    const char *top = g_recomp_stack_top > 0 ? g_recomp_stack[g_recomp_stack_top - 1] : "(root)";
+    aotprof_attr(top, d);
+    g_aotprof_last_t = now;
+  }
+  if (frame >= g_aotprof_from && frame <= g_aotprof_to) {
+    static AotProfEntry *top[32];
+    int n = 0;
+    double total = 0.0;
+    for (int i = 0; i < AOTPROF_CAP && n < 32; i++)
+      if (g_aotprof[i].name && g_aotprof[i].ms_frame > 0.05) {
+        top[n++] = &g_aotprof[i];
+        total += g_aotprof[i].ms_frame;
+      }
+    for (int a = 0; a < n; a++) {
+      int best = a;
+      for (int b = a + 1; b < n; b++)
+        if (top[b]->ms_frame > top[best]->ms_frame) best = b;
+      AotProfEntry *t = top[a]; top[a] = top[best]; top[best] = t;
+    }
+    fprintf(stderr, "[aotprof] frame %d: %.0f ms attributed, top %d:\n", frame, total, n);
+    for (int i = 0; i < n; i++)
+      fprintf(stderr, "  %8.1f ms  %7llu calls  %s\n",
+              top[i]->ms_frame, (unsigned long long)top[i]->calls_frame,
+              top[i]->name ? top[i]->name : "?");
+    fflush(stderr);
+  }
+  for (int i = 0; i < AOTPROF_CAP; i++) {
+    g_aotprof[i].ms_frame = 0.0;
+    g_aotprof[i].calls_frame = 0;
+  }
+}
+#endif /* SNESRECOMP_INTERP_PROFILE */
+
 void RecompStackPush(const char *name) {
+#ifdef SNESRECOMP_INTERP_PROFILE
+  if (g_aotprof_on < 0) aotprof_latch_env();
+  if (g_aotprof_on == 1) {
+    clock_t now = clock();
+    double d = 1000.0 * (double)(now - g_aotprof_last_t) / CLOCKS_PER_SEC;
+    const char *top = g_recomp_stack_top > 0 ? g_recomp_stack[g_recomp_stack_top - 1] : "(root)";
+    aotprof_attr(top, d);
+    g_aotprof_last_t = now;
+  }
+#endif
   if (g_recomp_stack_top < RECOMP_STACK_DEPTH) {
     int slot = g_recomp_stack_top++;
     g_recomp_stack[slot] = name;
@@ -480,6 +563,16 @@ void RecompStackBalDumpJson(FILE *f) {
 }
 
 void RecompStackPop(void) {
+#ifdef SNESRECOMP_INTERP_PROFILE
+  if (g_aotprof_on < 0) aotprof_latch_env();
+  if (g_aotprof_on == 1) {
+    clock_t now = clock();
+    double d = 1000.0 * (double)(now - g_aotprof_last_t) / CLOCKS_PER_SEC;
+    const char *fn = g_recomp_stack_top > 0 ? g_recomp_stack[g_recomp_stack_top - 1] : "(none)";
+    aotprof_attr(fn, d);
+    g_aotprof_last_t = now;
+  }
+#endif
   // Record exit BEFORE the pop so stack_depth reflects pre-pop state and
   // the function name is still the topmost entry. Defensive against
   // empty stack: the auditor must NOT consume an entry_seq it didn't push.
@@ -521,48 +614,8 @@ void WatchdogFrameStart(void) {
   g_interrupt_context_depth = 0;
 }
 
-/* ── DRAM refresh ──
- * Hardware stalls the CPU ~40 master clocks once per scanline, vblank
- * included — a ~2.9% tax on execution this runtime never paid. Unpaid, a
- * scene load completes its lag blocks early (measured 33/46/32 frames vs
- * Mesen's 36/47/35 before this and the DMA-time charge), shifting the parity
- * of the pass that spawns objects; the sprite hover (gated on the pass
- * counter) then pairs with the wrong animation phase and publishes sprite
- * tables hardware never shows.
- *
- * One watermark serves both tiers: generated code charges from
- * WatchdogCheck() per block, the interpreter from its per-opcode advance.
- * The park path (idle-spin skip) exempts its own jumps — parked time
- * displaces no work, and taxing it would drift IRQ latch points. A jump of
- * more than 4096 lines is treated as a teleport (boot, savestate load) and
- * exempted rather than charged. */
-uint64_t g_refresh_charged_upto;
-static uint64_t s_refresh_phase;
-void snes_refresh_exempt(void) { g_refresh_charged_upto = g_cpu.master_cycles; }
-void snes_refresh_charge(void) {
-  uint64_t m = g_cpu.master_cycles;
-  if (g_refresh_charged_upto == 0 || m < g_refresh_charged_upto) {
-    g_refresh_charged_upto = m;
-    return;
-  }
-  uint64_t delta = m - g_refresh_charged_upto;
-  s_refresh_phase += delta;
-  uint64_t lines = s_refresh_phase / 1364u;
-  if (lines > 4096u) {            /* teleport, not execution */
-    s_refresh_phase = 0;
-    g_refresh_charged_upto = m;
-    return;
-  }
-  if (lines) {
-    s_refresh_phase -= lines * 1364u;
-    g_cpu.master_cycles += 40u * lines;
-  }
-  g_refresh_charged_upto = g_cpu.master_cycles;
-}
-
 // Called at loop headers in generated code — detect infinite loops
 void WatchdogCheck(void) {
-  snes_refresh_charge();
 #ifdef SNES_COSIM
   /* Co-sim WRAM watchpoint (dev, env-gated): name the recompiled function that
    * writes a given low-WRAM address. WatchdogCheck runs per-block with
@@ -683,8 +736,6 @@ void WatchdogCheck(void) {
 
 Snes *SnesInit(const uint8 *data, int data_size) {
   g_snes = snes_init(g_ram);
-  snes_set_master_clock_charge_hook(rtl_snes_charge_master_cycles);
-  snes_set_wram_write_log_hook(wlog_addr_note_direct);
   cart_set_master_clock_source(g_snes->cart,
                                &g_cpu.coprocessor_master_cycles);
   g_snes_cpu = g_snes->cpu;

@@ -255,6 +255,16 @@ uint8_t apu_cpuRead(Apu* apu, uint16_t adr) {
     case 0xf7: {
       uint8_t v = apu->inPorts[adr - 0xf4];
       audio_trace_on_spc_port_read((uint8_t)(adr - 0xf4), v);
+#if defined(SNESRECOMP_TRACE) && SNESRECOMP_TRACE
+      if (getenv("SNESRECOMP_SPC_PORT_TRACE")) {
+        static unsigned long n;
+        if (n++ < 2000000)
+          fprintf(stderr, "[spcport] pc=%04X port=%d val=%02X clock=%llu q=%u\n",
+                  apu->spc->pc, adr - 0xf4, v,
+                  (unsigned long long)apu->portClock,
+                  (unsigned)(apu->portQTail - apu->portQHead));
+      }
+#endif
       return v;
     }
     case 0xf8:
@@ -350,5 +360,14 @@ void apu_cpuWrite(Apu* apu, uint16_t adr, uint8_t val) {
       break;
     }
   }
+#if defined(SNESRECOMP_TRACE) && SNESRECOMP_TRACE
+  if ((adr >= 0x0200 && adr < 0x02c0) || (adr >= 0x3900 && adr < 0x3c00)) {
+    if (getenv("SNESRECOMP_RAMWRITE_TRACE")) {
+      static unsigned long n;
+      if (n++ < 4000000)
+        fprintf(stderr, "[ramw] pc=%04X adr=%04X val=%02X\n", apu->spc->pc, adr, val);
+    }
+  }
+#endif
   apu->ram[adr] = val;
 }
