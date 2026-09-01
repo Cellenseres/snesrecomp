@@ -38,6 +38,9 @@ enum {
   kPpuBufWidth = kPpuXPixels + kPpuExtraLeftRight * 2,
   // Split-screen games can assign distinct anchor layouts to each viewport.
   kPpuWsAnchorBands = 2,
+  // Number of stopped frames tolerated after a moving unhinted OBJ reaches the
+  // left widened margin.
+  kPpuWsOamMovingGraceFrames = 4,
 };
 
 typedef uint16_t PpuZbufType;
@@ -251,6 +254,14 @@ struct Ppu {
   uint8_t wsOamLeftHint[16];
   uint8_t wsOamRightHintStrict;
   uint8_t wsOamRightHint[16];
+  /* Host-only temporal classifier for unhinted left-margin OBJ. It lets a
+   * game-authored sprite keep moving through the widened margin, then parks it
+   * again after its X stops changing for a few frames. */
+  int16_t wsOamMotionLastLine;
+  int16_t wsOamMotionX[128];
+  uint32_t wsOamMotionSig[128];
+  uint8_t wsOamMotionSeen[16];
+  uint8_t wsOamMotionGrace[128];
   uint8_t lastMosaicModulo;
   uint8_t lastBrightnessMult;
   bool lineHasSprites;
@@ -414,6 +425,7 @@ void ppu_rasterApplyLine(Ppu *ppu, int line);
 int  ppu_rasterDebugDump(char *out, int cap);
 void ppu_saveload(Ppu *ppu, SaveLoadInfo *sli);
 void PpuBeginDrawing(Ppu *ppu, uint8_t *pixels, size_t pitch, uint32_t render_flags);
+void PpuResetWidescreenOamHistory(Ppu *ppu);
 
 // Replace stale BG1 tilemap pixels in widened side margins before final
 // composition. The callback is host-only and runs independently for main and

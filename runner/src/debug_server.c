@@ -4179,6 +4179,7 @@ static void cmd_load_state(const char *args) {
         send_fmt("{\"error\":\"read failed after %zu bytes\"}", fs.total);
         return;
     }
+    PpuResetWidescreenOamHistory(g_snes->ppu);
     send_fmt("{\"ok\":true,\"bytes\":%zu,\"file\":\"%s\"}", fs.total + 8, filename);
 }
 
