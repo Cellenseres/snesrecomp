@@ -118,17 +118,6 @@ static FILE  *g_wlog_addr_fp = NULL;
 static uint16 g_wlog_addr_lo = 0xFFFF, g_wlog_addr_hi = 0x0000;
 static long   g_wlog_addr_n = 0, g_wlog_addr_cap = 2000000;
 static int    g_wlog_addr_state = 0;
-/* Optional halt-on-write: SNESRECOMP_WLOG_ADDR_HALT="OFF:MINVAL" (hex).
- * When a logged write lands a byte with value >= MINVAL at g_ram offset
- * OFF, print a loud line and exit(42) so the game's atexit post-mortem
- * dumps the trace rings ending exactly at the offending write. */
-static long   g_wlog_halt_off = -1;
-static unsigned g_wlog_halt_min = 0;
-/* Interp step-ring dump, installed by interp_bridge.c's constructor when
- * that TU is linked (small C-test binaries link cpu_state.c alone — a
- * direct extern call would break their link; PE weak symbols are a known
- * trap here, so use an explicit hook). */
-void (*g_interp_recent_dump_hook)(int n, FILE *out) = NULL;
 
 static void wlog_addr_lazy(void) {
     g_wlog_addr_inited = 1;
@@ -149,29 +138,19 @@ static void wlog_addr_lazy(void) {
     const char *c = getenv("SNESRECOMP_WLOG_ADDR_CAP");
     if (c && c[0]) g_wlog_addr_cap = strtol(c, NULL, 0);
     g_wlog_addr_state = getenv("SNESRECOMP_WLOG_STATE") != NULL;
-    const char *h = getenv("SNESRECOMP_WLOG_ADDR_HALT");
-    if (h && h[0]) {
-        unsigned hoff = 0, hmin = 0;
-        if (sscanf(h, "%x:%x", &hoff, &hmin) == 2) {
-            g_wlog_halt_off = (long)hoff;
-            g_wlog_halt_min = hmin;
-        }
-    }
 }
 
-static void wlog_addr_note_via(uint8 bank, uint16 addr, uint16 v, int width,
-                               const char *via) {
+static inline void wlog_addr_note(uint8 bank, uint16 addr, uint16 v, int width) {
     if (!g_wlog_addr_inited) wlog_addr_lazy();
     if (!g_wlog_addr_fp) return;
     if (addr < g_wlog_addr_lo || addr > g_wlog_addr_hi) return;
     if (g_wlog_addr_n++ >= g_wlog_addr_cap) return;
     extern int snes_frame_counter;
     extern const char *g_last_recomp_func;
-    fprintf(g_wlog_addr_fp, "f%-6d %02X:%04X=%0*X w%d %s%s%s",
+    fprintf(g_wlog_addr_fp, "f%-6d %02X:%04X=%0*X w%d %s",
             snes_frame_counter, bank, addr, width * 2,
             (unsigned)(v & (width == 1 ? 0xFF : 0xFFFF)), width,
-            g_last_recomp_func ? g_last_recomp_func : "?",
-            via ? " via=" : "", via ? via : "");
+            g_last_recomp_func ? g_last_recomp_func : "?");
     if (g_wlog_addr_state)
         {
         extern uint32_t g_interp_wlog_pc24;
@@ -200,44 +179,6 @@ static void wlog_addr_note_via(uint8 bank, uint16 addr, uint16 v, int width,
                 cpu_read8(&g_cpu, 0x00, (uint16)(g_cpu.D + 0x57)));
         }
     fputc('\n', g_wlog_addr_fp);
-    if (g_wlog_halt_off >= 0) {
-        int32_t off = cpu_wram_offset(bank, addr);
-        if (off >= 0) {
-            unsigned hit = 0, hv = 0;
-            if ((long)off == g_wlog_halt_off) { hv = (unsigned)(v & 0xFF); hit = 1; }
-            else if (width == 2 && (long)off + 1 == g_wlog_halt_off) { hv = (unsigned)((v >> 8) & 0xFF); hit = 1; }
-            if (hit && hv >= g_wlog_halt_min) {
-                extern int snes_frame_counter;
-                extern const char *g_last_recomp_func;
-                extern uint32_t g_interp_wlog_pc24;
-                fprintf(stderr,
-                        "[wlog_addr] HALT: write of %02X to g_ram[%04lX] at frame=%d "
-                        "func=%s IPC=%06X — exiting for post-mortem\n",
-                        hv, (unsigned long)g_wlog_halt_off, snes_frame_counter,
-                        g_last_recomp_func ? g_last_recomp_func : "?",
-                        (unsigned)(g_interp_wlog_pc24 & 0xFFFFFFu));
-                if (g_interp_recent_dump_hook)
-                    g_interp_recent_dump_hook(512, stderr);
-                fflush(NULL);
-                exit(42);
-            }
-        }
-    }
-}
-
-static inline void wlog_addr_note(uint8 bank, uint16 addr, uint16 v, int width) {
-    wlog_addr_note_via(bank, addr, v, width, NULL);
-}
-
-/* Direct-WRAM-store variant for the write paths that bypass cpu_write8/16:
- * snes_write's two WRAM stores (DMA A-bus writes land there) and the WMDATA
- * ($2180) B-bus store. Same env gate / addr filter / output as the bus hook,
- * tagged with `via` so the log distinguishes DMA-engine writes from CPU bus
- * writes. `wa` is the g_ram offset (0..0x1FFFF). */
-void wlog_addr_note_direct(uint32 wa, uint8 v, const char *via) {
-    uint8  bank = (wa >= 0x10000u) ? 0x7F : 0x7E;
-    uint16 addr = (uint16)(wa & 0xFFFFu);
-    wlog_addr_note_via(bank, addr, v, 1, via);
 }
 
 static inline void wlog_note(uint8 bank, uint16 addr, uint16 v, int width) {
@@ -334,6 +275,27 @@ static inline void cpu_pace_cycles(uint16 addr) {
  * co-sim shared APU clock (SNES_COSIM_APU_SHARED) relies on. */
 static inline void cpu_pace_cycles_word(uint16 addr) {
     cpu_pace_cycles(addr);
+}
+
+/* Master clocks for ONE bus access at a 24-bit address (region speed).
+ * Mirrors Recompiler/snes_cycles.py::region_speed exactly. The LLE
+ * (interp_bridge.c bridge_region_speed) and the AOT paced accessors below
+ * share this single C implementation so both tiers price transfers
+ * identically. */
+uint32_t cpu_region_speed(uint32_t adr) {
+    uint8_t bank = (uint8_t)(adr >> 16);
+    uint16_t a = (uint16_t)adr;
+    if (bank >= 0x40 && bank <= 0x7f) return 8;
+    if (bank >= 0xc0) return g_memsel ? 6 : 8;
+    if (a >= 0x8000) {
+        if (bank <= 0x3f) return 8;
+        return g_memsel ? 6 : 8;
+    }
+    if (a < 0x2000) return 8;
+    if (a < 0x4000) return 6;
+    if (a < 0x4200) return 12;
+    if (a < 0x6000) return 6;
+    return 8;
 }
 
 /* Optional debug — disabled in release. Set BUILD_CPU_HW_LOG=1 in the
@@ -525,11 +487,10 @@ void cpu_write8(CpuState *cpu, uint8 bank, uint16 addr, uint8 v) {
                                if (mx && mx[0]) wmax = strtol(mx, NULL, 0); }
             }
             if (wa >= 0 && wf && off == (int)wa && hits < wmax) {
-                extern int snes_frame_counter;
-                fprintf(wf, "[writewatch] f=%d $%04x = %02x (was %02x) bank=%02x addr=%04x "
-                            "by %s (m=%d x=%d) S=%04x\n",
+                extern int snes_frame_counter;                fprintf(wf, "[writewatch] f=%d $%04x = %02x (was %02x) bank=%02x addr=%04x "
+                        "by %s (m=%d x=%d) S=%04x pc=%06x\n",
                         snes_frame_counter, off, v, old, bank, addr, g_last_recomp_func,
-                        cpu->m_flag & 1, cpu->x_flag & 1, cpu->S);
+                        cpu->m_flag & 1, cpu->x_flag & 1, cpu->S, g_interp816_cur_pc);
                 fflush(wf); hits++;
             }
         }
@@ -683,6 +644,78 @@ void cpu_write16(CpuState *cpu, uint8 bank, uint16 addr, uint16 v) {
     }
     /* ROM / unmapped write: drop. */
     cpu->open_bus = (uint8)(v >> 8);
+}
+
+/* ── Region-paced AOT bus (2026-08-31) ────────────────────────────────────
+ * The LLE charges master clocks PER BUS TRANSFER at the region speed
+ * (interp_bridge.c: master = Σ region_speed + internal×6). The AOT emitter's
+ * block const covers fetch+internal cycles only; every data/stack/pointer
+ * access in generated code calls these paced variants so the AOT master
+ * advance matches the LLE exactly. The plain cpu_read8/16 / cpu_write8/16
+ * stay UNPACED because the LLE's bridge shims call them inside their own
+ * per-transfer accounting (pacing there would double-count the interp path).
+ * The 16-bit forms charge both bytes at their own regions (they can straddle
+ * a region boundary, e.g. $00:1FFF->$00:2000). */
+uint8_t cpu_read8_paced(CpuState *cpu, uint8_t bank, uint16_t addr) {
+    uint32_t _sp = cpu_region_speed(((uint32_t)bank << 16) | addr);
+    cpu->master_cycles += _sp;
+    {
+        static int _pl = -1;
+        if (_pl < 0) _pl = getenv("SNESRECOMP_PACELOG") ? 1 : 0;
+        if (_pl) {
+            extern int snes_frame_counter;
+            fprintf(stderr, "[pace] f=%d r8 b=$%02X a=$%04X sp=%u\n",
+                    snes_frame_counter, bank, addr, _sp);
+        }
+    }
+    return cpu_read8(cpu, bank, addr);
+}
+
+uint16_t cpu_read16_paced(CpuState *cpu, uint8_t bank, uint16_t addr) {
+    uint32_t _sp = cpu_region_speed(((uint32_t)bank << 16) | addr) +
+        cpu_region_speed(((uint32_t)bank << 16) | (uint16_t)(addr + 1));
+    cpu->master_cycles += _sp;
+    {
+        static int _pl = -1;
+        if (_pl < 0) _pl = getenv("SNESRECOMP_PACELOG") ? 1 : 0;
+        if (_pl) {
+            extern int snes_frame_counter;
+            fprintf(stderr, "[pace] f=%d r16 b=$%02X a=$%04X sp=%u\n",
+                    snes_frame_counter, bank, addr, _sp);
+        }
+    }
+    return cpu_read16(cpu, bank, addr);
+}
+
+void cpu_write8_paced(CpuState *cpu, uint8_t bank, uint16_t addr, uint8_t v) {
+    uint32_t _sp = cpu_region_speed(((uint32_t)bank << 16) | addr);
+    cpu->master_cycles += _sp;
+    {
+        static int _pl = -1;
+        if (_pl < 0) _pl = getenv("SNESRECOMP_PACELOG") ? 1 : 0;
+        if (_pl) {
+            extern int snes_frame_counter;
+            fprintf(stderr, "[pace] f=%d w8 b=$%02X a=$%04X sp=%u\n",
+                    snes_frame_counter, bank, addr, _sp);
+        }
+    }
+    cpu_write8(cpu, bank, addr, v);
+}
+
+void cpu_write16_paced(CpuState *cpu, uint8_t bank, uint16_t addr, uint16_t v) {
+    uint32_t _sp = cpu_region_speed(((uint32_t)bank << 16) | addr) +
+        cpu_region_speed(((uint32_t)bank << 16) | (uint16_t)(addr + 1));
+    cpu->master_cycles += _sp;
+    {
+        static int _pl = -1;
+        if (_pl < 0) _pl = getenv("SNESRECOMP_PACELOG") ? 1 : 0;
+        if (_pl) {
+            extern int snes_frame_counter;
+            fprintf(stderr, "[pace] f=%d w16 b=$%02X a=$%04X sp=%u\n",
+                    snes_frame_counter, bank, addr, _sp);
+        }
+    }
+    cpu_write16(cpu, bank, addr, v);
 }
 
 /* ── PEI-trampoline dispatch helper (2026-05-24, narrow detector) ──────
