@@ -75,6 +75,15 @@ echo "=== DMA / HDMA ==="
     -Wl,--gc-sections -o "$OUT/hdma_timing_test"
 "$OUT/hdma_timing_test"
 
+echo "=== fiber snapshot (rewindable execution position) ==="
+"$CC" -std=c11 -Wall -Wextra -Werror -O1 \
+    -D_POSIX_C_SOURCE=200809L \
+    -I "$ROOT/runner/src" -I "$ROOT/runner/src/desktop" \
+    "$ROOT/tests/host/fiber_snapshot_test.c" \
+    "$ROOT/runner/src/desktop/fiber_compat.c" \
+    -o "$OUT/fiber_snapshot_test"
+"$OUT/fiber_snapshot_test"
+
 echo "=== interpreter and bridge ==="
 "$CC" -std=c11 -Wall -Wextra -Werror -O1 \
     -D_POSIX_C_SOURCE=200809L -I "$ROOT/runner/src/snes" \

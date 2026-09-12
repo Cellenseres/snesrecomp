@@ -115,20 +115,57 @@ void DeleteFiber(void *fiber) {
 
 unsigned long GetLastError(void) { return 0; }
 
+/* A fiber here is a parked pthread: its stack belongs to the kernel and its
+ * registers live in a thread that is blocked on a condvar. Nothing this file
+ * can copy out and put back. */
+int    FiberSnapshotSupported(void) { return 0; }
+size_t FiberSnapshotBound(void *fiber) { (void)fiber; return 0; }
+size_t FiberSnapshotSave(void *fiber, void *out, size_t capacity) {
+    (void)fiber; (void)out; (void)capacity; return 0;
+}
+int    FiberSnapshotLoad(void *fiber, const void *in, size_t size) {
+    (void)fiber; (void)in; (void)size; return 0;
+}
+
 #else /* !__ANDROID__: ucontext backend */
 
 #define _XOPEN_SOURCE 600   /* expose ucontext on macOS/glibc — must precede includes */
 
 #include "fiber_compat.h"
-#include <ucontext.h>
+#include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
+#include <ucontext.h>
 
 typedef struct Fiber {
     ucontext_t ctx;
     FiberProc  entry;
     void      *param;
     void      *stack;     /* NULL for a ConvertThreadToFiber handle */
+    size_t     stack_size;
+    /* Lowest stack address that was live when this fiber was last suspended.
+     * Recorded by SwitchToFiber on the way out, so a snapshot copies the live
+     * part of the stack and not the whole (often 8 MiB) allocation. */
+    void      *suspended_low;
 } Fiber;
+
+/* Slack below the address SwitchToFiber sees for its own frame, to cover that
+ * frame, swapcontext's, and any red zone. Copying a few KB more of a stack the
+ * fiber owns is free; copying too few would lose live bytes. */
+#define FIBER_SNAPSHOT_SLACK 4096u
+
+/* One saved fiber. The stack bytes follow the header, low address first. */
+typedef struct FiberSnapshotHeader {
+    uint32_t   magic;
+    uint32_t   version;
+    void      *stack;        /* identity check: same fiber, same allocation */
+    size_t     stack_bytes;  /* how many bytes follow, from `low` upward */
+    void      *low;          /* where they go back */
+    ucontext_t ctx;
+} FiberSnapshotHeader;
+
+#define FIBER_SNAPSHOT_MAGIC   0x46425253u /* 'FBRS' */
+#define FIBER_SNAPSHOT_VERSION 1u
 
 /* The fiber currently executing on this thread. Updated by SwitchToFiber
  * before the context swap, so a freshly-started fiber's trampoline sees
@@ -155,10 +192,14 @@ void *ConvertThreadToFiber(void *param) {
 }
 
 void *CreateFiber(size_t stack_size, FiberProc entry, void *param) {
-    Fiber *f = (Fiber *)calloc(1, sizeof(Fiber));
+    /* volatile: getcontext() below is a setjmp-class function, and a local
+     * held live across one is what -Wclobbered exists to flag. The pointer is
+     * reloaded from memory rather than kept in a call-saved register. */
+    Fiber *volatile f = (Fiber *)calloc(1, sizeof(Fiber));
     if (!f) return NULL;
     f->stack = malloc(stack_size);
     if (!f->stack) { free(f); return NULL; }
+    f->stack_size = stack_size;
     f->entry = entry;
     f->param = param;
     if (getcontext(&f->ctx) != 0) { free(f->stack); free(f); return NULL; }
@@ -171,10 +212,77 @@ void *CreateFiber(size_t stack_size, FiberProc entry, void *param) {
 
 void SwitchToFiber(void *fiber) {
     Fiber *target = (Fiber *)fiber;
+    char here;    /* an address in THIS frame, i.e. on the outgoing stack */
     if (!target || target == g_current_fiber) return;
     Fiber *prev = g_current_fiber;
+    prev->suspended_low = &here;
     g_current_fiber = target;
     swapcontext(&prev->ctx, &target->ctx);
+}
+
+int FiberSnapshotSupported(void) { return 1; }
+
+/* The live extent of a suspended fiber's stack: [low, stack + stack_size).
+ * Stacks grow down on every target this backend builds for. Returns 0 when
+ * the fiber has no stack of its own, has never been suspended, or is the one
+ * running now -- none of which can be snapshotted. */
+static size_t fiber_live_extent(Fiber *f, char **low_out) {
+    char *base, *top, *low;
+    if (!f || !f->stack || !f->stack_size || f == g_current_fiber) return 0;
+    if (!f->suspended_low) return 0;
+    base = (char *)f->stack;
+    top  = base + f->stack_size;
+    low  = (char *)f->suspended_low;
+    if (low < base || low >= top) return 0;      /* not this fiber's stack */
+    low = low - FIBER_SNAPSHOT_SLACK < base ? base : low - FIBER_SNAPSHOT_SLACK;
+    *low_out = low;
+    return (size_t)(top - low);
+}
+
+size_t FiberSnapshotBound(void *fiber) {
+    char *low;
+    size_t live = fiber_live_extent((Fiber *)fiber, &low);
+    return live ? live + sizeof(FiberSnapshotHeader) : 0;
+}
+
+size_t FiberSnapshotSave(void *fiber, void *out, size_t capacity) {
+    Fiber *f = (Fiber *)fiber;
+    FiberSnapshotHeader hdr;
+    char *low;
+    size_t live = fiber_live_extent(f, &low);
+    if (!live || !out) return 0;
+    if (capacity < live + sizeof(hdr)) return 0;
+    hdr.magic       = FIBER_SNAPSHOT_MAGIC;
+    hdr.version     = FIBER_SNAPSHOT_VERSION;
+    hdr.stack       = f->stack;
+    hdr.stack_bytes = live;
+    hdr.low         = low;
+    hdr.ctx         = f->ctx;
+    memcpy(out, &hdr, sizeof(hdr));
+    memcpy((char *)out + sizeof(hdr), low, live);
+    return live + sizeof(hdr);
+}
+
+int FiberSnapshotLoad(void *fiber, const void *in, size_t size) {
+    Fiber *f = (Fiber *)fiber;
+    FiberSnapshotHeader hdr;
+    if (!f || !in || size < sizeof(hdr)) return 0;
+    if (f == g_current_fiber) return 0;          /* cannot rewind ourselves */
+    memcpy(&hdr, in, sizeof(hdr));
+    if (hdr.magic != FIBER_SNAPSHOT_MAGIC ||
+        hdr.version != FIBER_SNAPSHOT_VERSION) return 0;
+    /* Same fiber, same allocation: the stack bytes are restored to the very
+     * addresses they were captured from, which is what keeps every pointer
+     * into the stack (saved frame pointers, pointers to locals) valid. */
+    if (hdr.stack != f->stack) return 0;
+    if (size < sizeof(hdr) + hdr.stack_bytes) return 0;
+    if ((char *)hdr.low < (char *)f->stack ||
+        (char *)hdr.low + hdr.stack_bytes > (char *)f->stack + f->stack_size)
+        return 0;
+    memcpy(hdr.low, (const char *)in + sizeof(hdr), hdr.stack_bytes);
+    f->ctx = hdr.ctx;
+    f->suspended_low = hdr.low;
+    return 1;
 }
 
 void DeleteFiber(void *fiber) {
@@ -187,4 +295,21 @@ void DeleteFiber(void *fiber) {
 unsigned long GetLastError(void) { return 0; }
 
 #endif /* __ANDROID__ */
+#else  /* _WIN32 */
+
+/* A Win32 fiber is an opaque kernel object: its stack extent and saved
+ * register file are not reachable through the documented API, so there is no
+ * honest way to copy one out and put it back. Reported unsupported, and
+ * run-ahead declines rather than rewinding the machine out from under a fiber
+ * that stays where the speculation left it. */
+#include "fiber_compat.h"
+int    FiberSnapshotSupported(void) { return 0; }
+size_t FiberSnapshotBound(void *fiber) { (void)fiber; return 0; }
+size_t FiberSnapshotSave(void *fiber, void *out, size_t capacity) {
+    (void)fiber; (void)out; (void)capacity; return 0;
+}
+int    FiberSnapshotLoad(void *fiber, const void *in, size_t size) {
+    (void)fiber; (void)in; (void)size; return 0;
+}
+
 #endif /* !_WIN32 */

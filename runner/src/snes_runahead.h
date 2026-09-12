@@ -58,6 +58,36 @@ int  snes_runahead_active(void);
  */
 int snes_runahead_run_frame(uint32_t inputs);
 
+/*
+ * The host's "rasterise this frame and capture it for presentation" step.
+ *
+ * Run-ahead MUST be given one, and calls it after the last speculative frame
+ * and before the rewind, because that speculated frame is the picture the
+ * player is supposed to see. Without it a host that draws AFTER the guest step
+ * -- from whatever state the guest is then in, which is the rewound state --
+ * shows the unspeculated frame and run-ahead becomes pure cost: measured on
+ * Super Metroid, every one of 1,195 frames was byte-identical with the feature
+ * on and off while it burned an extra 0.7 ms and a 324 KB snapshot per frame.
+ *
+ * When snes_runahead_run_frame() returns 1 the capture has been done and the
+ * caller must NOT capture again; when it returns 0 the caller runs and
+ * captures the frame itself as usual.
+ */
+/*
+ * for_picture == 0: run the frame's raster pass for its SIDE EFFECTS and throw
+ * the picture away. A frame-model host's raster pass runs guest code -- Super
+ * Metroid's HUD/room split dispatches the game's own raster IRQ handlers,
+ * which write WRAM, and during a door transition they move the camera and
+ * Samus. The real frame must have its pass, or the rewind takes those writes
+ * away with the speculation and the game loses a frame of work every frame.
+ * Measured: exactly the 5-frame bursts of divergence around scene changes.
+ *
+ * for_picture == 1: the full capture, on the last speculative frame. This one
+ * is the picture the player sees; its side effects are undone by the rewind.
+ */
+typedef void (*SnesRunaheadCapture)(void *context, int for_picture);
+void snes_runahead_set_capture(SnesRunaheadCapture fn, void *context);
+
 /* Frees the snapshot buffer. */
 void snes_runahead_shutdown(void);
 

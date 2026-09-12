@@ -876,6 +876,23 @@ static void CaptureSimulationFrame(unsigned number) {
   if (g_game->end_sim_frame) g_game->end_sim_frame(g_my_pixels, number);
 }
 
+/* Run-ahead's view of the capture above. It calls this after its last
+ * speculative frame and before rewinding, so the picture the player sees is
+ * the speculated one rather than the frame redrawn from the rewound state.
+ * The frame number is the one this iteration is about to become. */
+static void RunaheadCapture(void *context, int for_picture) {
+  const uint32 *frame_counter = (const uint32 *)context;
+  if (for_picture) {
+    CaptureSimulationFrame(*frame_counter + 1u);
+    return;
+  }
+  /* The real frame's raster, for the guest code it runs, not for its picture:
+   * no prepare, no begin/end sim frame, so a title-owned renderer's per-frame
+   * capture still belongs to the speculated frame that follows. */
+  if (g_rtl_game_info && g_rtl_game_info->draw_ppu_frame)
+    g_rtl_game_info->draw_ppu_frame();
+}
+
 /* Snapshots and their thumbnails share the same completed raster boundary. */
 static void NoteStateFrame(void) {
   if (g_ppu && g_ppu->renderBuffer) {
@@ -2875,6 +2892,9 @@ error_reading:;
   bool running = true;
   const char *exit_reason = "loop ended";
   uint32 frameCtr = 0;
+  /* Run-ahead rasterises the speculated frame itself; it needs the number the
+   * iteration is about to reach, which is this counter plus one. */
+  snes_runahead_set_capture(&RunaheadCapture, &frameCtr);
   const char *run_frames_env = HostGetenv("RUN_FRAMES");
   unsigned run_frames = run_frames_env ? (unsigned)strtoul(run_frames_env, NULL, 10) : 0;
   const char *trace_path = HostGetenv("STATE_TRACE");
@@ -3227,10 +3247,13 @@ error_reading:;
      * the machine cannot snapshot, which is why this is a fallback rather
      * than a branch. Never during turbo: speculating about frames that are
      * being skipped costs work for a picture nobody is reading. */
+    bool runahead_captured = false;
     {
       const uint32 word = inputs | GetActiveControllers() | debug_server_get_controller_active_mask();
       if (g_turbo || !snes_runahead_run_frame(word))
         RtlRunFrame(word);
+      else
+        runahead_captured = true;   /* it rasterised the speculated frame */
     }
     ApplyScriptForcePokes();
     snes_osd_note_frame();
@@ -3266,7 +3289,12 @@ error_reading:;
     snes_osd_set_turbo(g_turbo);
 
     profile_start = ProfileStart();
-    CaptureSimulationFrame(frameCtr);
+    /* Run-ahead already did this, from the speculated frame, before it
+     * rewound. Doing it again here would redraw from the rewound state and
+     * throw the speculation away -- which is precisely what made the feature
+     * inert. */
+    if (!runahead_captured)
+      CaptureSimulationFrame(frameCtr);
     NoteStateFrame();
     g_audio_producer_active = false;
     ProfileEnd(kProfileRaster, profile_start);

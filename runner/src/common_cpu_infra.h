@@ -141,6 +141,28 @@ typedef struct RtlGameInfo {
   /* Zero uses the framework minimum. A title can reject formats which
    * predate required coprocessor or execution-state data before loading. */
   uint32_t minimum_state_version;
+
+  /* ── Rewindable execution position (rollback snapshots only) ───────────
+   *
+   * A guest snapshot holds the machine; it does not hold WHERE THE GAME IS
+   * in its own code. For a title whose frame model runs the guest on a host
+   * fiber, that position is the fiber's C call chain, and rewinding the
+   * machine without it leaves the two out of step -- the frame after the
+   * rewind resumes where the speculation left off while the RAM says
+   * otherwise. Measured on Super Metroid: 21 frames in 1,200 ended in a
+   * state they would not otherwise have been in.
+   *
+   * These hooks let such a title put that position into a ROLLBACK snapshot
+   * (in-process, in-memory, this build only -- never a file, never a wire
+   * payload; see RtlRollbackSaveToMemory). A title whose execution position
+   * already rides in the savestate chunk, or that has none to speak of,
+   * leaves them NULL.
+   *
+   * exec_state_bound is an upper bound for sizing; exec_state_save returns
+   * the bytes written, or 0 to abandon the snapshot. */
+  size_t (*exec_state_bound)(void);
+  size_t (*exec_state_save)(void *out, size_t capacity);
+  int    (*exec_state_load)(const void *in, size_t size);
 } RtlGameInfo;
 
 extern const RtlGameInfo *g_rtl_game_info;

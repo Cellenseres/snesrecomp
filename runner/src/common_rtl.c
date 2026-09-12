@@ -766,8 +766,21 @@ bool RtlRunFrame(uint32 inputs) {
   snes_frame_counter++;
   /* Every runner client gets the same guest-frame/APU coupling. Presentation
    * code may opt into fast-forward PCM recovery separately, but cannot omit
-   * the emulation clock. */
-  rtl_sync_apu_frame_boundary();
+   * the emulation clock.
+   *
+   * Except on a speculative frame, which the player never hears and which is
+   * about to be rewound. The SPC's executed-cycle counter (Apu.portClock and
+   * the port anchors beside it) sits AFTER the region apu_saveload
+   * serialises, deliberately, because it is host-side lead: a rollback does
+   * not put it back. So running the SPC for a frame that gets rewound
+   * advances the audio chip PERMANENTLY, and the guest's next real frame
+   * finds a handshake further along than it should be. Measured in Super
+   * Metroid with run-ahead: the SPC had executed 73% more cycles after 232
+   * frames, and the game's sound-effect queue stepped a frame early on 21
+   * frames in 1,200. Not running it is both the correct answer and the
+   * cheaper one -- the audio from those frames was discarded regardless. */
+  if (!g_rtl_speculative_frame)
+    rtl_sync_apu_frame_boundary();
 
 #if SNESRECOMP_ENABLE_MODS
   /* Not on a speculative frame: the player never sees it, so a mod counting
@@ -1000,8 +1013,13 @@ size_t RtlRollbackSnapshotBound(void) {
   /* Guest blob upper bound + residue. The guest blob is WRAM (128 KiB) +
    * APU RAM (64 KiB) + DSP (incl. the 32 KiB output ring) + PPU VRAM/CGRAM/OAM
    * (~64 KiB) + cart SRAM and coprocessor RAM; 1 MiB clears all of it with
-   * room for a game's state_save_extra chunk. */
-  return (1u << 20) + sizeof(RtlRollbackResidue);
+   * room for a game's state_save_extra chunk. A game that also puts its
+   * execution position in (a fiber's live stack) adds its own bound, which
+   * grows and shrinks with the guest's call depth. */
+  size_t exec = 0;
+  if (g_rtl_game_info && g_rtl_game_info->exec_state_bound)
+    exec = g_rtl_game_info->exec_state_bound();
+  return (1u << 20) + sizeof(uint32) + exec + sizeof(RtlRollbackResidue);
 }
 
 /* ── resync hooks ─────────────────────────────────────────────────────────
@@ -1143,36 +1161,62 @@ void RtlApplyExecutionState(void) {
   s_loaded_execution_valid = false;
 }
 
+/* Layout: [guest blob][game execution state][its length, u32][residue].
+ * The residue stays last so the load can find it without a directory, and the
+ * execution chunk carries its own length just before it for the same reason.
+ * A game with no exec_state_save writes a zero length, which is what every
+ * title that has no fiber to rewind does. */
 size_t RtlRollbackSaveToMemory(void *data, size_t capacity) {
-  size_t guest;
+  size_t guest, used;
+  uint32 exec_len = 0;
   RtlRollbackResidue residue;
 
   if (!data || !g_snes)
     return 0;
   guest = RtlSaveSnapshotToMemory(data, capacity);
-  if (guest == 0 || capacity - guest < sizeof(residue))
+  if (guest == 0)
     return 0;
+  used = guest;
+  if (capacity < used + sizeof(exec_len) + sizeof(residue))
+    return 0;
+
+  if (g_rtl_game_info && g_rtl_game_info->exec_state_save) {
+    size_t room = capacity - used - sizeof(exec_len) - sizeof(residue);
+    size_t n = g_rtl_game_info->exec_state_save((uint8 *)data + used, room);
+    if (n == 0)
+      return 0;   /* the game could not put its position in; no snapshot */
+    exec_len = (uint32)n;
+    used += n;
+  }
+  memcpy((uint8 *)data + used, &exec_len, sizeof(exec_len));
+  used += sizeof(exec_len);
 
   RtlApuLock();
   rtl_rb_residue_capture(&residue);
   RtlApuUnlock();
-  memcpy((uint8 *)data + guest, &residue, sizeof(residue));
-  return guest + sizeof(residue);
+  memcpy((uint8 *)data + used, &residue, sizeof(residue));
+  return used + sizeof(residue);
 }
 
 bool RtlRollbackLoadFromMemory(const void *data, size_t size) {
   RtlRollbackResidue residue;
   DspOutputRing ring;
   size_t guest;
+  uint32 exec_len = 0;
   bool ok;
 
-  if (!data || !g_snes || size <= sizeof(residue))
+  if (!data || !g_snes || size <= sizeof(residue) + sizeof(exec_len))
     return false;
   guest = size - sizeof(residue);
   memcpy(&residue, (const uint8 *)data + guest, sizeof(residue));
   if (residue.magic != RTL_RB_RESIDUE_MAGIC ||
       residue.version != RTL_RB_RESIDUE_VERSION)
     return false;
+  guest -= sizeof(exec_len);
+  memcpy(&exec_len, (const uint8 *)data + guest, sizeof(exec_len));
+  if (exec_len > guest)
+    return false;
+  guest -= exec_len;
 
   /* The audio output ring belongs to the live consumer, not to the tick we
    * are rewinding to. Lift it out around the guest blob. */
@@ -1181,6 +1225,18 @@ bool RtlRollbackLoadFromMemory(const void *data, size_t size) {
   RtlApuUnlock();
 
   ok = RtlLoadSnapshotFromMemory(data, guest);
+
+  /* The game's execution position goes back BEFORE the residue is applied and
+   * after the guest blob: it is the thing that has to agree with the RAM the
+   * blob just restored. A game that saved one must be able to load it, so a
+   * refusal fails the whole rollback rather than leaving the two out of step
+   * -- which is the exact defect these hooks exist to close. */
+  if (ok && exec_len) {
+    if (!g_rtl_game_info || !g_rtl_game_info->exec_state_load ||
+        !g_rtl_game_info->exec_state_load((const uint8 *)data + guest,
+                                          exec_len))
+      ok = false;
+  }
 
   RtlApuLock();
   dsp_output_ring_restore(g_snes->apu->dsp, &ring);
