@@ -174,6 +174,28 @@ int main(void) {
     failures += check(dma->channel[0].tableAdr == 0x0203, "external beam owner consumed terminator");
     failures += check(dma->channel[0].hdmaActive, "external beam owner preserves HDMAEN state");
 
+    /* Which A-bus DMA sources read as "not cartridge data".
+     *
+     * The question is asked where the channel is ARMED, from the address the
+     * game programmed, because a DMA's source wraps within its bank: a legal
+     * transfer that runs off the end of a bank spends its tail at $xx:0000,
+     * and the old per-byte check called that a fault. Super Metroid uploads
+     * 16 KB from $9A:D200 every intro -- the record is ROM data at $82:8319 --
+     * and wrapped into $9A:0000 for the last 4,608 bytes, exactly as hardware
+     * does. */
+    failures += check(!dma_source_is_offmap(CART_LOROM, false, 0x9a, 0xd200),
+                      "a LoROM source at $9A:D200 is ordinary ROM");
+    failures += check(dma_source_is_offmap(CART_LOROM, false, 0x9a, 0x0000),
+                      "a LoROM source at $9A:0000 is the mirror, not ROM");
+    failures += check(!dma_source_is_offmap(CART_LOROM, false, 0x7e, 0x3000),
+                      "WRAM bank $7E is a normal source at any address");
+    failures += check(!dma_source_is_offmap(CART_LOROM, true, 0x9a, 0x0000),
+                      "a PPU-to-CPU transfer has no A-bus source to judge");
+    failures += check(!dma_source_is_offmap(CART_HIROM, false, 0xf8, 0x0fa6),
+                      "HiROM maps $C0-$FF whole, so $F8:0FA6 is cartridge data");
+    failures += check(dma_source_is_offmap(CART_DSP1, false, 0x9a, 0x0000),
+                      "a DSP1 cartridge is mapped like LoROM here");
+
     /* ONE transfer per HBlank, and none at all when the host owns HDMA.
      *
      * Two single-line entries writing different values to the same register:

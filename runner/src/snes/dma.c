@@ -237,8 +237,6 @@ void dma_write(Dma* dma, uint16_t adr, uint8_t val) {
   }
 }
 
-extern bool g_fail;
-
 void dma_doDma(Dma* dma) {
   if(dma->dmaTimer > 0) {
     dma->dmaTimer -= 2;
@@ -255,18 +253,6 @@ void dma_doDma(Dma* dma) {
     // no active channels
     dma->dmaBusy = false;
     return;
-  }
-
-  /* This heuristic was written for LoROM, where a high bank with A < $8000
-   * is usually not ROM. HiROM maps banks $C0-$FF across the full address
-   * range, so sources such as DKC2's $F8:0FA6 are ordinary cartridge data. */
-  if (!dma->channel[i].fromB && dma->snes && dma->snes->cart &&
-      (dma->snes->cart->type == CART_LOROM ||
-       dma->snes->cart->type == CART_DSP1) &&
-      (dma->channel[i].aBank & 0x80) &&
-      !(dma->channel[i].aAdr & 0x8000) && !g_fail) {
-    printf("Warning! DMA from addr 0x%x\n", dma->channel[i].aBank << 16 | dma->channel[i].aAdr);
-    g_fail = true;
   }
 
   // do channel i
@@ -481,7 +467,56 @@ bool dma_cycle(Dma* dma) {
   return false;
 }
 
+/* Does this A-bus DMA source look like a wild pointer rather than data?
+ *
+ * A LoROM cartridge maps ROM at $8000-$FFFF of each bank, so a source in a
+ * $80+ bank BELOW $8000 is the system-area mirror -- WRAM and registers --
+ * which a graphics upload has no business reading. HiROM maps $C0-$FF across
+ * the whole address range, so sources such as DKC2's $F8:0FA6 are ordinary
+ * cartridge data and the question does not apply.
+ *
+ * Pure, and separate from the reporting, so the policy can be tested without
+ * a machine: see tests/dma/hdma_timing_test.c.
+ */
+bool dma_source_is_offmap(int cart_type, bool from_b, uint8_t a_bank,
+                          uint16_t a_adr) {
+  if (from_b) return false;                 /* PPU -> CPU; no A-bus source */
+  if (cart_type != CART_LOROM && cart_type != CART_DSP1) return false;
+  return (a_bank & 0x80) != 0 && (a_adr & 0x8000) == 0;
+}
+
 void dma_startDma(Dma* dma, uint8_t val, bool hdma) {
+  /* Checked HERE, when the channel is armed, and not once per transferred
+   * byte as it used to be.
+   *
+   * A DMA's source address wraps within its bank: a transfer that starts in
+   * ROM and runs off the end of the bank spends its tail at $xx:0000, which
+   * is the mirror region and trips the test above. Super Metroid does exactly
+   * that every time it uploads 16 KB from $9A:D200 -- the record is ROM data
+   * at $82:8319, and hardware wraps the same way -- so the per-byte check
+   * reported an authentic transfer as a fault, on stdout, where it landed in
+   * a different place in the log from the host's own breadcrumbs. Judging the
+   * source once, as the game programmed it, tells a wild pointer apart from a
+   * legal wrap.
+   *
+   * It also no longer sets g_fail. That latch gates the off-rails ROM-pointer
+   * report, so one false positive here used to silence a real diagnostic for
+   * the rest of the session. */
+  if (!hdma && dma->snes && dma->snes->cart) {
+    static bool s_reported;
+    for (int i = 0; i < 8 && !s_reported; i++) {
+      if (!(val & (1 << i))) continue;
+      if (!dma_source_is_offmap(dma->snes->cart->type, dma->channel[i].fromB,
+                                dma->channel[i].aBank, dma->channel[i].aAdr))
+        continue;
+      fprintf(stderr,
+              "[dma] channel %d armed from $%02X:%04X, which is not ROM on "
+              "this cartridge (%u bytes to $21%02X)\n",
+              i, dma->channel[i].aBank, dma->channel[i].aAdr,
+              (unsigned)dma->channel[i].size, dma->channel[i].bAdr);
+      s_reported = true;
+    }
+  }
   for(int i = 0; i < 8; i++) {
     if(hdma) {
       /* Only a channel going from off to on owes an initialization; rewriting

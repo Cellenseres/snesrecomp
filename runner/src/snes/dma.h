@@ -94,6 +94,12 @@ void dma_primeHdmaFirstLine(Dma* dma);
 uint64_t dma_hdmaMasterEstimate(Dma* dma); /* per-frame CPU-stall estimate */
 bool dma_cycle(Dma* dma);
 void dma_startDma(Dma* dma, uint8_t val, bool hdma);
+/* True when an A-bus DMA source cannot be cartridge data on this mapping --
+ * a $80+ bank below $8000 on LoROM. Judged where the channel is ARMED, from
+ * the address the game programmed: a legal transfer wraps within its bank and
+ * spends its tail at $xx:0000, which is not the same thing. */
+bool dma_source_is_offmap(int cart_type, bool from_b, uint8_t a_bank,
+                          uint16_t a_adr);
 void dma_saveload(Dma *dma, SaveLoadInfo *sli);
 
 #endif
