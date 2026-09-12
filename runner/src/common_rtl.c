@@ -1224,7 +1224,21 @@ bool RtlRollbackLoadFromMemory(const void *data, size_t size) {
   dsp_output_ring_save(g_snes->apu->dsp, &ring);
   RtlApuUnlock();
 
-  ok = RtlLoadSnapshotFromMemory(data, guest);
+  /* A rollback is not a timeline jump, and must not read as one.
+   *
+   * RtlStateGeneration() is how a host learns the guest went somewhere the
+   * player can see -- a reset, a savestate load -- so it can drop the
+   * host-side history it derived from the old timeline: the audio timeline,
+   * the rewind ring, a presenter's interpolation frames. A rollback undoes a
+   * speculation the player never saw and leaves the guest exactly where it
+   * was, so none of that is stale. Run-ahead rolls back sixty times a second:
+   * counted as jumps, the desktop host tore down and rebuilt its 17.5 MB
+   * rewind ring EVERY FRAME -- rewind kept no history at all while run-ahead
+   * was on, and said so once per frame in the log. Netplay rollback had the
+   * same shape waiting for it. Keep the counter across the load. */
+  { const uint64_t generation = s_state_generation;
+    ok = RtlLoadSnapshotFromMemory(data, guest);
+    s_state_generation = generation; }
 
   /* The game's execution position goes back BEFORE the residue is applied and
    * after the guest blob: it is the thing that has to agree with the RAM the
