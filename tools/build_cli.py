@@ -89,6 +89,14 @@ def main() -> int:
         (ROOT / "tools" / "v2_emit.py", "tools"),
         (ROOT / "tools" / "v2_analyze.py", "tools"),
         (ROOT / "tools" / "__init__.py", "tools"),
+        # generate needs these at run time: the SDK contract modules the CLI
+        # dispatches through, and the funcs.h writer it calls. Left out, the
+        # packaged snesrecomp cannot even import, and generate could not sync
+        # funcs.h.
+        (ROOT / "tools" / "sdk_generate.py", "tools"),
+        (ROOT / "tools" / "sdk_progress.py", "tools"),
+        (ROOT / "tools" / "sdk_rom.py", "tools"),
+        (ROOT / "tools" / "v2_sync_funcs_h.py", "tools"),
         (ROOT / "recompiler-rs" / "src", "recompiler-rs/src"),
         (ROOT / "recompiler-rs" / "Cargo.toml", "recompiler-rs"),
         (ROOT / "recompiler-rs" / "Cargo.lock", "recompiler-rs"),
