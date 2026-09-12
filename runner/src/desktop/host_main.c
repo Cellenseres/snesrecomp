@@ -345,8 +345,10 @@ static uint64_t g_state_generation;
  * and still have something to draw behind itself. Sized like g_my_pixels. */
 static uint8_t g_frozen_frame[kPpuBufWidth * 4 * 240];
 static int g_frozen_w, g_frozen_h;
-/* The simulated frame the next present shows (for SNESRECOMP_SCREENSHOT). */
-static unsigned g_screenshot_frame;
+/* The simulated frame the next present shows. Read by SNESRECOMP_SCREENSHOT
+ * and by frame blending, which advances its kept frame once per simulated
+ * frame rather than once per present. */
+static unsigned g_present_frame;
 
 static GamepadInfo g_gamepad[2];
 
@@ -363,6 +365,11 @@ void snesrecomp_desktop_set_widescreen(int enabled) {
  * translucency. The module is recomp-ui's, shared by every title. */
 #if defined(SNESRECOMP_HOST_HAS_BLEND)
 static RecompFrameBlend *g_blend;
+/* The simulated frame whose picture the blend is currently keeping. */
+static unsigned g_blend_frame;
+/* Cached-memory staging frame: see DrawPpuFrameWithPerf. Same bound as the
+ * frozen-frame copy, which is the widest field this host presents. */
+static uint8 g_blend_stage[kPpuBufWidth * 4 * 240];
 #endif
 static void FrameBlendConfigure(void) {
 #if defined(SNESRECOMP_HOST_HAS_BLEND)
@@ -374,6 +381,7 @@ static void FrameBlendConfigure(void) {
     g_config.frame_blend = false;
   }
   if (g_blend) recomp_frame_blend_reset(g_blend);
+  g_blend_frame = 0;
   if (g_config.frame_blend)
     host_report_breadcrumb("frame blending on ([Graphics] FrameBlend)");
 #endif
@@ -383,6 +391,7 @@ static void GameReset(void) {
   if (g_game->on_reset) g_game->on_reset();
 #if defined(SNESRECOMP_HOST_HAS_BLEND)
   if (g_blend) recomp_frame_blend_reset(g_blend);   /* never blend across a jump */
+  g_blend_frame = 0;
 #endif
   g_reset_clock = true;
 }
@@ -956,25 +965,78 @@ static void DrawPpuFrameWithPerf(void) {
   double profile_start = ProfileStart();
   PreparePpuFrame();
   const int render_scale = 1;
-  uint8 *pixel_buffer = 0;
-  int pitch = 0;
+  uint8 *present_buffer = 0;
+  int present_pitch = 0;
 
   g_renderer_funcs.BeginDraw(g_snes_width * render_scale,
                              g_snes_height * render_scale,
-                             &pixel_buffer, &pitch);
+                             &present_buffer, &present_pitch);
   ProfileEnd(kProfileAcquire, profile_start);
-  if (!pixel_buffer) {
+  if (!present_buffer) {
     g_renderer_funcs.EndDraw();
     return;
   }
+
+  /* Where this frame is composed. Normally the presenter's own buffer, so the
+   * frame is written straight where it is going. WHILE BLENDING it is a host
+   * staging frame instead, uploaded with one linear copy at the end.
+   *
+   * The SDL presenter hands back a LOCKED STREAMING TEXTURE and a blend is a
+   * read-modify-write. Mapped texture memory is frequently write-combined:
+   * excellent for sequential writes, pathological to read, and whether it is
+   * depends on the backend and the driver -- so blending in place is fine on
+   * one machine and ruins the frame rate on another, the shape of a bug that
+   * never reproduces for the developer. recomp_frame_blend.h says exactly
+   * this and prescribes exactly this remedy. With blending off nothing
+   * changes: the frame is composed into the presenter's buffer as before. */
+  uint8 *pixel_buffer = present_buffer;
+  int pitch = present_pitch;
+#if defined(SNESRECOMP_HOST_HAS_BLEND)
+  const size_t frame_bytes = (size_t)(g_snes_width * render_scale) *
+                             (size_t)(g_snes_height * render_scale) * 4u;
+  const bool blending = g_config.frame_blend && g_blend &&
+                        frame_bytes <= sizeof(g_blend_stage);
+  if (blending) {
+    pixel_buffer = g_blend_stage;
+    pitch = g_snes_width * render_scale * 4;
+  }
+#endif
+
   profile_start = ProfileStart();
   RtlDrawPpuFrame(pixel_buffer, pitch, g_ppu_render_flags);
 #if defined(SNESRECOMP_HOST_HAS_BLEND)
   /* The shared blend keeps the UNBLENDED frame, so the mix never feeds back
-   * on itself, and the PPU's own renderBuffer stays pure for thumbnails. */
-  if (g_config.frame_blend && g_blend && g_present_alpha >= 1)
-    recomp_frame_blend_apply(g_blend, pixel_buffer, g_snes_width * render_scale,
-                             g_snes_height * render_scale, (size_t)pitch);
+   * on itself, and the PPU's own renderBuffer stays pure for thumbnails.
+   *
+   * EVERY present is blended, but the kept frame advances only on the present
+   * that carries a new simulated frame. The pairing the effect is about is two
+   * consecutive GUEST frames; a host with a decoupled presentation clock shows
+   * one guest frame more than once, and letting those extra presents advance
+   * the reference would average a frame with an interpolated version of
+   * itself. This gate used to read `g_present_alpha >= 1`, which switched the
+   * feature off entirely for such a host -- measured on Super Metroid, whose
+   * presenter runs at the display rate against a 60.0988 Hz guest: the weight
+   * never reached 1 across 2,481 presents, so every frame came out identical
+   * with the setting on and off while the launcher reported it on. */
+  if (blending) {
+    const int w = g_snes_width * render_scale, h = g_snes_height * render_scale;
+    if (g_present_frame != g_blend_frame) {
+      recomp_frame_blend_apply(g_blend, pixel_buffer, w, h, (size_t)pitch);
+      g_blend_frame = g_present_frame;
+    } else {
+#if defined(RECOMP_FRAME_BLEND_HAS_HOLDING)
+      recomp_frame_blend_apply_holding(g_blend, pixel_buffer, w, h,
+                                       (size_t)pitch);
+#else
+      /* An older recomp-ui pin has no holding entry point. Blend anyway --
+       * the reference advances on this present too, so a re-presented guest
+       * frame is averaged with an interpolated version of itself. Slightly
+       * more smear than the effect asks for, and still far better than the
+       * checkbox doing nothing. */
+      recomp_frame_blend_apply(g_blend, pixel_buffer, w, h, (size_t)pitch);
+#endif
+    }
+  }
 #endif
   /* Keep a copy of what was just presented. An overlay freezes the guest, and
    * the backdrop behind it has to come from somewhere that is NOT another
@@ -1010,9 +1072,9 @@ static void DrawPpuFrameWithPerf(void) {
       shot_frame = v ? strtol(v, NULL, 0) : 1;
     }
     const char *path = shot_done ? NULL : HostGetenv("SCREENSHOT");
-    if (path && (long)g_screenshot_frame >= shot_frame) {
+    if (path && (long)g_present_frame >= shot_frame) {
       WritePpm(path, pixel_buffer, pitch, g_snes_width * render_scale,
-               g_snes_height * render_scale, g_screenshot_frame, true);
+               g_snes_height * render_scale, g_present_frame, true);
       shot_done = 1;
     }
   }
@@ -1047,8 +1109,8 @@ static void DrawPpuFrameWithPerf(void) {
       v = HostGetenv("SCREENSHOT_TO");
       to = v ? strtol(v, NULL, 0) : LONG_MAX;
     }
-    if ((dir || log_path) && (long)g_screenshot_frame >= from &&
-        (long)g_screenshot_frame <= to) {
+    if ((dir || log_path) && (long)g_present_frame >= from &&
+        (long)g_present_frame <= to) {
       char path[1024];
       const int w = g_snes_width * render_scale, h = g_snes_height * render_scale;
       if (!csv) {
@@ -1071,18 +1133,30 @@ static void DrawPpuFrameWithPerf(void) {
           for (int x = 0; x < w; x++)
             sum += ((px[x] >> 16) & 0xFF) + ((px[x] >> 8) & 0xFF) + (px[x] & 0xFF);
         }
-        fprintf(csv, "%u,%u,%.4f,%08x,%.3f\n", presents, g_screenshot_frame,
+        fprintf(csv, "%u,%u,%.4f,%08x,%.3f\n", presents, g_present_frame,
                 g_present_alpha, crc, sum / (3.0 * w * h));
         fflush(csv);
       }
       if (dir) {
         snprintf(path, sizeof(path), "%s/present_%06u.ppm", dir, presents);
-        WritePpm(path, pixel_buffer, pitch, w, h, g_screenshot_frame, false);
+        WritePpm(path, pixel_buffer, pitch, w, h, g_present_frame, false);
       }
       ++presents;
     }
   }
 
+
+#if defined(SNESRECOMP_HOST_HAS_BLEND)
+  /* One linear, write-only copy into the presenter's buffer -- the access
+   * pattern write-combined memory is good at. */
+  if (blending) {
+    const int rows = g_snes_height * render_scale;
+    const int row_bytes = g_snes_width * render_scale * 4;
+    for (int y = 0; y < rows; y++)
+      memcpy(present_buffer + (size_t)y * (size_t)present_pitch,
+             pixel_buffer + (size_t)y * (size_t)pitch, (size_t)row_bytes);
+  }
+#endif
 
   ProfileEnd(kProfileCompose, profile_start);
   profile_start = ProfileStart();
@@ -2947,7 +3021,7 @@ error_reading:;
           if (game->before_run_frame) game->before_run_frame();
           RtlRunFrame(inputs);
           frameCtr++;
-          g_screenshot_frame = frameCtr;
+          g_present_frame = frameCtr;
           snes_osd_note_frame();
           CaptureSimulationFrame(frameCtr);
           NoteStateFrame();
@@ -3162,7 +3236,7 @@ error_reading:;
     snes_osd_note_frame();
     ProfileEnd(kProfileGuest, profile_start);
     frameCtr++;
-    g_screenshot_frame = frameCtr;
+    g_present_frame = frameCtr;
     if (game->after_run_frame) {
       profile_start = ProfileStart();
       double now = MonotonicSeconds();
