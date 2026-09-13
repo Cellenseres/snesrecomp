@@ -607,3 +607,40 @@ def test_recomp_ui_ref_is_declared_by_the_framework():
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         assert result.returncode == 0, result.stdout
         assert f"recomp-ui:  {declared}" in result.stdout, result.stdout
+
+
+def test_the_repo_root_never_reaches_the_include_path():
+    """A scaffolded port ships VERSION at its root.
+
+    On Windows -- and on macOS, whose filesystem is case-insensitive by
+    default -- an -I of that root makes libc++'s `#include <version>` read
+    VERSION instead, and the build dies with a parse error inside <cmath>
+    pointing at a line that says "0.1.0". Nothing in that message names the
+    include path; Super Metroid lost a Windows CI cycle to it. Nothing needs
+    the root on the search path, so the template must not put it there.
+    """
+    template = (REPO_ROOT / "tools" / "new_project" / "templates"
+                / "CMakeLists.txt.in").read_text(encoding="utf-8")
+    block = template[template.index("target_include_directories("):]
+    block = block[:block.index(")")]
+    for root in ("${CMAKE_SOURCE_DIR}", "${CMAKE_CURRENT_SOURCE_DIR}",
+                 "${PROJECT_SOURCE_DIR}"):
+        assert f"\n    {root}\n" not in block, \
+            f"template puts the repo root ({root}) on the include path:\n{block}"
+
+
+def test_the_desktop_host_arms_the_header_shadowing_guard():
+    """The template is only the first port; the guard covers every one.
+
+    A port that adds the root itself, or any directory holding a file named
+    like a standard header, must fail at configure time with a message that
+    says so -- not at compile time inside a system header.
+    """
+    runner = (REPO_ROOT / "runner" / "runner.cmake").read_text(encoding="utf-8")
+    body = runner[runner.index("function(snesrecomp_target_desktop_host"):]
+    body = body[:body.index("\nendfunction()")]
+    assert "snesrecomp_guard_header_shadowing(${target})" in body, \
+        "desktop host no longer arms the header-shadowing guard"
+    assert "version" in runner[runner.index(
+        "set(SNESRECOMP_STDLIB_EXTENSIONLESS_HEADERS"):], \
+        "<version> dropped from the shadowing list -- it is the one that bit"

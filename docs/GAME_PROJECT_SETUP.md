@@ -122,6 +122,25 @@ with the title's identity and hooks, and one call to
 audio, gamepads, overlays, pacing and crash reporting all improve on a
 submodule pull rather than needing a per-port edit.
 
+### Include directories: never the repo root
+
+`snesrecomp_target_desktop_host()` defers a check over the target's include
+directories and refuses to configure when one of them holds a file that
+case-insensitively matches a standard library header. The repo root is the
+case that keeps happening: it holds `VERSION`, and on Windows (and on macOS,
+whose filesystem is case-insensitive by default) libc++'s
+`#include <version>` then reads that file. The failure surfaces as
+`error: expected unqualified-id` at a line reading `0.1.0`, hundreds of lines
+deep inside `<cmath>`, with nothing naming the include path — Super Metroid
+lost a full Windows CI cycle to it in 2026-09.
+
+Nothing in a scaffolded port needs the repo root on the search path: `src`,
+`recomp` and `${SNESRECOMP_RUNNER_INCLUDE_DIRS}` cover every include the
+generated C and the host emit. The guard is deliberately case-insensitive on
+case-sensitive hosts too, so a Linux developer sees it at `cmake` time instead
+of in Windows CI. Call `snesrecomp_guard_header_shadowing(<target>)` directly
+for a target that does not go through the desktop host helper.
+
 ## 5. Regenerating
 
 ```sh

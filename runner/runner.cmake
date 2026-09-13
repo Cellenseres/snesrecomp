@@ -1031,6 +1031,93 @@ endfunction()
 # host speaks the SDL2/SDL3 shim.
 #
 #   snesrecomp_target_desktop_host(<target> [TIER2])
+# ── Header shadowing: an include directory that hides a standard header ─────
+#
+# A port that puts its repo root on the include path hands the compiler a
+# directory holding VERSION, README, LICENSE and friends. On a case-insensitive
+# filesystem -- Windows always, macOS by default -- libc++'s `#include <version>`
+# then resolves to that VERSION file, and the build dies deep inside <cmath>
+# with "error: expected unqualified-id" pointing at a line that reads "0.1.0".
+# Nothing in the message says "include path"; it cost a full CI cycle to read.
+#
+# So refuse to configure instead. The check is case-insensitive on every host,
+# including case-sensitive ones, because the point is to fail on the developer's
+# Linux box rather than in Windows CI.
+set(SNESRECOMP_STDLIB_EXTENSIONLESS_HEADERS
+    algorithm any array atomic barrier bit bitset charconv chrono codecvt
+    compare complex concepts condition_variable coroutine deque exception
+    execution expected filesystem flat_map flat_set format forward_list
+    fstream functional future generator initializer_list iomanip ios iosfwd
+    iostream iso646 istream iterator latch limits list locale map mdspan
+    memory memory_resource mutex new numbers numeric optional ostream print
+    queue random ranges ratio regex scoped_allocator semaphore set shared_mutex
+    source_location span spanstream sstream stack stacktrace stdexcept
+    stdfloat stop_token streambuf string string_view strstream syncstream
+    system_error thread tuple type_traits typeindex typeinfo unordered_map
+    unordered_set utility valarray variant vector version
+    cassert cctype cerrno cfenv cfloat cinttypes climits clocale cmath csetjmp
+    csignal cstdarg cstddef cstdint cstdio cstdlib cstring ctime cuchar cwchar
+    cwctype
+    CACHE INTERNAL "Standard library headers a plain file could shadow")
+
+# Deferred: a port keeps adding include directories after it calls
+# snesrecomp_target_desktop_host(), so the list is only complete at the end of
+# the directory scope.
+function(_snesrecomp_check_header_shadowing target)
+    if(NOT TARGET ${target})
+        return()
+    endif()
+    get_target_property(_inc ${target} INCLUDE_DIRECTORIES)
+    if(NOT _inc)
+        return()
+    endif()
+    set(_bad "")
+    foreach(_dir IN LISTS _inc)
+        # Generator expressions are not resolvable here, and third-party
+        # prefixes outside this build are not a port's mistake to fix.
+        if(_dir MATCHES "\\$<")
+            continue()
+        endif()
+        if(NOT IS_DIRECTORY "${_dir}")
+            continue()
+        endif()
+        file(REAL_PATH "${_dir}" _real)
+        string(FIND "${_real}" "${CMAKE_SOURCE_DIR}" _under_src)
+        string(FIND "${_real}" "${CMAKE_BINARY_DIR}" _under_bin)
+        if(NOT _under_src EQUAL 0 AND NOT _under_bin EQUAL 0)
+            continue()
+        endif()
+        file(GLOB _entries LIST_DIRECTORIES false "${_dir}/*")
+        foreach(_entry IN LISTS _entries)
+            get_filename_component(_name "${_entry}" NAME)
+            string(TOLOWER "${_name}" _lower)
+            if(_lower IN_LIST SNESRECOMP_STDLIB_EXTENSIONLESS_HEADERS)
+                list(APPEND _bad "${_entry}  (shadows <${_lower}>)")
+            endif()
+        endforeach()
+    endforeach()
+    if(_bad)
+        list(JOIN _bad "\n    " _bad_text)
+        message(FATAL_ERROR
+            "${target}: an include directory contains a file that shadows a "
+            "standard library header:\n    ${_bad_text}\n"
+            "On a case-insensitive filesystem (Windows, macOS) the compiler "
+            "reads that file for #include <...> and fails with a parse error "
+            "inside an unrelated system header. Drop the directory from "
+            "target_include_directories() -- the repo root is the usual "
+            "culprit and nothing needs it on the search path -- or rename the "
+            "file.")
+    endif()
+endfunction()
+
+function(snesrecomp_guard_header_shadowing target)
+    # DEFER CALL expands its arguments when the deferred call RUNS, in the
+    # directory scope -- where this function's `target` no longer exists. Bake
+    # the name in through a bracket argument instead of passing "${target}".
+    cmake_language(EVAL CODE
+        "cmake_language(DEFER CALL _snesrecomp_check_header_shadowing [[${target}]])")
+endfunction()
+
 function(snesrecomp_target_desktop_host target)
     set(options TIER2)
     cmake_parse_arguments(DH "${options}" "" "" ${ARGN})
@@ -1056,6 +1143,7 @@ function(snesrecomp_target_desktop_host target)
     if(NOT MSVC)
         target_link_libraries(${target} PRIVATE m)
     endif()
+    snesrecomp_guard_header_shadowing(${target})
 endfunction()
 
 # Optional delay-sync netcode (lib/recomp-net submodule). See docs/RECOMP_NET.md.
