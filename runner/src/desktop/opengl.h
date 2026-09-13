@@ -17,6 +17,9 @@ extern "C" {
  * is on. */
 void snesrecomp_opengl_set_vsync(int enable);
 
+/* Capture the next fully composited OpenGL frame to screenshots/*.bmp. */
+void OpenGLRenderer_RequestScreenshot(void);
+
 #ifdef __cplusplus
 }
 #endif

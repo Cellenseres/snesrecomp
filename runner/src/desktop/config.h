@@ -38,6 +38,9 @@ enum {
   /* Local rewind filmstrip (snes_rewind.c). Appended for the same reason as
    * SaveStateMenu: the Load/Save ranges above are index arithmetic. */
   kKeys_Rewind,
+  /* OpenGL-only framebuffer capture. Kept separate from the diagnostic
+   * SNESRECOMP_SCREENSHOT path, which is driven by environment variables. */
+  kKeys_Screenshot,
   kKeys_Total,
 };
 

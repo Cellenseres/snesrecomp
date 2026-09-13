@@ -150,6 +150,7 @@ static int RemapSdlButton(int button);
 static void HandleGamepadInput(GamepadInfo *gi, int button, bool pressed);
 static void HandleInput(int keyCode, int keyMod, bool pressed);
 static void HandleCommand(uint32 j, bool pressed);
+static void RequestScreenshot(void);
 #ifndef __ANDROID__
 void OpenGLRenderer_Create(struct RendererFuncs *funcs);
 #include "opengl.h"   /* snesrecomp_opengl_set_vsync */
@@ -2243,10 +2244,12 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
     static const struct { const char *name; int cmd; } kProbe[] = {
       { "VolumeUp", kKeys_VolumeUp }, { "VolumeDown", kKeys_VolumeDown },
       { "SaveStateMenu", kKeys_SaveStateMenu }, { "Rewind", kKeys_Rewind },
-      { "DisplayPerf", kKeys_DisplayPerf }, { "Pause", kKeys_Pause },
+      { "Screenshot", kKeys_Screenshot }, { "DisplayPerf", kKeys_DisplayPerf },
+      { "Pause", kKeys_Pause },
     };
     static const SDL_Keycode kKeys[] = {
       SDLK_KP_PLUS, SDLK_KP_MINUS, SDLK_F11, SDLK_F12, SDLK_f, SDLK_p, SDLK_EQUALS, SDLK_MINUS,
+      SDLK_F7, SDLK_F8,
     };
     for (size_t i = 0; i < sizeof(kProbe) / sizeof(kProbe[0]); i++) {
       const char *bound = "(unbound among the probed keys)";
@@ -3444,6 +3447,7 @@ static void HandleCommand(uint32 j, bool pressed) {
     case kKeys_DisplayPerf: snes_osd_toggle_fps(); break;
     case kKeys_SaveStateMenu: g_savestate_menu_hotkey = 1; break;
     case kKeys_Rewind: g_rewind_hotkey = 1; break;
+    case kKeys_Screenshot: RequestScreenshot(); break;
     case kKeys_ToggleRenderer:
       g_ppu_render_flags ^= kPpuRenderFlags_NewRenderer;
       printf("New renderer = %x\n", g_ppu_render_flags & kPpuRenderFlags_NewRenderer);
@@ -3464,6 +3468,25 @@ static void HandleInput(int keyCode, int keyMod, bool pressed) {
   int j = FindCmdForSdlKey(keyCode, (SDL_Keymod)keyMod);
   if (j != 0)
     HandleCommand(j, pressed);
+}
+
+static void RequestScreenshot(void) {
+  static double s_last_screenshot_time = -1000.0;
+  double now = MonotonicSeconds();
+  if (now - s_last_screenshot_time < 0.5)
+    return;
+  s_last_screenshot_time = now;
+
+#ifdef __ANDROID__
+  fprintf(stderr, "Screenshots require the desktop OpenGL backend.\n");
+#else
+  if (g_config.output_method != kOutputMethod_OpenGL) {
+    fprintf(stderr, "Screenshots require OutputMethod = OpenGL in config.ini "
+                    "(shaders share the same limitation).\n");
+    return;
+  }
+  OpenGLRenderer_RequestScreenshot();
+#endif
 }
 
 static uint32 GetActiveControllers(void) {
