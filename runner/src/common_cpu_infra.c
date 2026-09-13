@@ -606,13 +606,11 @@ void RecompStackPush(const char *name) {
      * magnitudes on the interp@ entries, which are two unrelated stack
      * pointers subtracted, not drift.
      *
-     * The ancestor scans (cpu_resolve_ancestor_skip / _post_return_skip) only
-     * read strict ancestors at i <= top-2, which have necessarily run their
-     * prologue, so they were never exposed to the stale window. Seeding here
-     * makes that an invariant instead of an argument. The prologue still
-     * overwrites with its tailcall-adjusted _entry_s, so no established
-     * behaviour changes. */
-    g_cpu_entry_s[slot] = g_cpu.S;
+     * NOT seeded here: an hle_func stub has no prologue to overwrite it, and
+     * it forwards SKIP_N without consuming a level, so a seeded slot makes
+     * that frame a match for cpu_resolve_ancestor_skip. The unwind then
+     * stops one frame short and a later RTS/RTL pops guest bytes that are
+     * not a return frame. */
     g_cpu_entry_tailcall[slot] = 0;  /* set only if this prologue adopts a
                                       * tailcall return context (below) */
   } else if (getenv("SNESRECOMP_STACK_CAP_ABORT")) {
