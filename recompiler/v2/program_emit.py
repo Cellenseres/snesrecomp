@@ -35,6 +35,7 @@ from .decoder import (
     set_decode_cache_enabled,
 )
 from .emit_bank import BankEntry, emit_bank
+from .link_closure import assert_closed
 from .program_analysis import NodeDisposition, ProgramManifest, VariantKey
 from .translation_units import write_bank_translation_units
 
@@ -620,7 +621,8 @@ def emit_program(*, rom: bytes, parsed, manifest: ProgramManifest,
                  callee_exit_mx_modes: Mapping | None = None,
                  enable_hle: bool = True,
                  shard_threshold_bytes: int = 4 * 1024 * 1024,
-                 shard_pc_span: int = 0x0800) -> EmissionResult:
+                 shard_pc_span: int = 0x0800,
+                 check_link_closure: bool = True) -> EmissionResult:
     entries_by_bank, emitted, name_for_pc, cfg_by_bank = build_emission_entries(
         manifest, parsed, enable_hle=enable_hle)
     all_banks = sorted(set(cfg_by_bank) | set(entries_by_bank))
@@ -813,6 +815,12 @@ def emit_program(*, rom: bytes, parsed, manifest: ProgramManifest,
         write_if_changed(
             staging / ".snesrecomp-cache.json",
             json.dumps(cache, indent=2, sort_keys=True) + "\n")
+        # Gate the swap, not the caller's next command. Checking staging means
+        # a tree that cannot link is never published over one that can: the
+        # raise propagates through the `finally` below, which discards
+        # staging and leaves the live directory exactly as it was.
+        if check_link_closure:
+            assert_closed(staging, display_dir=workspace.target)
         workspace.publish()
     finally:
         workspace.cleanup()
