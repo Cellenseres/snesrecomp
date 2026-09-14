@@ -564,10 +564,10 @@ set(SNESRECOMP_RUNNER_INCLUDE_DIRS
 #
 # snesrecomp_target_stage_dir(<target> <source_dir> <dest_relative>)
 #
-# Copies <source_dir> to $<TARGET_FILE_DIR:target>/<dest_relative> every time
-# <target> is built. mods/, translations/ and the like are read from beside
-# the executable at runtime, so a binary without them beside it runs without
-# them -- silently, for a mods catalog.
+# Replaces $<TARGET_FILE_DIR:target>/<dest_relative> with <source_dir> every
+# time <target> is built. mods/, translations/ and the like are read from
+# beside the executable at runtime, so a binary without them beside it runs
+# without them -- silently, for a mods catalog.
 #
 # POST_BUILD on the executable rather than a separate ALL target, because the
 # executable is the one thing every build path agrees on: `cmake --build
@@ -582,6 +582,8 @@ function(snesrecomp_target_stage_dir target source_dir dest_rel)
             "snesrecomp_target_stage_dir(${target}): ${source_dir} is not a directory")
     endif()
     add_custom_command(TARGET ${target} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E remove_directory
+            "$<TARGET_FILE_DIR:${target}>/${dest_rel}"
         COMMAND ${CMAKE_COMMAND} -E copy_directory
             "${source_dir}" "$<TARGET_FILE_DIR:${target}>/${dest_rel}"
         COMMENT "${target}: staging ${dest_rel}/ beside the executable"

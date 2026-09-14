@@ -59,6 +59,9 @@ static uint16 kDefaultKbdControls[kKeys_Total] = {
    * move them. */
   _(SDLK_F11),
   _(SDLK_F12),
+  /* Screenshot is opt-in through a port's config.ini so it does not displace
+   * existing F-key overlay defaults. */
+  N,
 };
 /* Opt in before parsing: existing hosts keep their legacy slot defaults. */
 void ConfigUseStateMenuDefaults(void) {
@@ -87,7 +90,7 @@ static const KeyNameId kKeyNameId[] = {
   M(Load), M(Save),
   S(Fullscreen), S(Reset),
   S(Pause), S(PauseDimmed), S(Turbo), S(WindowBigger), S(WindowSmaller), S(VolumeUp), S(VolumeDown), S(DisplayPerf), S(ToggleRenderer), S(ToggleWidescreen),
-  S(SaveStateMenu), S(Rewind),
+  S(SaveStateMenu), S(Rewind), S(Screenshot),
 };
 #undef S
 #undef M
