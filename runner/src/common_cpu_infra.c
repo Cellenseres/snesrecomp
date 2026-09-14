@@ -123,6 +123,9 @@ int g_recomp_stack_top = 0;
  * decrement contract. See ISSUES.md "shared-tail multi-level non-local
  * return" (the fish-explosion OAM wipe). */
 uint16_t g_cpu_entry_s[RECOMP_STACK_DEPTH];
+/* A forwarding HLE stub has a recomp-stack frame but no generated prologue,
+ * so its entry-S must never take part in a return-to-ancestor lookup. */
+static uint8_t g_cpu_entry_s_valid[RECOMP_STACK_DEPTH];
 /* Expected positive S delta when a generated callee consumes the hardware
  * return frame that its generated caller pushed. */
 static uint8_t g_cpu_entry_return_frame[RECOMP_STACK_DEPTH];
@@ -157,6 +160,11 @@ void cpu_tailcall_inherit_return_context(uint16_t entry_s, uint8_t hrv) {
 }
 
 int cpu_take_tailcall_return_context(uint16_t *entry_s, uint8_t *hrv) {
+  /* HLE forwarding stubs call this with NULL immediately after their stack
+   * push. They deliberately have no generated prologue, so exclude their
+   * seeded diagnostic baseline from production ancestor scans. */
+  if (!entry_s && g_recomp_stack_top > 0)
+    g_cpu_entry_s_valid[g_recomp_stack_top - 1] = 0;
   if (!g_tailcall_context_valid) return 0;
   if (entry_s) *entry_s = g_tailcall_entry_s;
   if (hrv) *hrv = g_tailcall_hrv;
@@ -347,7 +355,7 @@ int cpu_resolve_ancestor_skip(uint16_t ret_s) {
   if (top < 2 || top > RECOMP_STACK_DEPTH) return -1;
   int result = -1;
   for (int i = top - 2; i >= 0; i--) {
-    if (g_cpu_entry_s[i] == ret_s) {
+    if (g_cpu_entry_s_valid[i] && g_cpu_entry_s[i] == ret_s) {
       result = cpu_resolve_unwind_depth(i, top);
       break;
     }
@@ -414,7 +422,8 @@ int cpu_resolve_post_return_skip(uint16_t post_s) {
      * this feeds the identical SKIP_N decrement contract, so a tail-entered
      * frame on the path inflates a raw count here too. Identical to the old
      * (top-1)-i when no frame on the path was tail-entered. */
-    if (expected == post_s) return cpu_resolve_unwind_depth(i, top);
+    if (g_cpu_entry_s_valid[i] && expected == post_s)
+      return cpu_resolve_unwind_depth(i, top);
   }
   return -1;
 }
@@ -606,13 +615,11 @@ void RecompStackPush(const char *name) {
      * magnitudes on the interp@ entries, which are two unrelated stack
      * pointers subtracted, not drift.
      *
-     * The ancestor scans (cpu_resolve_ancestor_skip / _post_return_skip) only
-     * read strict ancestors at i <= top-2, which have necessarily run their
-     * prologue, so they were never exposed to the stale window. Seeding here
-     * makes that an invariant instead of an argument. The prologue still
-     * overwrites with its tailcall-adjusted _entry_s, so no established
-     * behaviour changes. */
+     * HLE forwarding stubs explicitly invalidate this seed through
+     * cpu_take_tailcall_return_context(NULL, NULL), before they can call a
+     * helper that bounces into the interpreter. */
     g_cpu_entry_s[slot] = g_cpu.S;
+    g_cpu_entry_s_valid[slot] = 1;
     g_cpu_entry_tailcall[slot] = 0;  /* set only if this prologue adopts a
                                       * tailcall return context (below) */
   } else if (getenv("SNESRECOMP_STACK_CAP_ABORT")) {
