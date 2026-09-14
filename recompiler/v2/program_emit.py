@@ -21,6 +21,7 @@ from snes65816 import vector_table_offset
 from .atomic_output import AtomicOutputDir, write_if_changed
 from .codegen import (
     set_force_variant_at,
+    set_emitted_names,
     set_name_resolver,
     set_rom_size,
     set_trampoline_returns,
@@ -656,6 +657,8 @@ def emit_program(*, rom: bytes, parsed, manifest: ProgramManifest,
         set_decode_cache_enabled(True)
         set_rom_size(len(rom))
         set_name_resolver(dict(name_for_pc))
+        # The same map, unaliased: what each body is really called.
+        set_emitted_names(dict(name_for_pc))
         set_force_variant_at({})
         set_valid_variants(emitted, authoritative=True)
         set_trampoline_returns(set())

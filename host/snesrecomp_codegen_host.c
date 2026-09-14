@@ -11,6 +11,7 @@
 
 #include "host_paths.h"   /* snesrecomp_exe_basename, snesrecomp_exe_dir_path */
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -889,8 +890,35 @@ static int json_get_string(const char* line, const char* key, char* out,
     size_t i = 0;
     while (*p && *p != '"' && i + 1 < out_cap) {
         if (*p == '\\' && p[1]) {
+            /* Decode the escape rather than copying the letter after the
+             * backslash: `\n` was arriving in the launcher (and in
+             * snesrecomp_rebuild.log) as a literal 'n', running every line
+             * of a multi-line diagnostic together. */
             ++p;
-            out[i++] = *p++;
+            switch (*p) {
+                case 'n':  out[i++] = '\n'; ++p; break;
+                case 't':  out[i++] = '\t'; ++p; break;
+                case 'r':  out[i++] = '\r'; ++p; break;
+                case 'b':  out[i++] = '\b'; ++p; break;
+                case 'f':  out[i++] = '\f'; ++p; break;
+                case 'u': {
+                    /* Keep the parser in step with the input even though
+                     * only the ASCII subset is representable here. */
+                    int cp = 0, digits = 0;
+                    ++p;
+                    while (digits < 4 && isxdigit((unsigned char)*p)) {
+                        char c = *p++;
+                        int v = (c <= '9') ? c - '0'
+                                           : (c | 0x20) - 'a' + 10;
+                        cp = (cp << 4) | v;
+                        ++digits;
+                    }
+                    out[i++] = (digits == 4 && cp >= 0x20 && cp < 0x7F)
+                                   ? (char)cp : '?';
+                    break;
+                }
+                default:   out[i++] = *p++; break;  /* " \ / and friends */
+            }
             continue;
         }
         out[i++] = *p++;
@@ -925,7 +953,7 @@ static void handle_progress_line(const char* line,
     char event[64] = "";
     json_get_string(line, "event", event, sizeof(event));
     if (strcmp(event, "phase") == 0) {
-        char message[240] = "";
+        char message[4096] = "";
         char phase[64] = "";
         double pct = -1.0;
         json_get_string(line, "message", message, sizeof(message));
@@ -936,7 +964,7 @@ static void handle_progress_line(const char* line,
             snprintf(message, sizeof(message), "%s", phase);
         on_progress(progress_ctx, (float)pct, message[0] ? message : NULL);
     } else if (strcmp(event, "log") == 0 || strcmp(event, "error") == 0) {
-        char message[240] = "";
+        char message[4096] = "";
         if (json_get_string(line, "message", message, sizeof(message))) {
             step_log_line(message);
             on_progress(progress_ctx, -1.0f, message);
