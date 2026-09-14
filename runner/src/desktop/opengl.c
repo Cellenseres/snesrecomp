@@ -31,6 +31,8 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include <stdlib.h>
+#include <string.h>
+#include <time.h>
 
 #include "types.h"
 #include "util.h"
@@ -44,9 +46,14 @@ static SDL_Window *g_window;
 static uint8 *g_screen_buffer;
 static size_t g_screen_buffer_size;
 static int g_draw_width, g_draw_height;
-static unsigned int g_program, g_VAO;
+static unsigned int g_program, g_flash_program, g_VAO;
 static GlTextureWithSize g_texture;
 static GlslShader *g_glsl_shader;
+static bool g_want_screenshot;
+static double g_screenshot_flash_start_time = -1.0;
+static const double kScreenshotFlashSeconds = 0.15;
+
+extern void MkDir(const char *s);
 
 /* -1 = decide from config at init. A host that paces presentation itself
  * (an FPS cap, a simulation/presentation split) sets 0 so the swap does not
@@ -178,6 +185,31 @@ static bool OpenGLRenderer_Init(SDL_Window *window) {
     printf("%s\n", infolog);
   }
 
+  const GLchar *flash_fs_code = "#version 330 core\n" CODE(
+  out vec4 FragColor;
+  uniform vec4 color;
+  void main(void) {
+    FragColor = color;
+  }
+);
+  unsigned int flash_fs = glCreateShader(GL_FRAGMENT_SHADER);
+  glShaderSource(flash_fs, 1, &flash_fs_code, NULL);
+  glCompileShader(flash_fs);
+  glGetShaderiv(flash_fs, GL_COMPILE_STATUS, &success);
+  if (!success) {
+    glGetShaderInfoLog(flash_fs, 512, NULL, infolog);
+    printf("%s\n", infolog);
+  }
+  g_flash_program = glCreateProgram();
+  glAttachShader(g_flash_program, vs);
+  glAttachShader(g_flash_program, flash_fs);
+  glLinkProgram(g_flash_program);
+  glGetProgramiv(g_flash_program, GL_LINK_STATUS, &success);
+  if (!success) {
+    glGetProgramInfoLog(g_flash_program, 512, NULL, infolog);
+    printf("%s\n", infolog);
+  }
+
   if (g_config.shader)
     g_glsl_shader = GlslShader_CreateFromFile(g_config.shader);
 
@@ -189,6 +221,92 @@ static void OpenGLRenderer_Destroy(void) {
 
 static void OpenGLRenderer_GetOutputSize(int *width, int *height) {
   snesrecomp_sdl_get_drawable_size(g_window, width, height);
+}
+
+void OpenGLRenderer_RequestScreenshot(void) {
+  g_want_screenshot = true;
+}
+
+static double MonotonicSeconds(void) {
+  return (double)SDL_GetPerformanceCounter() / SDL_GetPerformanceFrequency();
+}
+
+static void SaveScreenshotBmp(int width, int height) {
+  size_t pixel_size = (size_t)width * (size_t)height * 4;
+  uint8 *pixels = (uint8 *)malloc(pixel_size);
+  if (!pixels)
+    return;
+
+  glReadPixels(0, 0, width, height, GL_BGRA, GL_UNSIGNED_BYTE, pixels);
+
+  MkDir("screenshots");
+
+  time_t t = time(NULL);
+  struct tm tm_snapshot;
+  struct tm *local = localtime(&t);
+  if (local)
+    tm_snapshot = *local;
+  else
+    memset(&tm_snapshot, 0, sizeof(tm_snapshot));
+
+  char path[256];
+  snprintf(path, sizeof(path),
+           "screenshots/screenshot_%04d%02d%02d_%02d%02d%02d.bmp",
+           tm_snapshot.tm_year + 1900, tm_snapshot.tm_mon + 1,
+           tm_snapshot.tm_mday, tm_snapshot.tm_hour, tm_snapshot.tm_min,
+           tm_snapshot.tm_sec);
+
+  FILE *f = fopen(path, "wb");
+  if (f) {
+    uint32 pixel_data_size = (uint32)pixel_size;
+    uint32 file_size = 14 + 40 + pixel_data_size;
+    uint32 pixel_offset = 14 + 40;
+    uint32 dib_size = 40;
+    int32 w = width;
+    int32 h = height;
+    uint16 planes = 1;
+    uint16 bits = 32;
+    uint32 zero = 0;
+
+    fwrite("BM", 1, 2, f);
+    fwrite(&file_size, 4, 1, f);
+    fwrite(&zero, 4, 1, f);
+    fwrite(&pixel_offset, 4, 1, f);
+    fwrite(&dib_size, 4, 1, f);
+    fwrite(&w, 4, 1, f);
+    fwrite(&h, 4, 1, f);
+    fwrite(&planes, 2, 1, f);
+    fwrite(&bits, 2, 1, f);
+    fwrite(&zero, 4, 1, f);
+    fwrite(&pixel_data_size, 4, 1, f);
+    fwrite(&zero, 4, 1, f);
+    fwrite(&zero, 4, 1, f);
+    fwrite(&zero, 4, 1, f);
+    fwrite(&zero, 4, 1, f);
+    fwrite(pixels, 1, pixel_size, f);
+    fclose(f);
+    printf("Screenshot saved: %s\n", path);
+    g_screenshot_flash_start_time = MonotonicSeconds();
+  } else {
+    fprintf(stderr, "Screenshot: couldn't open '%s' for writing\n", path);
+  }
+
+  free(pixels);
+}
+
+static bool DrawScreenshotFlash(double elapsed_seconds) {
+  if (elapsed_seconds >= kScreenshotFlashSeconds)
+    return false;
+
+  float alpha = 0.5f * (float)(1.0 - elapsed_seconds / kScreenshotFlashSeconds);
+  glEnable(GL_BLEND);
+  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+  glUseProgram(g_flash_program);
+  glUniform4f(glGetUniformLocation(g_flash_program, "color"), 1.0f, 1.0f, 1.0f, alpha);
+  glBindVertexArray(g_VAO);
+  glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+  glDisable(GL_BLEND);
+  return true;
 }
 
 static void OpenGLRenderer_BeginDraw(int width, int height, uint8 **pixels, int *pitch) {
@@ -242,6 +360,17 @@ static void OpenGLRenderer_EndDraw(void) {
   } else {
     GlslShader_Render(g_glsl_shader, &g_texture, viewport.x, viewport.y,
                       viewport.width, viewport.height);
+  }
+
+  if (g_want_screenshot) {
+    g_want_screenshot = false;
+    SaveScreenshotBmp(drawable_width, drawable_height);
+  }
+  if (g_screenshot_flash_start_time >= 0.0) {
+    double now = MonotonicSeconds();
+    glViewport(0, 0, drawable_width, drawable_height);
+    if (!DrawScreenshotFlash(now - g_screenshot_flash_start_time))
+      g_screenshot_flash_start_time = -1.0;
   }
 
   SDL_GL_SwapWindow(g_window);
