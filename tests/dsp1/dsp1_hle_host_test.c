@@ -103,7 +103,7 @@ int main(void) {
   fails += check((status(source) & kDrs) != 0,
                  "partial parameter word sets byte phase");
 
-  MemoryState memory = {{memory_state_transfer}, {0}, 0, 0, 0};
+  MemoryState memory = {{memory_state_transfer, NULL}, {0}, 0, 0, 0};
   dsp1_saveload(source, &memory.base);
   fails += check(!memory.failed, "save in-flight HLE command");
   memory.position = 0;
