@@ -187,7 +187,7 @@ int main(void) {
   check(!superfx_get_widescreen_frame(optin, NULL, NULL, NULL, NULL),
         "faithful mode never exposes an enhanced frame");
 
-  StateSink state = {{transfer_state}, {0}, 0, 0};
+  StateSink state = {{transfer_state, NULL}, {0}, 0, 0};
   native->master_clock = 123456;
   native->clock_credit = -7;
   native->irq_pending = true;

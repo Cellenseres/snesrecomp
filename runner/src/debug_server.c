@@ -4118,7 +4118,7 @@ static void cmd_save_state(const char *args) {
     uint32_t magic = L3_SNAP_MAGIC, version = L3_SNAP_VERSION;
     fwrite(&magic, 4, 1, f);
     fwrite(&version, 4, 1, f);
-    FileSli fs = {{_file_sli_func}, f, 1, 0, 0};
+    FileSli fs = {{_file_sli_func, NULL}, f, 1, 0, 0};
     snes_saveload(g_snes, &fs.sli);
     fclose(f);
     if (fs.error) {
@@ -4235,7 +4235,7 @@ static void cmd_load_state(const char *args) {
         send_fmt("{\"error\":\"bad version: got %u want %u\"}", version, L3_SNAP_VERSION);
         return;
     }
-    FileSli fs = {{_file_sli_func}, f, 0, 0, 0};
+    FileSli fs = {{_file_sli_func, NULL}, f, 0, 0, 0};
     snes_saveload(g_snes, &fs.sli);
     fclose(f);
     if (fs.error) {

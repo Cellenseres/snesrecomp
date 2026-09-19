@@ -344,7 +344,7 @@ static uint64_t g_state_generation;
 
 /* The last field actually presented, kept so an overlay can freeze the guest
  * and still have something to draw behind itself. Sized like g_my_pixels. */
-static uint8_t g_frozen_frame[kPpuBufWidth * 4 * 240];
+static uint8_t g_frozen_frame[kSnesDesktopMaxFrameWidth * 4 * 240];
 static int g_frozen_w, g_frozen_h;
 /* The simulated frame the next present shows. Read by SNESRECOMP_SCREENSHOT
  * and by frame blending, which advances its kept frame once per simulated
@@ -495,7 +495,8 @@ static void PreparePpuFrame(void) {
   int fh = g_game->frame_height > 0 ? g_game->frame_height : 224;
   if (g_game->prepare_frame)
     g_game->prepare_frame(drawable_width, drawable_height, &fw, &fh);
-  if (fw <= 0 || fw > kPpuBufWidth) fw = 256;
+  int max_width = g_game->native_widescreen ? kPpuBufWidth : kSnesDesktopMaxFrameWidth;
+  if (fw <= 0 || fw > max_width) fw = 256;
   if (fh <= 0 || fh > 240) fh = 224;
   g_snes_width = fw;
   g_snes_height = fh;
@@ -1934,6 +1935,8 @@ static void SdlRenderer_BeginDraw(int width, int height, uint8 **pixels, int *pi
   SnesDisplayAspect_ComputeViewport(width, height, output_width, output_height,
                                     SnesDisplayAspect_Clamp(g_config.display_aspect),
                                     g_config.ignore_aspect_ratio, false, &viewport);
+  if (g_game->compute_viewport)
+    g_game->compute_viewport(width, height, output_width, output_height, &viewport);
   g_sdl_present_rect.x = viewport.x;
   g_sdl_present_rect.y = viewport.y;
   g_sdl_present_rect.w = viewport.width;
@@ -2120,6 +2123,9 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
   g_simulation_hz = game->simulation_hz > 0 ? game->simulation_hz : SNES_HOST_NTSC_HZ;
   g_snes_width = game->frame_width > 0 ? game->frame_width : 256;
   g_snes_height = game->frame_height > 0 ? game->frame_height : 224;
+#ifndef __ANDROID__
+  snesrecomp_opengl_set_viewport(game->compute_viewport);
+#endif
   const char *build_version = game->build_version ? game->build_version : "dev";
 
 #ifndef _WIN32
@@ -2292,7 +2298,8 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
    * an empty one is valid. */
   if (game->game_id && game->game_id[0]) {
     char mods_dir[1024];
-    if (snesrecomp_exe_dir_path("mods/preloaded", mods_dir, sizeof(mods_dir))) {
+    if (config_file) snprintf(mods_dir, sizeof(mods_dir), "mods/preloaded");
+    if (config_file || snesrecomp_exe_dir_path("mods/preloaded", mods_dir, sizeof(mods_dir))) {
       g_mods_ready = snes_mod_runtime_initialize_c(
           mods_dir, game->game_id,
           game->expected_sha256_hex ? game->expected_sha256_hex : "");

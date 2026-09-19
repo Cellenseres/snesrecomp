@@ -104,7 +104,26 @@ uint32_t snes_saveload_get_version(void) { return s_saveload_version; }
 void snes_saveload(Snes *snes, SaveLoadInfo *sli) {
   cpu_saveload(snes->cpu, sli);
   apu_saveload(snes->apu, sli);
-  dma_saveload(snes->dma, sli);
+  /* Early RTLS v6/v7 used a 216-byte DMA range and a 40-byte SNES tail.
+   * The later transient HDMA field changed struct alignment even though it
+   * was inserted before the saved range. Recognize the following PPU header
+   * rather than guessing from the RTLS version shared by both layouts. */
+  uint32_t ppu_header[2];
+  bool legacy_layout = s_saveload_version <= 7 && sli->peek &&
+      sli->peek(sli, 216, ppu_header, sizeof(ppu_header)) &&
+      ppu_header[0] == 0x30555050u &&
+      ppu_header[1] == PPU_SAVESTATE_REGS_SIZE + PPU_SAVESTATE_MEM_SIZE;
+  if (legacy_layout) {
+    uint8_t saved[216];
+    sli->func(sli, saved, sizeof(saved));
+    _Static_assert(sizeof(snes->dma->channel) == 208, "legacy DMA channel layout");
+    memcpy(snes->dma->channel, saved, 208);
+    memcpy(&snes->dma->dmaTimer, saved + 208, 4);
+    snes->dma->dmaBusy = saved[212] != 0;
+    snes->dma->hdmaPendingInit = 0;
+  } else {
+    dma_saveload(snes->dma, sli);
+  }
   ppu_saveload(snes->ppu, sli);
   cart_saveload(snes->cart, sli);
 
@@ -129,6 +148,16 @@ void snes_saveload(Snes *snes, SaveLoadInfo *sli) {
      * means this branch is unreachable through RtlLoadSnapshot; it stays as
      * the explanation for anyone who tries to lower that bound again. */
     assert(!"savestate format 4/5 is no longer supported");
+  } else if (legacy_layout) {
+    uint8_t saved[40];
+    sli->func(sli, saved, sizeof(saved));
+    memset(&snes->hPos, 0, sizeof(*snes) - offsetof(Snes, hPos));
+    memcpy(&snes->hPos, saved, 26); /* hPos through inIrq */
+    snes->inVblank = saved[26] != 0;
+    snes->autoJoyRead = saved[27] != 0;
+    memcpy(&snes->autoJoyTimer, saved + 28, 2);
+    memcpy(&snes->multiplyResult, saved + 32, 4);
+    memcpy(&snes->divideResult, saved + 36, 4);
   } else {
     /* The savestate format IS this byte range. Adding or reordering any field
      * after hPos silently changes it and quietly invalidates every existing

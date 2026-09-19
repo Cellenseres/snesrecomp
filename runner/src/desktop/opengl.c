@@ -59,6 +59,12 @@ extern void MkDir(const char *s);
  * (an FPS cap, a simulation/presentation split) sets 0 so the swap does not
  * also block; one that wants the driver to pace it sets 1. */
 static int g_vsync_override = -1;
+static void (*g_compute_viewport)(int, int, int, int, SnesDisplayViewport *);
+
+void snesrecomp_opengl_set_viewport(void (*compute)(int, int, int, int,
+                                                   SnesDisplayViewport *)) {
+  g_compute_viewport = compute;
+}
 
 void snesrecomp_opengl_set_vsync(int enable) {
   g_vsync_override = enable ? 1 : 0;
@@ -336,6 +342,8 @@ static void OpenGLRenderer_EndDraw(void) {
       g_draw_width, g_draw_height, drawable_width, drawable_height,
       SnesDisplayAspect_Clamp(g_config.display_aspect),
       g_config.ignore_aspect_ratio, false, &viewport);
+  if (g_compute_viewport)
+    g_compute_viewport(g_draw_width, g_draw_height, drawable_width, drawable_height, &viewport);
 
   glBindTexture(GL_TEXTURE_2D, g_texture.gl_texture);
   if (g_draw_width == g_texture.width && g_draw_height == g_texture.height) {

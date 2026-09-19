@@ -5,6 +5,7 @@
 #include <time.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 #ifdef _WIN32
 #include <direct.h>
 #else
@@ -357,6 +358,44 @@ static void memory_sli_func(SaveLoadInfo *sli, void *data, size_t n) {
     return;
   }
   memory->position += n;
+}
+
+static bool file_sli_peek(SaveLoadInfo *sli, size_t offset, void *data, size_t n) {
+  FileSli *fs = (FileSli *)sli;
+  long pos = ftell(fs->f);
+  if (fs->is_save || fs->error || pos < 0 || offset > LONG_MAX - (size_t)pos)
+    return false;
+  if (fseek(fs->f, pos + (long)offset, SEEK_SET)) return false;
+  bool ok = fread(data, 1, n, fs->f) == n;
+  if (fseek(fs->f, pos, SEEK_SET)) return false;
+  return ok;
+}
+static bool memory_sli_peek(SaveLoadInfo *sli, size_t offset, void *data, size_t n) {
+  MemorySli *m = (MemorySli *)sli;
+  if (m->is_save || m->error || m->position > m->capacity ||
+      offset > m->capacity - m->position || n > m->capacity - m->position - offset)
+    return false;
+  memcpy(data, m->data + m->position + offset, n);
+  return true;
+}
+
+size_t RtlStateBytesRemaining(SaveLoadInfo *sli) {
+  if (!sli) return SIZE_MAX;
+  if (sli->func == memory_sli_func) {
+    MemorySli *m = (MemorySli *)sli;
+    return !m->is_save && !m->error && m->position <= m->capacity
+        ? m->capacity - m->position : SIZE_MAX;
+  }
+  if (sli->func == file_sli_func) {
+    FileSli *f = (FileSli *)sli;
+    if (f->is_save || f->error) return SIZE_MAX;
+    long pos = ftell(f->f);
+    if (pos < 0 || fseek(f->f, 0, SEEK_END)) return SIZE_MAX;
+    long end = ftell(f->f);
+    if (fseek(f->f, pos, SEEK_SET) || end < pos) return SIZE_MAX;
+    return (size_t)(end - pos);
+  }
+  return SIZE_MAX;
 }
 
 /* Host-side state that paces the guest but is not part of it.
@@ -860,7 +899,7 @@ bool RtlLoadSnapshot(const char *filename) {
     return false;
   }
   RtlApuLock();
-  FileSli fs = { { &file_sli_func }, f, false, false };
+  FileSli fs = { { &file_sli_func, &file_sli_peek }, f, false, false };
   snes_saveload_set_version(hdr[1]);
   snes_saveload(g_snes, &fs.base);
   /* v5+: an optional game-specific chunk follows the guest blob. Only call
@@ -917,7 +956,7 @@ bool RtlLoadSnapshotFromMemory(const void *data, size_t size) {
     return false;
 
   MemorySli memory = {
-    { &memory_sli_func }, (uint8 *)data, size, sizeof hdr, false, false
+    { &memory_sli_func, &memory_sli_peek }, (uint8 *)data, size, sizeof hdr, false, false
   };
   RtlApuLock();
   snes_saveload_set_version(hdr[1]);
