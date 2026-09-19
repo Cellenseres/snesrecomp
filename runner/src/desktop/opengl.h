@@ -1,4 +1,5 @@
 #pragma once
+#include "display_aspect.h"
 
 /* The shared desktop OpenGL presenter (desktop/opengl.c). util.h declares
  * OpenGLRenderer_Create itself; this header carries only the presentation
@@ -16,6 +17,8 @@ extern "C" {
  * pacing. Left unset, the presenter vsyncs unless config's DisableFrameDelay
  * is on. */
 void snesrecomp_opengl_set_vsync(int enable);
+void snesrecomp_opengl_set_viewport(void (*compute)(int, int, int, int,
+                                                   SnesDisplayViewport *));
 
 #ifdef __cplusplus
 }

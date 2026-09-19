@@ -37,6 +37,10 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "display_aspect.h"
+
+/* Compositor surfaces may be wider than the guest PPU's own line buffer. */
+enum { kSnesDesktopMaxFrameWidth = 1024 };
 
 #ifdef __cplusplus
 extern "C" {
@@ -141,6 +145,10 @@ typedef struct SnesDesktopHostGame {
   /* Window size at scale 1 for a frame of this width (default: 4:3 on 224). */
   int (*window_base_width)(int frame_w);
   int (*window_base_height)(void);
+  /* Override presentation geometry in both SDL and OpenGL. Leave NULL to
+   * use the configured SNES pixel aspect. Does not change guest geometry. */
+  void (*compute_viewport)(int frame_w, int frame_h, int drawable_w, int drawable_h,
+                           SnesDisplayViewport *viewport);
 } SnesDesktopHostGame;
 
 /* The whole program. Returns the process exit code. */

@@ -329,6 +329,9 @@ bool RtlLoadSnapshot(const char *filename);
 struct SaveLoadInfo;
 void RtlSaveExecutionState(struct SaveLoadInfo *sli);
 bool RtlLoadExecutionState(struct SaveLoadInfo *sli);
+/* Unread bytes in a snapshot stream, or SIZE_MAX for an unknown stream.
+ * Lets game chunks distinguish historical layouts without probing past EOF. */
+size_t RtlStateBytesRemaining(struct SaveLoadInfo *sli);
 void RtlApplyExecutionState(void);
 /* Host timeline invalidation after a successful load or reset. */
 uint64_t RtlStateGeneration(void);
