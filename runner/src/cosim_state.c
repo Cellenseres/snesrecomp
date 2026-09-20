@@ -63,7 +63,7 @@ static void hashsli_func(SaveLoadInfo *sli, void *data, size_t n) {
     HashSli *hs = (HashSli *)sli;
     hs->h = fnv_bytes(hs->h, data, n);
 }
-static void hashsli_init(HashSli *hs) { hs->base.func = hashsli_func; hs->h = FNV_OFF; }
+static void hashsli_init(HashSli *hs) { hs->base.func = hashsli_func; hs->base.peek = NULL; hs->h = FNV_OFF; }
 
 /* ── canonical CPU emit (fixed order/width, no PC) ──────────────────────── */
 static uint64_t hash_cpu(uint32_t *leader_pc_out) {
