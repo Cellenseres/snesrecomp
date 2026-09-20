@@ -43,6 +43,11 @@ extern "C" {
 
 /* Allocate the ring and read the env overrides. Safe to call more than once;
  * a second call with the same settings is a no-op. */
+/* Host-chosen defaults, applied by snes_rewind_configure(). Call BEFORE it.
+ * A value <= 0 keeps the built-in default for that field. The SNESRECOMP_REWIND*
+ * environment variables still win, so a developer override outranks the
+ * player's launcher setting exactly as it did before this existed. */
+void snes_rewind_set_defaults(int enabled, int depth, int interval);
 void snes_rewind_configure(void);
 void snes_rewind_shutdown(void);
 

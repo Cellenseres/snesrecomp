@@ -74,17 +74,32 @@ static int env_int(const char *name, int def, int lo, int hi) {
     return n;
 }
 
+/* Host-chosen starting point, overridden below by the environment. A host
+ * that never calls this leaves the built-in defaults in place, which is the
+ * behaviour every port had before the launcher could set them. */
+static int s_host_enabled = -1;   /* -1 = the host said nothing */
+static int s_host_depth, s_host_interval;
+
+void snes_rewind_set_defaults(int enabled, int depth, int interval) {
+    s_host_enabled = enabled ? 1 : 0;
+    if (depth > 0) s_host_depth = depth;
+    if (interval > 0) s_host_interval = interval;
+}
+
 void snes_rewind_configure(void) {
     const char *off;
+    int def_depth = s_host_depth > 0 ? s_host_depth : RW_DEPTH_DEFAULT;
+    int def_interval = s_host_interval > 0 ? s_host_interval : RW_INTERVAL_DEFAULT;
     if (s_configured) return;
     s_configured = 1;
 
+    if (s_host_enabled == 0) { s_enabled = 0; return; }
     off = getenv("SNESRECOMP_REWIND");
     if (off && off[0] == '0') { s_enabled = 0; return; }
 
-    s_depth = env_int("SNESRECOMP_REWIND_DEPTH", RW_DEPTH_DEFAULT,
+    s_depth = env_int("SNESRECOMP_REWIND_DEPTH", def_depth,
                       RW_DEPTH_MIN, RW_DEPTH_MAX);
-    s_interval = env_int("SNESRECOMP_REWIND_INTERVAL", RW_INTERVAL_DEFAULT,
+    s_interval = env_int("SNESRECOMP_REWIND_INTERVAL", def_interval,
                          RW_INTERVAL_MIN, RW_INTERVAL_MAX);
 
     s_ring = (RwSlot *)calloc((size_t)s_depth, sizeof(RwSlot));

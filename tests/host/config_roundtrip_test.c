@@ -203,11 +203,59 @@ static void test_written_from_nothing(void) {
         g_config.vsync);
 }
 
+/* [Rewind] is opt-in per host. A host that does not offer the launcher rows
+ * must leave the file exactly as it found it -- that is the promise that lets
+ * the keys be added to the shared writer without touching any existing port. */
+static void test_rewind_opt_in(void) {
+  /* Not opted in: a file with no rewind keys does not grow them... */
+  write_file(kBaseIni);
+  ParseConfigFile(kPath);
+  WriteConfigFile(kPath);
+  const char *out = read_file();
+  CHECK(out && !strstr(out, "[Rewind]"),
+        "a host that did not opt in still wrote a [Rewind] section");
+
+  /* ...and a file that already has them keeps them byte for byte, including
+   * a value this build would never have chosen. */
+  write_file("[Rewind]\nEnabled = 1\nDepth = 137\nInterval = 9\n");
+  ParseConfigFile(kPath);
+  WriteConfigFile(kPath);
+  out = read_file();
+  CHECK(out && strstr(out, "Depth = 137"),
+        "an existing rewind value was rewritten by a host that did not opt in");
+
+  /* Opted in: the three rows round-trip like any other setting. */
+  ConfigEnableRewindKeys();
+  write_file(kBaseIni);
+  ParseConfigFile(kPath);
+  g_config.rewind_enabled = true;
+  g_config.rewind_depth = 120;
+  g_config.rewind_interval = 4;
+  WriteConfigFile(kPath);
+
+  g_config.rewind_enabled = false;
+  g_config.rewind_depth = g_config.rewind_interval = -1;
+  ParseConfigFile(kPath);
+  CHECK(g_config.rewind_enabled, "rewind enable did not survive");
+  CHECK(g_config.rewind_depth == 120, "rewind depth: got %d", g_config.rewind_depth);
+  CHECK(g_config.rewind_interval == 4, "rewind interval: got %d",
+        g_config.rewind_interval);
+
+  /* Off is a real value, not an absent one. */
+  g_config.rewind_enabled = false;
+  WriteConfigFile(kPath);
+  g_config.rewind_enabled = true;
+  ParseConfigFile(kPath);
+  CHECK(!g_config.rewind_enabled, "rewind off did not survive");
+}
+
 int main(void) {
   test_fullscreen_roundtrip();
   test_player_sources_roundtrip();
   test_vsync_tristate();
   test_written_from_nothing();
+  /* Last: it flips the process-wide opt-in and never flips it back. */
+  test_rewind_opt_in();
   remove(kPath);
   if (g_failures) {
     fprintf(stderr, "config round-trip: %d failure(s)\n", g_failures);

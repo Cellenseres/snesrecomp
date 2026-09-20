@@ -29,6 +29,10 @@ static bool s_deadzone_migrated;
 bool ConfigDeadzoneMigrated(void) { return s_deadzone_migrated; }
 /* Set per player when [Controller] SourceP1/SourceP2 was actually present. */
 static bool s_player_src_seen[2];
+/* [Rewind] is written only for a host that offers the launcher rows, so a
+ * port that does not opt in keeps a byte-identical config.ini. */
+static bool s_rewind_keys;
+void ConfigEnableRewindKeys(void) { s_rewind_keys = true; }
 bool ConfigHasPlayerSource(int player) {
   return (unsigned)player < 2 && s_player_src_seen[player];
 }
@@ -378,6 +382,8 @@ static int GetIniSection(const char *s) {
   if (StringEqualsNoCase(s, "[Video]") ||
       StringEqualsNoCase(s, "[Emulation]"))
     return 9;
+  if (StringEqualsNoCase(s, "[Rewind]"))
+    return 10;
   return -1;
 }
 
@@ -458,6 +464,21 @@ static bool HandleIniConfig(int section, const char *key, char *value) {
     return true;
   } else if (section == 8) {
     return true;                 /* saved profile; launcher-owned */
+  } else if (section == 10) {
+    /* [Rewind]: the launcher's rewind rows, for a host that offers them
+     * (SnesDesktopHostGame.rewind_settings). The ring keeps whole-machine
+     * snapshots, so depth and interval are real memory decisions and belong
+     * in the file next to the switch that turns them on. */
+    if (StringEqualsNoCase(key, "Enabled")) {
+      return ParseBool(value, &g_config.rewind_enabled);
+    } else if (StringEqualsNoCase(key, "Depth")) {
+      g_config.rewind_depth = (int)strtol(value, (char **)NULL, 10);
+      return true;
+    } else if (StringEqualsNoCase(key, "Interval")) {
+      g_config.rewind_interval = (int)strtol(value, (char **)NULL, 10);
+      return true;
+    }
+    return true;                 /* host-owned rewind keys */
   } else if (section == 9) {
     /* [Video] / [Emulation]: the spellings a per-game host (Gundam Wing)
      * used for the settings the framework host now owns. Accepted so a
@@ -651,6 +672,11 @@ void ParseConfigFile(const char *filename) {
   g_config.gamepad_deadzone = SNES_CONFIG_DEFAULT_DEADZONE;
   g_config.display_aspect = kSnesDisplayAspect_Crt4x3;
   g_config.skip_launcher = false;
+  /* Rewind's built-in ring, matching snes_rewind.c's own defaults so a host
+   * that opts into the launcher rows starts from what it already had. */
+  g_config.rewind_enabled = true;
+  g_config.rewind_depth = 60;
+  g_config.rewind_interval = 6;
   /* Default ON to preserve current behaviour across other ports that
    * share this framework code; per-game .ini sets it false where the
    * oracle is incompatible with the repro workflow. See config.h doc. */
@@ -823,6 +849,9 @@ void WriteConfigFile(const char *filename) {
     { "Sound",      "Volume" },
     { "Controller", "SourceP1" },
     { "Controller", "SourceP2" },
+    { "Rewind",     "Enabled" },
+    { "Rewind",     "Depth" },
+    { "Rewind",     "Interval" },
     /* Only after a migration (see ParseKeyArray): [KeyMap] is otherwise the
      * player's, and left exactly as written. */
     { "KeyMap",     "VolumeUp" },
@@ -864,6 +893,16 @@ void WriteConfigFile(const char *filename) {
   CfgSet(kvs, N, "Sound", "Volume", "%d", g_config.volume);
   CfgSet(kvs, N, "Controller", "SourceP1", "%d", g_config.player_src[0]);
   CfgSet(kvs, N, "Controller", "SourceP2", "%d", g_config.player_src[1]);
+  if (s_rewind_keys) {
+    CfgSet(kvs, N, "Rewind", "Enabled", "%d", g_config.rewind_enabled ? 1 : 0);
+    CfgSet(kvs, N, "Rewind", "Depth", "%d", g_config.rewind_depth);
+    CfgSet(kvs, N, "Rewind", "Interval", "%d", g_config.rewind_interval);
+  } else {
+    /* Not offered by this host: leave whatever the file says untouched. */
+    CfgSkip(kvs, N, "Rewind", "Enabled");
+    CfgSkip(kvs, N, "Rewind", "Depth");
+    CfgSkip(kvs, N, "Rewind", "Interval");
+  }
   if (s_keymap_migrated) {
     CfgSet(kvs, N, "KeyMap", "VolumeUp", "%s", "Keypad +");
     CfgSet(kvs, N, "KeyMap", "VolumeDown", "%s", "Keypad -");

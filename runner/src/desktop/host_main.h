@@ -149,6 +149,34 @@ typedef struct SnesDesktopHostGame {
    * use the configured SNES pixel aspect. Does not change guest geometry. */
   void (*compute_viewport)(int frame_w, int frame_h, int drawable_w, int drawable_h,
                            SnesDisplayViewport *viewport);
+
+  /* ── Appended additively. Every field below is optional and zero means
+   *    "exactly what this host did before the field existed". ──────────── */
+
+  /* The launcher's aspect row, when this title's choices are not the three
+   * SNES pixel aspects. A port that rasterizes its own field (F-Zero's
+   * "Fit to window") owns the list and the meaning of the index; leave NULL
+   * and display_aspect_supported keeps drawing 4:3 / 8:7 / 1:1 as before.
+   * The chosen index reaches the port through after_config reading its own
+   * store, or through g_config.display_aspect when these are NULL. */
+  const char *const *aspect_labels;
+  int num_aspect_labels;
+  const char *aspect_setting_label;   /* NULL: "Display aspect" */
+  const char *aspect_setting_help;    /* NULL: the SNES pixel-aspect text */
+
+  /* SHA-1 digests that identify a good dump, for a title catalogued by SHA-1
+   * rather than SHA-256. Purely additive to expected_sha256_hex: a port may
+   * set either, both, or neither. Lowercase or uppercase hex, 40 chars. */
+  const char *const *known_sha1_hex;
+  int num_known_sha1;
+
+  /* Offer the launcher's rewind rows (on/off, buffer depth, interval) and
+   * persist them to config.ini [Rewind]. The runtime has always had rewind;
+   * without this there is no way for a player to configure it, and
+   * WriteConfigFile leaves any [Rewind] lines in the file untouched. The ring
+   * holds whole-machine snapshots, so a port that wants it off out of the box
+   * ships `[Rewind] Enabled = 0` in default_config_ini. */
+  int rewind_settings;
 } SnesDesktopHostGame;
 
 /* The whole program. Returns the process exit code. */

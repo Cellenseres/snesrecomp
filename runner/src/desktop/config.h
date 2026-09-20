@@ -121,6 +121,15 @@ typedef struct Config {
    * settings are accepted on read. */
   bool frame_blend;
   uint8 vsync;
+
+  /* config.ini [Rewind], for a host whose descriptor sets rewind_settings.
+   * The ring holds whole-machine snapshots on a frame cadence, so depth and
+   * interval are memory decisions, not cosmetics. Seeded from snes_rewind.c's
+   * own defaults; a port that wants rewind off out of the box ships
+   * `Enabled = 0` in its default_config_ini rather than changing these. */
+  bool rewind_enabled;
+  int rewind_depth;
+  int rewind_interval;
   int run_ahead;
   char renderer[32];
   /* [Sound] Volume, 0..100 (default 100): the mixer level the VolumeUp /
@@ -196,6 +205,11 @@ bool ConfigDeadzoneMigrated(void);
  * device, and the caller falls back to the older EnableGamepadN spelling
  * rather than to the seeded default. player is 0 or 1. */
 bool ConfigHasPlayerSource(int player);
+
+/* Opt in to persisting [Rewind]. A host that does not offer the launcher's
+ * rewind rows never calls this, and WriteConfigFile then leaves whatever the
+ * file says about rewind exactly as it found it. */
+void ConfigEnableRewindKeys(void);
 
 /* Analog stick deadzone, in raw axis units of a 32767 full scale. 10% is the
  * default because it clears a resting stick on the pads players actually own

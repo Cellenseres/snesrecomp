@@ -2259,6 +2259,9 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
       ParseConfigFile("config.local.ini");
     }
   }
+  /* Before after_config, so a port that wants to inspect the parsed rewind
+   * settings sees the same opt-in the writer will honour. */
+  if (game->rewind_settings) ConfigEnableRewindKeys();
   if (game->after_config) game->after_config();
   ApplyVolume();
   /* SNESRECOMP_KEYMAP_DUMP=1: what the system hotkeys resolved to, for a
@@ -2415,6 +2418,11 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
                                      ? RECOMP_LAUNCHER_VSYNC_OFF
                                      : RECOMP_LAUNCHER_VSYNC_ON;
         ls.renderer      = RendererChoice();
+        if (game->rewind_settings) {
+          ls.rewind_enabled  = g_config.rewind_enabled ? 1 : 0;
+          ls.rewind_depth    = g_config.rewind_depth;
+          ls.rewind_interval = g_config.rewind_interval;
+        }
 
         /* Open on the ROM the player already has, so a second launch is PLAY
          * rather than Change-ROM: an explicit argument first, then the copy
@@ -2445,6 +2453,11 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
         gi.known_sha256 = rom_identity_ok
             ? (const uint8_t (*)[32])&kExpectedSha256 : NULL;
         gi.num_known_sha256 = rom_identity_ok ? 1 : 0;
+        /* Additive: a title catalogued by SHA-1 sets these instead of, or as
+         * well as, the SHA-256 above. */
+        gi.known_sha1_hex = game->known_sha1_hex;
+        gi.num_known_sha1 = (size_t)(game->known_sha1_hex
+                                         ? game->num_known_sha1 : 0);
         gi.widescreen_supported = game->widescreen_supported;
         gi.msu1_supported = game->msu1_supported;
         /* Capability rows: each is drawn only because this host wires it. A
@@ -2452,7 +2465,16 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
 #if defined(SNESRECOMP_HOST_HAS_BLEND)
         gi.has_frame_blend  = 1;
 #endif
-        if (game->display_aspect_supported) {
+        if (game->aspect_labels && game->num_aspect_labels > 0) {
+          /* A port that rasterizes its own field owns the choices and the
+           * meaning of the index; this host only carries them to the row. */
+          gi.aspect_labels = game->aspect_labels;
+          gi.num_aspect_labels = game->num_aspect_labels;
+          gi.aspect_setting_label = game->aspect_setting_label
+                                        ? game->aspect_setting_label
+                                        : "Aspect ratio";
+          gi.aspect_setting_help = game->aspect_setting_help;
+        } else if (game->display_aspect_supported) {
           static const char *const labels[] = {
             "4:3 (CRT)", "8:7 (Square pixels)", "1:1 (Square frame)"
           };
@@ -2464,6 +2486,9 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
               "1:1 presents the native picture in a square.";
         }
         gi.has_shader = game->shader_supported;
+        /* Rewind rows. The runtime has always had the ring; without this the
+         * player has no way to size it or switch it off. */
+        gi.has_rewind_depth = game->rewind_settings ? 1 : 0;
         gi.has_run_ahead    = 1;   /* the runtime snapshots a machine in a frame */
         gi.has_vsync        = 1;
         gi.has_renderer     = 1;
@@ -2531,6 +2556,11 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
           g_config.skip_launcher       = ls.skip_launcher != 0;
           g_config.frame_blend         = ls.frame_blend != 0;
           g_config.run_ahead           = ls.run_ahead;
+          if (game->rewind_settings) {
+            g_config.rewind_enabled  = ls.rewind_enabled != 0;
+            if (ls.rewind_depth > 0)    g_config.rewind_depth = ls.rewind_depth;
+            if (ls.rewind_interval > 0) g_config.rewind_interval = ls.rewind_interval;
+          }
           g_config.vsync               = ls.vsync == RECOMP_LAUNCHER_VSYNC_OFF
                                              ? kSnesVSync_Off
                                              : ls.vsync == RECOMP_LAUNCHER_VSYNC_ADAPTIVE
@@ -2952,6 +2982,13 @@ error_reading:;
 
   if (framedump_dir)
     FrameDump_Init(framedump_dir);
+
+  /* The player's rewind choices, before snes_rewind_configure() sizes the
+   * ring. A port that does not offer the rows never calls this, so the ring
+   * keeps the built-in defaults exactly as it always has. */
+  if (game->rewind_settings)
+    snes_rewind_set_defaults(g_config.rewind_enabled, g_config.rewind_depth,
+                             g_config.rewind_interval);
 
   RtlEnableExtendedFrameTiming();
   bool running = true;
