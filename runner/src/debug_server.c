@@ -7616,7 +7616,7 @@ static void cmd_audio_stats(const char *args) {
     int pos = snprintf(buf, sizeof(buf),
         "{\"ok\":true,\"produced\":%llu,\"produced_cpu\":%llu,\"produced_audio\":%llu,"
         "\"dropped\":%llu,\"dropped_audible\":%llu,\"drop_runs\":%llu,\"consumed\":%llu,"
-        "\"fast_forward_discarded\":%llu,\"output_underflows\":%llu,"
+        "\"fast_forward_discarded\":%llu,\"output_underflows\":%llu,\"output_priming\":%llu,"
         "\"output_missing_frames\":%llu,"
         "\"consume_calls\":%llu,"
         "\"reg_writes\":%llu,\"kon_writes\":%llu,\"occupancy_highwater\":%u,"
@@ -7636,6 +7636,7 @@ static void cmd_audio_stats(const char *args) {
         (unsigned long long)st.drop_runs, (unsigned long long)st.consumed,
         (unsigned long long)st.fast_forward_discarded,
         (unsigned long long)st.output_underflows,
+        (unsigned long long)st.output_priming,
         (unsigned long long)st.output_missing_frames,
         (unsigned long long)st.consume_calls, (unsigned long long)st.reg_writes,
         (unsigned long long)st.kon_writes, st.occupancy_highwater,

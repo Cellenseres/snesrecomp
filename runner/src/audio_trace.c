@@ -159,11 +159,11 @@ static void stats_line(uint32_t ring_fill) {
   if (!s_stats_header_written) {
     fprintf(s_stats_out,
             "# ms produced consumed dropped dropped_audible drop_runs "
-            "underflows consume_calls occupancy hiwater prod_cpu prod_audio missing_frames\n");
+            "underflows consume_calls occupancy hiwater prod_cpu prod_audio missing_frames priming\n");
     s_stats_header_written = 1;
   }
   fprintf(s_stats_out,
-          "%llu %llu %llu %llu %llu %llu %llu %llu %u %u %llu %llu %llu\n",
+          "%llu %llu %llu %llu %llu %llu %llu %llu %u %u %llu %llu %llu %llu\n",
           (unsigned long long)wall_ms(),
           (unsigned long long)s_stats.produced,
           (unsigned long long)s_stats.consumed,
@@ -175,7 +175,8 @@ static void stats_line(uint32_t ring_fill) {
           ring_fill, s_stats.occupancy_highwater,
           (unsigned long long)s_stats.produced_cpu,
           (unsigned long long)s_stats.produced_audio,
-          (unsigned long long)s_stats.output_missing_frames);
+          (unsigned long long)s_stats.output_missing_frames,
+          (unsigned long long)s_stats.output_priming);
   fflush(s_stats_out);
 }
 
@@ -211,6 +212,10 @@ void audio_trace_on_fast_forward_discard(uint32_t samples,
 void audio_trace_on_output_underflow(uint32_t occupancy, uint32_t missing_frames) {
   s_stats.output_underflows++;
   s_stats.output_missing_frames += missing_frames;
+  s_stats.occupancy_current = occupancy;
+}
+void audio_trace_on_output_priming(uint32_t occupancy) {
+  s_stats.output_priming++;
   s_stats.occupancy_current = occupancy;
 }
 
