@@ -343,6 +343,23 @@ else
     echo "  (skipped: no SDL headers)"
 fi
 
+echo "=== config.ini round trip (launcher-editable settings) ==="
+# Needs SDL headers for the keycode names config.c resolves [KeyMap] through
+# (no window, no device). Skipped rather than failed where they are absent.
+if [ -n "$KB_SDL_LIBS" ]; then
+    # SDL_MAIN_HANDLED: config.h reaches SDL through sdl_compat.h, and SDL
+    # would otherwise rename main() out from under this harness.
+    "$CC" -std=c11 -Wall -Wextra -O1 -DSDL_MAIN_HANDLED $KB_SDL_DEF $KB_SDL_CFLAGS \
+        -I "$ROOT/runner/src" -I "$ROOT/runner/src/desktop" \
+        "$ROOT/tests/host/config_roundtrip_test.c" \
+        "$ROOT/runner/src/desktop/mmx_config.c" \
+        "$ROOT/runner/src/util.c" \
+        $KB_SDL_LIBS -o "$OUT/config_roundtrip_test"
+    ( cd "$OUT" && ./config_roundtrip_test )
+else
+    echo "  (skipped: no SDL headers)"
+fi
+
 echo "=== mod runtime: presentation_only is not compared by netplay ==="
 # C++ because mod_runtime is C++, and it is compiled here rather than mocked so
 # the real manifest parser, the real effective-set text and the real adopt

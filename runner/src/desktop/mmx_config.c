@@ -239,7 +239,13 @@ static int CountBits32(uint32 n) {
 }
 
 static void GamepadMap_Add(int button, uint32 modifiers, uint16 cmd) {
-  if ((joymap_size & 0xff) == 0) {
+  /* Grow every 64 entries, which is the 64 this grows BY. The test was
+   * `(joymap_size & 0xff) == 0` -- a check every 256 against an allocation of
+   * 64 -- so entry 64 wrote one element past the block and quietly corrupted
+   * the heap. A single parse of a shipped config.ini stops short of 64 (12
+   * default binds per player plus whatever [GamepadMap] names), which is why
+   * nothing had tripped it; parse the same config twice and it does. */
+  if ((joymap_size & 0x3f) == 0) {
     if (joymap_size > 1000)
       Die("Too many joypad keys");
     joymap_ents = (GamepadMapEnt*)realloc(joymap_ents, sizeof(GamepadMapEnt) * (joymap_size + 64));
