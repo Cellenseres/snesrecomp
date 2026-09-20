@@ -108,6 +108,7 @@
 #include "snes_netplay.h"
 #include "snes_host_lobby.h"
 #include "snes_host_app.h"
+#include "snes_netplay_identity.h"
 #if defined(SNESRECOMP_NET_ROLLBACK)
 #include "netplay/snes_netplay_rb.h"
 #endif
@@ -145,6 +146,9 @@ static uint32 GetActiveControllers(void);
 static void HandleVolumeAdjustment(int volume_adjustment);
 static void ApplyVolume(void);
 static bool g_volume_changed;
+/* Alt+Enter moved the window between windowed and borderless; the config is
+ * rewritten once at shutdown so the launcher opens on what the player left. */
+static bool g_fullscreen_changed;
 static void HandleGamepadAxisInput(GamepadInfo *gi, int axis, Sint16 value);
 static int RemapSdlButton(int button);
 static void HandleGamepadInput(GamepadInfo *gi, int button, bool pressed);
@@ -320,6 +324,20 @@ static double WantedPresentationHz(double refresh) {
   return hz > 0 ? hz : 0;
 }
 static bool PresentationDecoupled(void) { return WantedPresentationHz(0) > 0; }
+
+/* The swap interval this host wants: 0 immediate, 1 wait for the panel, -1
+ * late-swap-tearing ("adaptive" in the launcher -- sync above the refresh,
+ * immediate below, so a dropped frame tears instead of halving the rate).
+ * A decoupled presentation or an explicitly disabled frame delay paces
+ * elsewhere and must not also wait on the driver. */
+static int VSyncInterval(void) {
+  if (PresentationDecoupled() || g_config.disable_frame_delay) return 0;
+  switch (g_config.vsync) {
+    case kSnesVSync_Off:      return 0;
+    case kSnesVSync_Adaptive: return -1;
+    default:                  return 1;
+  }
+}
 
 static int WindowBaseWidth(int frame_w) {
   if (g_game->window_base_width) return g_game->window_base_width(frame_w);
@@ -1877,7 +1895,7 @@ static bool SdlRenderer_Init(SDL_Window *window) {
   bool want_software = g_config.output_method == kOutputMethod_SDLSoftware;
   SDL_Renderer *renderer = snesrecomp_sdl_create_renderer(
       g_window, want_software,
-      /*vsync=*/g_config.vsync && !PresentationDecoupled() && !g_config.disable_frame_delay);
+      /*vsync=*/VSyncInterval());
   if (renderer == NULL) {
     printf("Failed to create renderer: %s\n", SDL_GetError());
     return false;
@@ -2367,8 +2385,16 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
         ls.enable_audio  = g_config.enable_audio;
         ls.audio_freq    = g_config.audio_freq;
         ls.volume        = g_config.volume;
-        ls.player_src[0] = g_config.enable_gamepad[0] ? 2 : 1;
-        ls.player_src[1] = g_config.enable_gamepad[1] ? 2 : 0;
+        /* [Controller] SourceP1/SourceP2 is the real three-way answer (0 none,
+         * 1 keyboard, 2 gamepad) and matches the launcher's row exactly.
+         * EnableGamepadN is the older, lossier spelling and only decides the
+         * seed when the file predates the Source keys -- deriving from it
+         * unconditionally is what turned "player 2 on the keyboard" into
+         * "player 2 unassigned" on every relaunch. */
+        ls.player_src[0] = ConfigHasPlayerSource(0) ? g_config.player_src[0]
+                                                    : (g_config.enable_gamepad[0] ? 2 : 1);
+        ls.player_src[1] = ConfigHasPlayerSource(1) ? g_config.player_src[1]
+                                                    : (g_config.enable_gamepad[1] ? 2 : 0);
         /* Config stores deadzone as a raw stick radius; the launcher edits a
          * 0-100%. Convert in both directions, ROUNDING each way: truncating
          * both made the round trip lossy -- 10% saved as 32767/10 = 3276 read
@@ -2383,7 +2409,11 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
          * snes_runahead_run_frame in the frame loop). */
         ls.frame_blend   = g_config.frame_blend ? 1 : 0;
         ls.run_ahead     = g_config.run_ahead;
-        ls.vsync         = g_config.vsync ? RECOMP_LAUNCHER_VSYNC_ON : RECOMP_LAUNCHER_VSYNC_OFF;
+        ls.vsync         = g_config.vsync == kSnesVSync_Adaptive
+                               ? RECOMP_LAUNCHER_VSYNC_ADAPTIVE
+                               : g_config.vsync == kSnesVSync_Off
+                                     ? RECOMP_LAUNCHER_VSYNC_OFF
+                                     : RECOMP_LAUNCHER_VSYNC_ON;
         ls.renderer      = RendererChoice();
 
         /* Open on the ROM the player already has, so a second launch is PLAY
@@ -2468,19 +2498,15 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
             rom_path_buf, sizeof(rom_path_buf));
         host_report_breadcrumb("launcher: action=%d rom=%s", act,
                                rom_path_buf[0] ? rom_path_buf : "(none)");
-        if (act == RECOMP_LAUNCHER_RESULT_QUIT) {
-          host_report_breadcrumb("exit: player quit from the launcher");
-          return 0;
-        }
-#if defined(SNESRECOMP_HOST_HAS_CODEGEN)
-        if (act == RECOMP_LAUNCHER_RESULT_RELAUNCH) {
-          /* The player generated sources and rebuilt: this binary is stale.
-           * Does not return on success. */
-          snesrecomp_codegen_host_relaunch_or_exit(rom_path_buf);
-          return 0;
-        }
-#endif
-        if (act == RECOMP_LAUNCHER_RESULT_LAUNCH) {
+
+        /* Apply and persist the player's edits on EVERY way out of the
+         * launcher, not only PLAY. recomp-ui hands *io back on quit too, and
+         * a setting the player changed before closing the window is still a
+         * setting they changed -- it used to be dropped on the floor, which
+         * read as "the launcher forgets everything". UNAVAILABLE is the one
+         * exception: the window never opened, so ls still holds exactly what
+         * this host seeded and rewriting the file would be pure noise. */
+        if (act != RECOMP_LAUNCHER_RESULT_UNAVAILABLE) {
           g_config.output_method       = (uint8)ls.output_method;
           g_config.window_scale        = (uint8)ls.window_scale;
           g_config.fullscreen          = (uint8)ls.fullscreen;
@@ -2497,19 +2523,49 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
           g_config.audio_freq          = (uint16)ls.audio_freq;
           g_config.volume              = ls.volume;
           ApplyVolume();
+          g_config.player_src[0]       = ls.player_src[0];
+          g_config.player_src[1]       = ls.player_src[1];
           g_config.enable_gamepad[0]   = ls.player_src[0] == 2;
           g_config.enable_gamepad[1]   = ls.player_src[1] == 2;
           g_config.gamepad_deadzone    = (ls.deadzone[0] * 32767 + 50) / 100;
           g_config.skip_launcher       = ls.skip_launcher != 0;
           g_config.frame_blend         = ls.frame_blend != 0;
           g_config.run_ahead           = ls.run_ahead;
-          g_config.vsync               = ls.vsync != RECOMP_LAUNCHER_VSYNC_OFF;
+          g_config.vsync               = ls.vsync == RECOMP_LAUNCHER_VSYNC_OFF
+                                             ? kSnesVSync_Off
+                                             : ls.vsync == RECOMP_LAUNCHER_VSYNC_ADAPTIVE
+                                                   ? kSnesVSync_Adaptive
+                                                   : kSnesVSync_On;
           RendererApply(ls.renderer);   /* sets renderer + output_method */
+#if defined(SNES_HAS_LOBBY_CLIENT)
+          /* The Netplay page persisted the name itself the moment it was
+           * typed (snes_netplay_identity_store). g_config still holds what
+           * the file said BEFORE the launcher ran, so writing the file now
+           * without re-reading would hand the player's new name straight
+           * back to the old one. */
+          snes_netplay_identity_load(g_config.netplay_player_name,
+                                     sizeof(g_config.netplay_player_name));
+#endif
           WriteConfigFile(config_file);
           /* The launcher's Hotkeys editor writes [KeyMap] straight into the
-           * config file, which was parsed before the launcher ran — re-apply
+           * config file, which was parsed before the launcher ran - re-apply
            * so rebinds work on THIS boot, not the next one. */
           ConfigReloadKeyMap(config_file);
+        }
+
+        if (act == RECOMP_LAUNCHER_RESULT_QUIT) {
+          host_report_breadcrumb("exit: player quit from the launcher");
+          return 0;
+        }
+#if defined(SNESRECOMP_HOST_HAS_CODEGEN)
+        if (act == RECOMP_LAUNCHER_RESULT_RELAUNCH) {
+          /* The player generated sources and rebuilt: this binary is stale.
+           * Does not return on success. */
+          snesrecomp_codegen_host_relaunch_or_exit(rom_path_buf);
+          return 0;
+        }
+#endif
+        if (act == RECOMP_LAUNCHER_RESULT_LAUNCH) {
 #if defined(SNES_HAS_LOBBY_CLIENT)
           /* A lobby launch arms the session; snes_netplay_start() runs after
            * SnesInit, once the guest exists. */
@@ -2655,8 +2711,7 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
 #ifndef __ANDROID__
   if (g_config.output_method == kOutputMethod_OpenGL) {
     g_win_flags |= SDL_WINDOW_OPENGL;
-    snesrecomp_opengl_set_vsync(g_config.vsync && !PresentationDecoupled() &&
-                                !g_config.disable_frame_delay);
+    snesrecomp_opengl_set_vsync(VSyncInterval());
     OpenGLRenderer_Create(&g_renderer_funcs);
   } else
 #endif
@@ -3359,8 +3414,9 @@ error_reading:;
 
   if (g_config.autosave)
     HandleCommand(kKeys_Save + 0, true);
-  /* A volume set with the keys survives the session, like the launcher's. */
-  if (g_volume_changed)
+  /* A volume or fullscreen change made with the keys survives the session,
+   * like the launcher's. */
+  if (g_volume_changed || g_fullscreen_changed)
     WriteConfigFile(g_active_config_file);
 
   RtlWriteSram();
@@ -3432,6 +3488,15 @@ static void HandleCommand(uint32 j, bool pressed) {
       SDL_SetWindowFullscreen(g_window, g_win_flags & SNESRECOMP_SDL_WINDOW_FULLSCREEN_DESKTOP);
       g_cursor = !g_cursor;
       snesrecomp_sdl_show_cursor(g_cursor);
+      /* Keep the config in step with the window: the launcher reads
+       * g_config.fullscreen to seed its Display row, and the shutdown write
+       * persists it. Without this, toggling fullscreen in-game and quitting
+       * put the launcher back on "Windowed" next run -- the same forgetting
+       * the launcher's own row suffered from. Exclusive (2) stays exclusive:
+       * this key only moves between windowed and borderless. */
+      g_config.fullscreen =
+          (g_win_flags & SNESRECOMP_SDL_WINDOW_FULLSCREEN_DESKTOP) ? 1 : 0;
+      g_fullscreen_changed = true;
       break;
     case kKeys_Reset:
       RtlReset(1);

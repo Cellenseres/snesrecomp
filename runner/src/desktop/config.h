@@ -50,6 +50,15 @@ enum {
   kOutputMethod_OpenGL,
 };
 
+/* config.ini [Graphics] VSync. Off and On keep the historical 0/1 spellings so
+ * an existing config.ini reads identically; Adaptive is written as the word,
+ * and maps to a late-swap-tearing interval (-1) where the driver has one. */
+enum {
+  kSnesVSync_Off = 0,
+  kSnesVSync_On = 1,
+  kSnesVSync_Adaptive = 2,
+};
+
 typedef struct Config {
   int window_width;
   int window_height;
@@ -97,7 +106,13 @@ typedef struct Config {
    * launcher's Display page, persisted by WriteConfigFile:
    *   [Graphics] FrameBlend  average each presented frame with the previous
    *                          one (alternate-frame flicker reads as translucency)
-   *   [Graphics] VSync       driver vsync at present time (default on)
+   *   [Graphics] VSync       driver vsync at present time (default on);
+   *                          tri-state, kSnesVSync_* below. The launcher has
+   *                          offered Off/On/Adaptive for as long as the row
+   *                          has existed; this host used to store a bool, so
+   *                          Adaptive silently came back as On on the next
+   *                          launch. Legacy 0/1/true/false spellings still
+   *                          read exactly as before.
    *   [Graphics] Renderer    "auto" (SDL's pick), "opengl" (the native GL
    *                          presenter), "software", or an SDL render driver
    *                          name such as "vulkan"; empty follows OutputMethod
@@ -105,7 +120,7 @@ typedef struct Config {
    * The [Video] / [Emulation] spellings a per-game host used for the same
    * settings are accepted on read. */
   bool frame_blend;
-  bool vsync;
+  uint8 vsync;
   int run_ahead;
   char renderer[32];
   /* [Sound] Volume, 0..100 (default 100): the mixer level the VolumeUp /
@@ -175,6 +190,12 @@ bool ConfigKeyMapMigrated(void);
  * units, 30%) and it was read as the current default instead. The caller
  * rewrites config.ini once so the file says what the game is using. */
 bool ConfigDeadzoneMigrated(void);
+
+/* True when config.ini actually named [Controller] SourceP<player+1>. A file
+ * written before this key existed has not said anything about the player's
+ * device, and the caller falls back to the older EnableGamepadN spelling
+ * rather than to the seeded default. player is 0 or 1. */
+bool ConfigHasPlayerSource(int player);
 
 /* Analog stick deadzone, in raw axis units of a 32767 full scale. 10% is the
  * default because it clears a resting stick on the pads players actually own

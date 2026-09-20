@@ -4,6 +4,7 @@
 // Noncommercial, the retained upstream material stays MIT.
 #include "config.h"
 #include "types.h"
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 #include "sdl_compat.h"
@@ -26,6 +27,11 @@ static bool s_keymap_migrated;
 bool ConfigKeyMapMigrated(void) { return s_keymap_migrated; }
 static bool s_deadzone_migrated;
 bool ConfigDeadzoneMigrated(void) { return s_deadzone_migrated; }
+/* Set per player when [Controller] SourceP1/SourceP2 was actually present. */
+static bool s_player_src_seen[2];
+bool ConfigHasPlayerSource(int player) {
+  return (unsigned)player < 2 && s_player_src_seen[player];
+}
 
 #define REMAP_SDL_KEYCODE(key) ((key) & SDLK_SCANCODE_MASK ? kKeyMod_ScanCode : 0) | (key) & (kKeyMod_ScanCode - 1)
 #define _(x) REMAP_SDL_KEYCODE(x)
@@ -369,6 +375,31 @@ static int GetIniSection(const char *s) {
   return -1;
 }
 
+/* [Graphics] VSync is tri-state (see kSnesVSync_* in config.h). Every boolean
+ * spelling an older config.ini could hold still means exactly what it meant;
+ * "adaptive" (or a bare 2) is the new third value. */
+static bool ParseVSync(const char *value, uint8 *result) {
+  bool b;
+  if (StringEqualsNoCase(value, "adaptive") || StringEqualsNoCase(value, "2")) {
+    *result = kSnesVSync_Adaptive;
+    return true;
+  }
+  if (!ParseBool(value, &b)) return false;
+  *result = b ? kSnesVSync_On : kSnesVSync_Off;
+  return true;
+}
+
+/* [Controller] SourceP1/SourceP2: which device drives each player, matching
+ * the launcher's three-way row -- 0 none, 1 keyboard, 2 gamepad. EnableGamepadN
+ * cannot carry this: it has no way to say "player 2 is on the keyboard". */
+static bool ParsePlayerSource(int player, const char *value) {
+  long v = strtol(value, (char **)NULL, 10);
+  if (v < 0 || v > 2) return false;
+  g_config.player_src[player] = (int)v;
+  s_player_src_seen[player] = true;
+  return true;
+}
+
 static bool HandleIniConfig(int section, const char *key, char *value) {
   if (section == 0) {
     for (int i = 0; i < countof(kKeyNameId); i++) {
@@ -412,11 +443,9 @@ static bool HandleIniConfig(int section, const char *key, char *value) {
       snprintf(g_config.rewind_gesture, sizeof(g_config.rewind_gesture), "%s", value);
       return true;
     } else if (StringEqualsNoCase(key, "SourceP1")) {
-      g_config.player_src[0] = (int)strtol(value, (char**)NULL, 10);
-      return true;
+      return ParsePlayerSource(0, value);
     } else if (StringEqualsNoCase(key, "SourceP2")) {
-      g_config.player_src[1] = (int)strtol(value, (char**)NULL, 10);
-      return true;
+      return ParsePlayerSource(1, value);
     }
     /* GuidPn / DeadzonePn are the launcher's business; accepted silently so
      * the runner does not report the launcher's own keys as unknown. */
@@ -430,7 +459,7 @@ static bool HandleIniConfig(int section, const char *key, char *value) {
     if (StringEqualsNoCase(key, "FrameBlend")) {
       return ParseBool(value, &g_config.frame_blend);
     } else if (StringEqualsNoCase(key, "Vsync")) {
-      return ParseBool(value, &g_config.vsync);
+      return ParseVSync(value, &g_config.vsync);
     } else if (StringEqualsNoCase(key, "Renderer")) {
       snprintf(g_config.renderer, sizeof(g_config.renderer), "%s", value);
       return true;
@@ -445,7 +474,7 @@ static bool HandleIniConfig(int section, const char *key, char *value) {
     if (StringEqualsNoCase(key, "FrameBlend")) {
       return ParseBool(value, &g_config.frame_blend);
     } else if (StringEqualsNoCase(key, "VSync")) {
-      return ParseBool(value, &g_config.vsync);
+      return ParseVSync(value, &g_config.vsync);
     } else if (StringEqualsNoCase(key, "Renderer")) {
       snprintf(g_config.renderer, sizeof(g_config.renderer), "%s", value);
       return true;
@@ -586,7 +615,7 @@ static bool ParseOneConfigFile(const char *filename, int depth) {
 
 void ParseConfigFile(const char *filename) {
   g_config.enable_audio = true;
-  g_config.vsync = true;
+  g_config.vsync = kSnesVSync_On;
   g_config.volume = 100;
   /* Audio defaults match the values shipped in config.ini's [Sound]
    * section. Without these a release with no config.ini next to the
@@ -612,6 +641,7 @@ void ParseConfigFile(const char *filename) {
    * keyboard away from every existing install. */
   g_config.player_src[0] = 1;   /* keyboard */
   g_config.player_src[1] = 0;   /* none */
+  s_player_src_seen[0] = s_player_src_seen[1] = false;
   g_config.gamepad_deadzone = SNES_CONFIG_DEFAULT_DEADZONE;
   g_config.display_aspect = kSnesDisplayAspect_Crt4x3;
   g_config.skip_launcher = false;
@@ -723,6 +753,33 @@ static void CfgFlushSection(CfgBuf *out, CfgKV *kvs, int n, const char *sec) {
     }
 }
 
+/* Address a kvs row by the name it actually carries. The values used to be
+ * assigned through hardcoded indices (kvs[0], kvs[1], ...), so inserting a row
+ * anywhere but the end silently reassigned every value after it -- a trap that
+ * had to be disarmed before Fullscreen could be added in its natural place. */
+static CfgKV *CfgFind(CfgKV *kvs, int n, const char *section, const char *key) {
+  for (int i = 0; i < n; i++)
+    if (StringEqualsNoCase(section, kvs[i].section) &&
+        StringEqualsNoCase(key, kvs[i].key))
+      return &kvs[i];
+  Die("WriteConfigFile: no kvs row for the requested key");
+  return NULL;
+}
+
+static void CfgSet(CfgKV *kvs, int n, const char *section, const char *key,
+                   const char *fmt, ...) {
+  CfgKV *kv = CfgFind(kvs, n, section, key);
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(kv->val, sizeof(kv->val), fmt, ap);
+  va_end(ap);
+}
+
+/* Leave this key exactly as the file already has it (or absent). */
+static void CfgSkip(CfgKV *kvs, int n, const char *section, const char *key) {
+  CfgFind(kvs, n, section, key)->done = 1;
+}
+
 static int CfgLineIsKey(const char *line, const char *key) {
   const char *p = line;
   while (*p == ' ' || *p == '\t') p++;
@@ -740,6 +797,7 @@ void WriteConfigFile(const char *filename) {
 
   CfgKV kvs[] = {
     { "Graphics", "WindowScale" },
+    { "Graphics", "Fullscreen" },
     { "Graphics", "DisplayAspect" },
     { "Graphics", "OutputMethod" },
     { "Graphics", "LinearFiltering" },
@@ -757,6 +815,8 @@ void WriteConfigFile(const char *filename) {
     { "Graphics",   "Renderer" },
     { "General",    "RunAhead" },
     { "Sound",      "Volume" },
+    { "Controller", "SourceP1" },
+    { "Controller", "SourceP2" },
     /* Only after a migration (see ParseKeyArray): [KeyMap] is otherwise the
      * player's, and left exactly as written. */
     { "KeyMap",     "VolumeUp" },
@@ -768,29 +828,44 @@ void WriteConfigFile(const char *filename) {
   };
   SnesDisplayAspect display_aspect =
       SnesDisplayAspect_Clamp(g_config.display_aspect);
-  snprintf(kvs[0].val, sizeof(kvs[0].val), "%d", g_config.window_scale ? g_config.window_scale : 3);
-  snprintf(kvs[1].val, sizeof(kvs[1].val), "%s", kDisplayAspectNames[display_aspect]);
-  snprintf(kvs[2].val, sizeof(kvs[2].val), "%s",
-           g_config.output_method == kOutputMethod_OpenGL ? "OpenGL" :
-           g_config.output_method == kOutputMethod_SDLSoftware ? "SDL-Software" : "SDL");
-  snprintf(kvs[3].val, sizeof(kvs[3].val), "%d", g_config.linear_filtering ? 1 : 0);
-  snprintf(kvs[4].val, sizeof(kvs[4].val), "%s", g_config.shader ? g_config.shader : "");
-  snprintf(kvs[5].val, sizeof(kvs[5].val), "%d", g_config.widescreen ? 1 : 0);
-  snprintf(kvs[6].val, sizeof(kvs[6].val), "%d", g_config.enable_audio ? 1 : 0);
-  snprintf(kvs[7].val, sizeof(kvs[7].val), "%d", g_config.audio_freq);
-  snprintf(kvs[8].val, sizeof(kvs[8].val), "%s", g_config.enable_gamepad[0] ? "true" : "false");
-  snprintf(kvs[9].val, sizeof(kvs[9].val), "%s", g_config.enable_gamepad[1] ? "true" : "false");
-  snprintf(kvs[10].val, sizeof(kvs[10].val), "%d", g_config.skip_launcher ? 1 : 0);
-  snprintf(kvs[11].val, sizeof(kvs[11].val), "%d", g_config.gamepad_deadzone);
-  snprintf(kvs[12].val, sizeof(kvs[12].val), "%s", g_config.netplay_player_name);
-  snprintf(kvs[13].val, sizeof(kvs[13].val), "%d", g_config.frame_blend ? 1 : 0);
-  snprintf(kvs[14].val, sizeof(kvs[14].val), "%d", g_config.vsync ? 1 : 0);
-  snprintf(kvs[15].val, sizeof(kvs[15].val), "%s", g_config.renderer[0] ? g_config.renderer : "auto");
-  snprintf(kvs[16].val, sizeof(kvs[16].val), "%d", g_config.run_ahead);
-  snprintf(kvs[17].val, sizeof(kvs[17].val), "%d", g_config.volume);
-  snprintf(kvs[18].val, sizeof(kvs[18].val), "Keypad +");
-  snprintf(kvs[19].val, sizeof(kvs[19].val), "Keypad -");
-  if (!s_keymap_migrated) kvs[18].done = kvs[19].done = 1;
+  CfgSet(kvs, N, "Graphics", "WindowScale", "%d",
+         g_config.window_scale ? g_config.window_scale : 3);
+  CfgSet(kvs, N, "Graphics", "Fullscreen", "%d", (int)g_config.fullscreen);
+  CfgSet(kvs, N, "Graphics", "DisplayAspect", "%s",
+         kDisplayAspectNames[display_aspect]);
+  CfgSet(kvs, N, "Graphics", "OutputMethod", "%s",
+         g_config.output_method == kOutputMethod_OpenGL ? "OpenGL" :
+         g_config.output_method == kOutputMethod_SDLSoftware ? "SDL-Software" : "SDL");
+  CfgSet(kvs, N, "Graphics", "LinearFiltering", "%d", g_config.linear_filtering ? 1 : 0);
+  CfgSet(kvs, N, "Graphics", "Shader", "%s", g_config.shader ? g_config.shader : "");
+  CfgSet(kvs, N, "Graphics", "Widescreen", "%d", g_config.widescreen ? 1 : 0);
+  CfgSet(kvs, N, "Sound", "EnableAudio", "%d", g_config.enable_audio ? 1 : 0);
+  CfgSet(kvs, N, "Sound", "AudioFreq", "%d", (int)g_config.audio_freq);
+  CfgSet(kvs, N, "GamepadMap", "EnableGamepad1", "%s",
+         g_config.enable_gamepad[0] ? "true" : "false");
+  CfgSet(kvs, N, "GamepadMap", "EnableGamepad2", "%s",
+         g_config.enable_gamepad[1] ? "true" : "false");
+  CfgSet(kvs, N, "General", "SkipLauncher", "%d", g_config.skip_launcher ? 1 : 0);
+  CfgSet(kvs, N, "GamepadMap", "GamepadDeadzone", "%d", g_config.gamepad_deadzone);
+  CfgSet(kvs, N, "Netplay", "PlayerName", "%s", g_config.netplay_player_name);
+  CfgSet(kvs, N, "Graphics", "FrameBlend", "%d", g_config.frame_blend ? 1 : 0);
+  CfgSet(kvs, N, "Graphics", "VSync", "%s",
+         g_config.vsync == kSnesVSync_Adaptive ? "adaptive" :
+         g_config.vsync == kSnesVSync_Off ? "0" : "1");
+  CfgSet(kvs, N, "Graphics", "Renderer", "%s",
+         g_config.renderer[0] ? g_config.renderer : "auto");
+  CfgSet(kvs, N, "General", "RunAhead", "%d", g_config.run_ahead);
+  CfgSet(kvs, N, "Sound", "Volume", "%d", g_config.volume);
+  CfgSet(kvs, N, "Controller", "SourceP1", "%d", g_config.player_src[0]);
+  CfgSet(kvs, N, "Controller", "SourceP2", "%d", g_config.player_src[1]);
+  if (s_keymap_migrated) {
+    CfgSet(kvs, N, "KeyMap", "VolumeUp", "%s", "Keypad +");
+    CfgSet(kvs, N, "KeyMap", "VolumeDown", "%s", "Keypad -");
+  } else {
+    /* [KeyMap] is the player's; only a migration may rewrite it. */
+    CfgSkip(kvs, N, "KeyMap", "VolumeUp");
+    CfgSkip(kvs, N, "KeyMap", "VolumeDown");
+  }
 
   char *data = NULL;
   long sz = 0;

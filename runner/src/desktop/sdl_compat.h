@@ -102,18 +102,25 @@ static inline bool snesrecomp_sdl_lock_mutex(SDL_mutex *mutex) {
 #endif
 }
 
+/* vsync is a swap INTERVAL, not a flag: 0 immediate, 1 wait for the panel,
+ * -1 late-swap-tearing (the launcher's "Adaptive"). SDL2's renderer has no
+ * adaptive mode, and a driver may refuse -1 even on SDL3, so both fall back
+ * to an ordinary wait rather than silently dropping to immediate. */
 static inline SDL_Renderer *snesrecomp_sdl_create_renderer(
-    SDL_Window *window, bool software, bool vsync) {
+    SDL_Window *window, bool software, int vsync) {
 #if SNESRECOMP_SDL3
   SDL_Renderer *renderer =
       SDL_CreateRenderer(window, software ? "software" : NULL);
-  if (renderer && !software) SDL_SetRenderVSync(renderer, vsync ? 1 : 0);
+  if (renderer && !software) {
+    if (!SDL_SetRenderVSync(renderer, vsync) && vsync < 0)
+      SDL_SetRenderVSync(renderer, 1);
+  }
   return renderer;
 #else
   return SDL_CreateRenderer(
       window, -1, software ? SDL_RENDERER_SOFTWARE
                            : SDL_RENDERER_ACCELERATED |
-                                 (vsync ? SDL_RENDERER_PRESENTVSYNC : 0));
+                                 (vsync != 0 ? SDL_RENDERER_PRESENTVSYNC : 0));
 #endif
 }
 

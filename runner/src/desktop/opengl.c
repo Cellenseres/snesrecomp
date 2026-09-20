@@ -58,7 +58,10 @@ extern void MkDir(const char *s);
 /* -1 = decide from config at init. A host that paces presentation itself
  * (an FPS cap, a simulation/presentation split) sets 0 so the swap does not
  * also block; one that wants the driver to pace it sets 1. */
-static int g_vsync_override = -1;
+/* -1 is a legal interval (adaptive), so "did the host say anything?" needs
+ * its own flag rather than a sentinel value. */
+static int g_vsync_override;
+static bool g_vsync_set;
 static void (*g_compute_viewport)(int, int, int, int, SnesDisplayViewport *);
 
 void snesrecomp_opengl_set_viewport(void (*compute)(int, int, int, int,
@@ -66,8 +69,11 @@ void snesrecomp_opengl_set_viewport(void (*compute)(int, int, int, int,
   g_compute_viewport = compute;
 }
 
-void snesrecomp_opengl_set_vsync(int enable) {
-  g_vsync_override = enable ? 1 : 0;
+/* interval: 0 immediate, 1 wait for the panel, -1 late-swap-tearing
+ * ("Adaptive"). Stored as-is; OpenGLRenderer_Init applies it. */
+void snesrecomp_opengl_set_vsync(int interval) {
+  g_vsync_override = interval;
+  g_vsync_set = true;
 }
 
 static void GL_APIENTRY MessageCallback(GLenum source,
@@ -93,9 +99,19 @@ static bool OpenGLRenderer_Init(SDL_Window *window) {
   SDL_GLContext context = SDL_GL_CreateContext(window);
   (void)context;
 
-  SDL_GL_SetSwapInterval(g_vsync_override >= 0
-                             ? g_vsync_override
-                             : (g_config.disable_frame_delay ? 0 : 1));
+  {
+    int interval = g_vsync_set ? g_vsync_override
+                               : (g_config.disable_frame_delay ? 0 : 1);
+    /* Not every driver has EXT_swap_control_tear; fall back to an ordinary
+     * wait rather than to immediate, which is what the player did not ask
+     * for. SDL2 returns 0 on success, SDL3 returns true. */
+#if SNESRECOMP_SDL3
+    bool ok = SDL_GL_SetSwapInterval(interval);
+#else
+    bool ok = SDL_GL_SetSwapInterval(interval) == 0;
+#endif
+    if (!ok && interval < 0) SDL_GL_SetSwapInterval(1);
+  }
   ogl_LoadFunctions();
 
   if (!ogl_IsVersionGEQ(3, 3))
