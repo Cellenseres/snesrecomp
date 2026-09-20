@@ -30,6 +30,7 @@
 #include "ppu_dma_trace.h"
 #include "host_report.h"
 #include "cosim.h"
+static void rtl_reset_audio_delivery(void);
 #if defined(SNESRECOMP_NET)
 #include "snes_netplay.h"
 #endif
@@ -248,6 +249,7 @@ void RtlReset(int mode) {
 
   RtlApuLock();
   g_audio_fast_forward = false;
+  rtl_reset_audio_delivery();
   g_audio_recovery_frames = 0;
   g_audio_recovery_remaining = 0;
   g_audio_recovery_anchor_l = 0;
@@ -607,6 +609,7 @@ bool RtlLoadSnapshot(const char *filename) {
         g_rtl_game_info->state_load_extra(&fs.base, hdr[1]);
     }
   }
+  if (!fs.error) rtl_reset_audio_delivery();
   RtlApuUnlock();
   fclose(f);
   if (fs.error) {
@@ -658,6 +661,7 @@ bool RtlLoadSnapshotFromMemory(const void *data, size_t size) {
   if (hdr[1] >= 5 && g_rtl_game_info && g_rtl_game_info->state_load_extra &&
       memory.position < size && !memory.error)
     g_rtl_game_info->state_load_extra(&memory.base, hdr[1]);
+  if (!memory.error) rtl_reset_audio_delivery();
   RtlApuUnlock();
   if (memory.error) return false;
   g_snes->beamMasterLast = g_cpu.master_cycles;
@@ -1336,6 +1340,30 @@ static int16 s_render_hold_r;      /* interpolation partner across calls       *
 static int s_render_starved;       /* in a starvation episode (drives fade-in) */
 static int s_render_fade_pos;      /* fade-in progress, carried across calls   */
 static double s_render_occ_ema = -1.0; /* burst-filtered occupancy, -1 = unset */
+static bool s_render_priming = true;
+static int s_render_fade_out;
+
+/* Delivery state belongs to the host clock, not to a guest snapshot. Reset
+ * under the APU lock when the guest queue is replaced, and rebuild the same
+ * cushion that the ordinary clock-drift servo targets. Never run the SPC to
+ * fill it: only completed guest frames may produce the missing samples. */
+static void rtl_reset_audio_delivery(void) {
+  s_render_phase = 0;
+  s_render_occ_ema = -1.0;
+  s_render_priming = true;
+  s_render_starved = 1;
+  s_render_fade_pos = 0;
+  s_render_fade_out = RTL_AUDIO_FADE_FRAMES;
+}
+
+static void rtl_render_wait(int16 *out, int frames) {
+  for (int i = 0; i < frames; ++i) {
+    int weight = s_render_fade_out > 0 ? --s_render_fade_out : 0;
+    out[i*2] = (int16)((int32_t)s_render_hold_l * weight / RTL_AUDIO_FADE_FRAMES);
+    out[i*2+1] = (int16)((int32_t)s_render_hold_r * weight / RTL_AUDIO_FADE_FRAMES);
+  }
+  if (!s_render_fade_out) s_render_hold_l = s_render_hold_r = 0;
+}
 /* Host output rate. Defaults to the native rate, so a host that never calls
  * RtlSetAudioOutputRate behaves exactly as if no conversion were needed —
  * which is correct for every shipped default config, all of which open the
@@ -1370,6 +1398,18 @@ double RtlAudioOutputRate(void) {
 static void rtl_render_native(Dsp *dsp, int16 *out, int frames) {
   if (frames <= 0) return;
   uint32_t available = dsp_available(dsp);
+
+  if (s_render_priming) {
+    if (available < RTL_AUDIO_TARGET_NATIVES || s_render_fade_out) {
+      rtl_render_wait(out, frames);
+      audio_trace_on_output_priming(available);
+      return;
+    }
+    s_render_priming = false;
+    s_render_occ_ema = (double)available;
+    s_render_starved = 1;
+    s_render_fade_pos = 0;
+  }
 
   /* Servo: steer ring occupancy toward the target cushion, on top of the fixed
    * native->device rate conversion. */
@@ -1445,24 +1485,16 @@ static void rtl_render_native(Dsp *dsp, int16 *out, int frames) {
   }
 
   if (usable < frames) {
-    /* Fade the tail to silence over the remaining frames (capped) instead of
-     * cutting, then hold silence. */
+    /* One fade per starvation episode, followed by a real refill. Draining
+     * each newly arriving block immediately creates repeated tiny gaps until
+     * the slow drift servo eventually rebuilds the scheduling cushion. */
     s_render_starved = 1;
     s_render_fade_pos = 0;
+    s_render_priming = true;
+    s_render_phase = 0;
+    s_render_fade_out = RTL_AUDIO_FADE_FRAMES;
     audio_trace_on_output_underflow(available);
-    int fade = frames - usable;
-    if (fade > RTL_AUDIO_FADE_FRAMES) fade = RTL_AUDIO_FADE_FRAMES;
-    for (int i = 0; i < fade; i++) {
-      int32_t w = RTL_AUDIO_FADE_FRAMES - i;
-      out[(usable + i) * 2] =
-          (int16)(((int32_t)s_render_hold_l * w) / RTL_AUDIO_FADE_FRAMES);
-      out[(usable + i) * 2 + 1] =
-          (int16)(((int32_t)s_render_hold_r * w) / RTL_AUDIO_FADE_FRAMES);
-    }
-    memset(out + (usable + fade) * 2, 0,
-           (size_t)(frames - usable - fade) * 2 * sizeof(*out));
-    s_render_hold_l = 0;
-    s_render_hold_r = 0;
+    rtl_render_wait(out + usable*2, frames - usable);
   }
 }
 
