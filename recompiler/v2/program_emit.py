@@ -162,6 +162,15 @@ def _cfg_name_maps(parsed):
                 continue
             name_for_pc[pc24] = nd.name
             claimed_names.add(nd.name)
+    for bank, _path, cfg in parsed:
+        for nd in getattr(cfg, "symbols", ()):
+            pc24 = nd.addr_24 & 0xFFFFFF
+            if pc24 in name_for_pc:
+                continue
+            if not nd.name or nd.name in claimed_names:
+                continue
+            name_for_pc[pc24] = nd.name
+            claimed_names.add(nd.name)
     return (name_for_pc, canonical_for_pc, templates_exact,
             templates_any, cfg_by_bank)
 
@@ -689,6 +698,12 @@ def emit_program(*, rom: bytes, parsed, manifest: ProgramManifest,
                     (bank << 16) | (site & 0xFFFF)
                     for site in cfg.terminal_jsr
                 }
+            noreturn_jsr_sites = None
+            if cfg is not None and getattr(cfg, "noreturn_jsr", None):
+                noreturn_jsr_sites = {
+                    (bank << 16) | (site & 0xFFFF)
+                    for site in cfg.noreturn_jsr
+                }
             if indirect_call_tables:
                 remapped_tables = dict(indirect_call_tables)
                 for site, value in indirect_call_tables.items():
@@ -710,6 +725,7 @@ def emit_program(*, rom: bytes, parsed, manifest: ProgramManifest,
                 indirect_call_tables=indirect_call_tables,
                 indirect_dispatch=indirect_dispatch or None,
                 terminal_jsr_sites=terminal_jsr_sites,
+                noreturn_jsr_sites=noreturn_jsr_sites,
                 data_regions=data_regions,
                 exclude_ranges=(getattr(cfg, "exclude_ranges", None)
                                 if cfg is not None else None),

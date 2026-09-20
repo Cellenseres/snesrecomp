@@ -80,6 +80,17 @@ def build_manifest_native(*, rom_path, cfg_dir, all_cfg_roots=False,
     fd, temporary = tempfile.mkstemp(
         prefix="snesrecomp-native-analysis-", suffix=".json")
     os.close(fd)
+    temporary_paths = [temporary]
+
+    def write_arg_file(prefix, values):
+        fd, path = tempfile.mkstemp(prefix=prefix, suffix=".txt")
+        with os.fdopen(fd, "w", encoding="ascii", newline="\n") as handle:
+            for value in values:
+                handle.write(value)
+                handle.write("\n")
+        temporary_paths.append(path)
+        return path
+
     command = [
         str(executable),
         "--rom", str(pathlib.Path(rom_path).resolve()),
@@ -90,10 +101,24 @@ def build_manifest_native(*, rom_path, cfg_dir, all_cfg_roots=False,
     ]
     if all_cfg_roots:
         command.append("--all-cfg-roots")
-    for key in sorted(set(additional_roots)):
-        command.extend(("--root", f"{key.pc24:06X}:{key.m}:{key.x}"))
-    for pc24 in sorted(set(force_lle)):
-        command.extend(("--force-lle", f"{pc24 & 0xFFFFFF:06X}"))
+    root_values = [
+        f"{key.pc24:06X}:{key.m}:{key.x}"
+        for key in sorted(set(additional_roots))
+    ]
+    if root_values:
+        command.extend((
+            "--roots-file",
+            write_arg_file("snesrecomp-native-roots-", root_values),
+        ))
+    force_lle_values = [
+        f"{pc24 & 0xFFFFFF:06X}"
+        for pc24 in sorted(set(force_lle))
+    ]
+    if force_lle_values:
+        command.extend((
+            "--force-lle-file",
+            write_arg_file("snesrecomp-native-force-lle-", force_lle_values),
+        ))
     try:
         completed = subprocess.run(
             command, text=True, capture_output=True, check=False)
@@ -104,10 +129,11 @@ def build_manifest_native(*, rom_path, cfg_dir, all_cfg_roots=False,
         value = json.loads(pathlib.Path(temporary).read_text(
             encoding="utf-8"))
     finally:
-        try:
-            os.unlink(temporary)
-        except OSError:
-            pass
+        for path in temporary_paths:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
     manifest = ProgramManifest.from_dict(value)
     metadata = value.get("native_analysis", {})
     helpers = {
@@ -383,6 +409,19 @@ def _terminal_jsr_sites(parsed) -> set:
     return result
 
 
+def _noreturn_jsr_sites(parsed) -> set:
+    """Expand cfg-local no-return JSR sites to canonical + mirror PCs."""
+    result = set()
+    for bank, _path, cfg in parsed:
+        for site_pc16 in getattr(cfg, "noreturn_jsr", ()):
+            site = (bank << 16) | (site_pc16 & 0xFFFF)
+            result.add(site)
+            mirror = _lorom_mirror_pc24(site)
+            if mirror is not None:
+                result.add(mirror)
+    return result
+
+
 def _declared_exit_modes(parsed) -> dict:
     """Load explicit facts and the generic HLE boundary contract.
 
@@ -517,6 +556,7 @@ def build_manifest(rom: bytes, parsed, *, max_insns: int, max_nodes: int,
     data_regions = tuple(all_data_regions)
     dispatch_map = _indirect_dispatch_map(parsed)
     terminal_jsr_sites = _terminal_jsr_sites(parsed)
+    noreturn_jsr_sites = _noreturn_jsr_sites(parsed)
     declared_exit_modes = _declared_exit_modes(parsed)
     active_exit_modes = dict(declared_exit_modes)
     unstable_exit_modes = set()
@@ -604,6 +644,7 @@ def build_manifest(rom: bytes, parsed, *, max_insns: int, max_nodes: int,
             "sibling_entry_pcs": siblings or None,
             "inline_arg_map": inline_arg_map or None,
             "terminal_jsr_sites": terminal_jsr_sites or None,
+            "noreturn_jsr_sites": noreturn_jsr_sites or None,
             # An unknown callee return width is not evidence that M/X is
             # preserved. Stop the speculative caller continuation at that
             # call; once the callee is proven, a later immutable round
@@ -642,7 +683,8 @@ def build_manifest(rom: bytes, parsed, *, max_insns: int, max_nodes: int,
             if target not in inline_arg_map and target not in inline_arg_probes:
                 inline_arg_probes.add(target)
                 byte_counts = set()
-                for probe_m, probe_x in ((0, 0), (1, 1)):
+                byte_count_probes = 0
+                for probe_m, probe_x in ((0, 0), (0, 1), (1, 0), (1, 1)):
                     try:
                         count = detect_inline_arg_bytes(
                             rom, (target >> 16) & 0xFF,
@@ -651,7 +693,8 @@ def build_manifest(rom: bytes, parsed, *, max_insns: int, max_nodes: int,
                         count = None
                     if count:
                         byte_counts.add(count)
-                if len(byte_counts) == 1:
+                        byte_count_probes += 1
+                if byte_count_probes == 4 and len(byte_counts) == 1:
                     inline_additions[target] = byte_counts.pop()
 
         if helper_additions or inline_additions:

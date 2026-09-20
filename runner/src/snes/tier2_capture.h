@@ -5,6 +5,8 @@
 
 const char *tier2_capture_manifest_path(const char *rom_title);
 const char *tier2_capture_journal_path(const char *rom_title);
+void tier2_capture_set_default_enabled(int enabled);
+int tier2_capture_enabled(void);
 
 /* Append one distinct recompiler-feedback tuple as a complete JSON object and
  * flush it immediately. This is a set journal, not a hot-path event trace. */

@@ -3,10 +3,35 @@
 #include <string.h>
 
 #include "apu.h"
+#include "apu_frame_clock.h"
 #include "dsp_shadow.h"
 
 uint64_t g_apu_timer0_total_ticks;
 int snes_frame_counter;
+#ifndef SNESRECOMP_TRACE
+#define SNESRECOMP_TRACE 0
+#endif
+#ifndef SNESRECOMP_SPC_DIAGNOSTICS
+#define SNESRECOMP_SPC_DIAGNOSTICS SNESRECOMP_TRACE
+#endif
+
+#if SNESRECOMP_SPC_DIAGNOSTICS || SNESRECOMP_TRACE
+extern uint64_t g_spc_pc_histogram[0x10000];
+extern uint64_t g_spc_write_counts[0x100];
+extern uint64_t g_spc_outport_value_counts[4 * 256];
+#else
+extern uint64_t g_spc_pc_histogram[1];
+extern uint64_t g_spc_write_counts[1];
+extern uint64_t g_spc_outport_value_counts[1];
+#endif
+extern int g_spc_pc_max_seen;
+extern int g_spc_recent_outport_idx;
+
+#ifdef EXPECT_SPC_DIAGNOSTICS_ON
+#if SNESRECOMP_SPC_DIAGNOSTICS != 1
+#error "SNESRECOMP_SPC_DIAGNOSTICS must be numeric 1 when opt-in diagnostics are enabled"
+#endif
+#endif
 
 static unsigned applied_count;
 
@@ -66,6 +91,20 @@ static int check(int condition, const char *message) {
 int main(void) {
   int failures = 0;
   Apu *apu = apu_init();
+
+#if !SNESRECOMP_SPC_DIAGNOSTICS
+  apu_cpuWrite(apu, 0x00, 0x77);
+  failures += check(g_spc_write_counts[0] == 0 &&
+                    g_spc_outport_value_counts[0] == 0 &&
+                    g_spc_recent_outport_idx == 0,
+                    "SPC diagnostics stay inert by default");
+#else
+  apu_cpuWrite(apu, 0xf4, 0x77);
+  failures += check(g_spc_write_counts[0xf4] == 1 &&
+                    g_spc_outport_value_counts[0 * 256 + 0x77] == 1 &&
+                    g_spc_recent_outport_idx == 1,
+                    "SPC diagnostics update when enabled");
+#endif
 
   /* SMW writes a nonzero command in one NMI and clears it in the next.
    * Host callback phase must not shorten that emulated frame. */
@@ -159,6 +198,49 @@ int main(void) {
                     apu->dsp->sampleRead == 355 &&
                     apu->dsp->sampleWrite == 419,
                     "fast-forward recovery retains only the requested newest PCM");
+
+  /* Long interpreted work advances the real SPC along one absolute clock;
+   * short frames afterward must produce PCM immediately, not wait 40 frames
+   * for a host frame counter to catch up. No ROM or wall-clock timing needed. */
+  apu_clearPortQueue(apu);
+  RtlApuFrameClock clock = {0};
+  rtl_apu_clock_begin(&clock, 0);
+  failures += check(apu_schedulePortWrite(apu, 0, 0, 0), "map extended clock");
+  uint64_t before_long = apu->portClock;
+  for (unsigned quarter = 1; quarter <= 160; ++quarter) {
+    uint64_t master = quarter * RTL_MASTER_CYCLES_PER_FRAME / 4;
+    failures += check(apu_runToGuestCycle(apu, rtl_apu_clock_now(&clock, master),
+                                          1u << 20), "progress inside long loader");
+    apu->dsp->sampleRead = apu->dsp->sampleWrite;
+  }
+  uint64_t master_end = 40 * RTL_MASTER_CYCLES_PER_FRAME;
+  uint64_t end = rtl_apu_clock_finish(&clock, master_end);
+  failures += check(clock.last_duration == 40 * RTL_APU_CYCLES_PER_FRAME &&
+                    apu->portClock - before_long == clock.last_duration,
+                    "long loader clocks the SPC once for all elapsed time");
+  failures += check(rtl_apu_clock_now(&clock, master_end) == end,
+                    "finishing must not add the stale within-frame offset again");
+  for (unsigned frame = 0; frame < 45; ++frame) {
+    rtl_apu_clock_begin(&clock, master_end);
+    failures += check(rtl_apu_clock_now(&clock, master_end) == end,
+                      "next iteration starts at the completed guest timestamp");
+    uint32_t samples_before = apu->dsp->sampleWrite;
+    master_end += 100;  /* Mostly WAI. */
+    end = rtl_apu_clock_finish(&clock, master_end);
+    failures += check(apu_runToGuestCycle(apu, end, 1u << 20) &&
+                      apu->dsp->sampleWrite - samples_before == 534,
+                      "every following short frame produces its normal PCM");
+    apu->dsp->sampleRead = apu->dsp->sampleWrite;
+  }
+  rtl_apu_clock_begin(&clock, master_end);
+  failures += check(rtl_apu_clock_now(&clock, 0) == clock.start_guest,
+                    "CPU reset cannot underflow the within-frame timestamp");
+
+#if !SNESRECOMP_SPC_DIAGNOSTICS
+  failures += check(g_spc_pc_histogram[0] == 0 &&
+                    g_spc_pc_max_seen == 0,
+                    "SPC PC histogram stays inert by default");
+#endif
 
   apu_free(apu);
   if (failures)

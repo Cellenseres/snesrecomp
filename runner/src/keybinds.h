@@ -13,21 +13,23 @@ extern "C" {
  * Layout matches the SNES gamepad: A, B, X, Y, L, R, Start, Select, and
  * the d-pad. Two players. Each button maps to one SDL_Scancode.
  *
- * The button bitmask returned by keybinds_read_player() uses the same
- * 12-bit layout as SMW's $4218/$4219 joypad register pair, low byte first:
+ * The button bitmask returned by keybinds_read_player() is a keyboard-local
+ * layout consumed by the desktop host's remap table. It is not the
+ * RtlRunFrame/controller mask and it is not the SNES automatic-joypad word
+ * returned from $4218/$4219.
  *
- *   bit  0: R              (high byte, $4219 bit 4)
- *   bit  1: L              (high byte, $4219 bit 5)
- *   bit  2: X              (high byte, $4219 bit 6)
- *   bit  3: A              (high byte, $4219 bit 7)
- *   bit  4: Right          (low byte,  $4218 bit 0)
- *   bit  5: Left           (low byte,  $4218 bit 1)
- *   bit  6: Down           (low byte,  $4218 bit 2)
- *   bit  7: Up             (low byte,  $4218 bit 3)
- *   bit  8: Start          (low byte,  $4218 bit 4)
- *   bit  9: Select         (low byte,  $4218 bit 5)
- *   bit 10: Y              (low byte,  $4218 bit 6)
- *   bit 11: B              (low byte,  $4218 bit 7)
+ *   bit  0: R
+ *   bit  1: L
+ *   bit  2: X
+ *   bit  3: A
+ *   bit  4: Right
+ *   bit  5: Left
+ *   bit  6: Down
+ *   bit  7: Up
+ *   bit  8: Start
+ *   bit  9: Select
+ *   bit 10: Y
+ *   bit 11: B
  *
  * Per-game runners that prefer a different layout can ignore the
  * bitmask and read individual buttons from PlayerBinds directly.

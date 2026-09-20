@@ -56,6 +56,13 @@ void snes_mod_runtime_activate_plugins_c(void);
 const struct RecompLauncherCModProvider*
 snes_mod_runtime_launcher_provider_c(void);
 const char* snes_mod_runtime_last_error_c(void);
+int snes_mod_runtime_feature_enabled_c(const char* package_id,
+                                       const char* feature_id);
+int snes_mod_runtime_feature_option_value_c(const char* package_id,
+                                            const char* feature_id,
+                                            const char* option_id,
+                                            char* out,
+                                            uint32_t cap);
 
 /*
  * Register a trusted implementation. A .snesmod archive may select only this
@@ -79,6 +86,14 @@ int snes_mod_register_frame_callback(SNESModFrameCallback callback);
 int snes_mod_register_apu_write_callback(SNESModApuWriteCallback callback);
 void snes_mod_runtime_frame_tick_c(void);
 int snes_mod_runtime_filter_apu_write_c(uint16_t reg, uint8_t value);
+
+/*
+ * Request battery-backed SRAM for a stock cart that declares none. This is
+ * for enhancement mods that add guest-visible saves to password-only games.
+ * Existing cartridge SRAM is never resized by a mod.
+ */
+int snes_mod_request_synthetic_sram_c(uint32_t bytes);
+uint32_t snes_mod_runtime_synthetic_sram_size_c(void);
 
 #if defined(_MSC_VER)
 #pragma section(".CRT$XCU", read)

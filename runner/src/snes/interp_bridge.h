@@ -32,13 +32,17 @@
 #include <stdio.h>
 #include "cpu_state.h"
 
-/* SA-1's frame timeline already advances the SPC to absolute guest time, so
- * its interpreter must not also apply the legacy relative catch-up. Ordinary
- * SNES cartridges still require that catch-up during interpreter-heavy boot
- * code (Mega Man X otherwise stalls in task 0 at the copyright screen). */
+/* Launch-time main-scheduler AOT policy: -1 default/environment, 0 floor,
+ * 1 accelerated. Native interrupt helpers retain their ordinary policy. */
+void interp_bridge_set_scheduler_aot_policy(int enabled);
+
+/* Once port time is mapped, the frame timeline and interpreter catch-up
+ * describe the same elapsed time. Extended-frame hosts use absolute sync;
+ * legacy hosts and unmapped boot (e.g. Mega Man X's IPL polling) keep relative
+ * catch-up. SA-1 already uses absolute frame time. */
 static inline bool interp_bridge_use_absolute_apu_timeline(
-    bool frame_timeline_active, bool is_sa1) {
-  return frame_timeline_active && is_sa1;
+    bool frame_timeline_active, bool is_sa1, bool mapped_extended_frame) {
+  return frame_timeline_active && (is_sa1 || mapped_extended_frame);
 }
 
 /* Optional game policy invoked immediately before one interpreted opcode.
@@ -51,6 +55,7 @@ static inline bool interp_bridge_use_absolute_apu_timeline(
 typedef void (*InterpPreOpcodeHook)(CpuState *cpu, uint32_t pc24);
 void interp_bridge_set_pre_opcode_hook(uint32_t pc24,
                                        InterpPreOpcodeHook hook);
+void interp_bridge_pre_opcode_redirect(uint32_t pc24);
 
 /*
  * Run the interpreter over guest code at entry_pc24, in the context of `cpu`.
@@ -88,11 +93,18 @@ uint32_t interp_bridge_lle_resume_pc(void);
  * Sticky until read (then cleared). */
 int interp_bridge_lle_took_wai(void);
 
+/* True if the most recent auto-quiescent yield was a read-only spin (stable
+ * CPU/memory state, no WAI) — e.g. a game polling $4210 for the NMI flag.
+ * The host should deliver NMI to such a blocked game when NMI is enabled.
+ * Sticky until read (then cleared). */
+int interp_bridge_lle_took_quiescent(void);
+
 /* Optional whole-program LLE deadline.  When nonzero, the auto-quiescent
  * bridge yields at the first architectural instruction boundary whose master
  * clock reaches this value.  Event-driven game schedulers use this to prevent
  * a productive CPU/MMIO loop from running across multiple vblanks atomically. */
 void interp_bridge_set_master_deadline(uint64_t master_clock);
+void interp_bridge_reset_dynamic_cache(void);
 
 /* True only while a paired AOT bounce is executing inside an auto-quiescent
  * scheduler whose current frame deadline has been reached. Long,

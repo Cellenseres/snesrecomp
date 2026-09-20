@@ -374,6 +374,16 @@ def _emit_dispatch_table(out_dir: pathlib.Path, parsed,
         f"(unsigned)(sizeof(g_dispatch_table) / sizeof(g_dispatch_table[0]));"
     )
     disp_lines.append('')
+    disp_lines.append('const RamRoutineGuard g_ram_routine_guards[] = {')
+    disp_lines.append('    { 0xFFFFFFFFu, 0u, 0u },')
+    disp_lines.append('};')
+    disp_lines.append('')
+    disp_lines.append(
+        'const unsigned g_ram_routine_guard_count = '
+        '(unsigned)(sizeof(g_ram_routine_guards) / '
+        'sizeof(g_ram_routine_guards[0]));'
+    )
+    disp_lines.append('')
     write_if_changed(disp_path, '\n'.join(disp_lines) + '\n')
     print(f"  emitted dispatch table with {len(sorted_pc24s)} entries -> {disp_path}")
 
@@ -1394,11 +1404,13 @@ def main() -> int:
         tbank = (tgt >> 16) & 0xFF
         taddr = tgt & 0xFFFF
         seen_n: set = set()
-        for em, ex in ((0, 0), (1, 1)):
+        seen_probe_count = 0
+        for em, ex in ((0, 0), (0, 1), (1, 0), (1, 1)):
             n = detect_inline_arg_bytes(rom, tbank, taddr, em, ex)
             if n:
                 seen_n.add(n)
-        if len(seen_n) == 1:
+                seen_probe_count += 1
+        if seen_probe_count == 4 and len(seen_n) == 1:
             inline_arg_map[tgt] = seen_n.pop()
     if inline_arg_map:
         print(f"  detected {len(inline_arg_map)} inline-argument routine(s):")

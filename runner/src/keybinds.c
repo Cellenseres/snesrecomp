@@ -257,7 +257,8 @@ void keybinds_save(void) {
     write_defaults(s_ini_path);   /* writes the CURRENT s_binds, header included */
 }
 
-/* SNES joypad bitmask layout — matches $4218/$4219 (low/high byte) packing.
+/* Keyboard-local joypad bitmask layout; converted to the runner's serial
+ * controller mask by the desktop host before RtlRunFrame().
  * Returns 0 if either `keys` is NULL or player is out of range. */
 uint16_t keybinds_read_player(const uint8_t *keys, int player) {
     if (!keys) return 0;

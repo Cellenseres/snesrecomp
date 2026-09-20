@@ -7,6 +7,7 @@
 #include "snes/snes.h"
 #include "snes/msu1.h"
 #include "snes/interp_bridge.h"
+#include "snes/tier2_capture.h"
 #include "util.h"
 #include "cpu_trace.h"
 #include "debug_server.h"
@@ -18,13 +19,25 @@
 #include <string.h>
 #include <time.h>
 
+#ifndef SNESRECOMP_FUNC_SNAPSHOT
+#define SNESRECOMP_FUNC_SNAPSHOT SNESRECOMP_TRACE
+#endif
+
+#ifndef SNESRECOMP_STACK_BALANCE_DIAGNOSTICS
+#define SNESRECOMP_STACK_BALANCE_DIAGNOSTICS SNESRECOMP_TRACE
+#endif
+
+#ifndef SNESRECOMP_BOOT_WATCHDOG_DIAGNOSTICS
+#define SNESRECOMP_BOOT_WATCHDOG_DIAGNOSTICS SNESRECOMP_TRACE
+#endif
+
 Snes *g_snes;
 Cpu *g_snes_cpu;
 
 bool g_fail;
 const RtlGameInfo *g_rtl_game_info;
 
-/* Interp-coverage feedback manifest, written on process exit. The always-on
+/* Opt-in interp-coverage feedback manifest, written on process exit. The
  * tier-2 gap recorder in the interp bridge names every entry the interpreter
  * had to resolve at runtime; this serializes that promotion worklist (schema
  * "snesrecomp tier2 coverage v1") so tools/tier2_ingest.py can fold it back
@@ -47,17 +60,17 @@ const char *rtl_game_title(void) {
 
 void RtlRegisterGame(const RtlGameInfo *info) {
   g_rtl_game_info = info;
+  tier2_capture_set_default_enabled(info && info->tier2_capture);
   /* Arm MSU-1 from the environment for every game, with no per-game
    * wiring. Inert (default-OFF) unless SNESRECOMP_MSU1 is set. A game's
    * main.c may additionally call msu1_set_rom_path() to enable the
    * "auto" base-from-ROM-name mode. */
   msu1_init();
-  /* Harvest the interp-coverage manifest on exit for every game, same
-   * no-per-game-wiring policy as MSU-1 above. Registered once regardless of
-   * how many times a game re-registers (e.g. a reset path). */
+  /* Register once when the title or developer opts into coverage capture.
+   * Normal release sessions do not create coverage artifacts. */
   {
     static int coverage_atexit_registered = 0;
-    if (!coverage_atexit_registered) {
+    if (tier2_capture_enabled() && !coverage_atexit_registered) {
       coverage_atexit_registered = 1;
       atexit(rtl_write_tier2_coverage_manifest);
     }
@@ -306,15 +319,24 @@ typedef struct {
     int     frame;
     uint8_t wram_slice[RECOMP_SNAP_SLICE_LEN];
 } recomp_snap_entry;
+#if SNESRECOMP_FUNC_SNAPSHOT || SNESRECOMP_TRACE
 recomp_snap_entry g_recomp_snap_ring[RECOMP_SNAP_RING_LEN];
+#else
+recomp_snap_entry g_recomp_snap_ring[1];
+#endif
 
 /* Lookup an entry by absolute call index. Returns NULL if the index
  * is out of the ring's current window. */
 const recomp_snap_entry* recomp_snap_lookup(int call_idx) {
+#if SNESRECOMP_FUNC_SNAPSHOT
     if (call_idx < 1) return NULL;
     int slot = (call_idx - 1) % RECOMP_SNAP_RING_LEN;
     if (g_recomp_snap_ring[slot].call_idx != call_idx) return NULL;
     return &g_recomp_snap_ring[slot];
+#else
+    (void)call_idx;
+    return NULL;
+#endif
 }
 
 /* Write-log scope: arm the shared write ring around the selected AOT body.
@@ -340,11 +362,106 @@ static int wlog_func_matches(const char *name) {
 
 void RecompStackDump(void);
 
+/* ── AOT host-time attribution sampler (cosim-only, env SNESRECOMP_AOT_PROF=1) ──
+ * Hooks RecompStackPush/Pop to attribute every host millisecond to the AOT
+ * function on top of the recomp stack. The frame end (called from the harness)
+ * attributes the tail, dumps the frame's top-N to stderr (windowed with
+ * SNESRECOMP_AOT_PROF_FROM/_TO), and resets the per-frame accumulators. This
+ * is how we see which generated function eats a whole guest frame (e.g. the
+ * ~8.4s boot frame, which runs 100% AOT / 0 interpreter steps). Compiles to
+ * nothing outside the cosim profile build. */
+#ifdef SNESRECOMP_INTERP_PROFILE
+#define AOTPROF_CAP 4096
+typedef struct { const char *name; double ms_frame; uint64_t calls_frame; } AotProfEntry;
+static AotProfEntry g_aotprof[AOTPROF_CAP];
+static clock_t g_aotprof_last_t;
+static int g_aotprof_on = -1;
+static long g_aotprof_from, g_aotprof_to;
+
+static void aotprof_latch_env(void) {
+  const char *e = getenv("SNESRECOMP_AOT_PROF");
+  g_aotprof_on = (e && e[0] && e[0] != '0') ? 1 : 0;
+  const char *f = getenv("SNESRECOMP_AOT_PROF_FROM");
+  g_aotprof_from = f ? atol(f) : 0;
+  const char *t = getenv("SNESRECOMP_AOT_PROF_TO");
+  g_aotprof_to = t ? atol(t) : 100000000L;
+  g_aotprof_last_t = clock();
+}
+
+static AotProfEntry *aotprof_find(const char *name) {
+  unsigned h = (unsigned)(((uintptr_t)name >> 4) & (AOTPROF_CAP - 1));
+  for (int i = 0; i < AOTPROF_CAP; i++) {
+    unsigned idx = (h + i) & (AOTPROF_CAP - 1);
+    if (g_aotprof[idx].name == name) return &g_aotprof[idx];
+    if (g_aotprof[idx].name == NULL) { g_aotprof[idx].name = name; return &g_aotprof[idx]; }
+  }
+  return NULL;
+}
+
+static void aotprof_attr(const char *name, double dms) {
+  if (dms <= 0.0) return;
+  AotProfEntry *e = aotprof_find(name ? name : "(root)");
+  if (!e) return;
+  e->ms_frame += dms;
+  e->calls_frame++;
+}
+
+void aot_prof_frame_end(int frame) {
+  if (g_aotprof_on < 0) aotprof_latch_env();
+  if (g_aotprof_on != 1) return;
+  {
+    clock_t now = clock();
+    double d = 1000.0 * (double)(now - g_aotprof_last_t) / CLOCKS_PER_SEC;
+    const char *top = g_recomp_stack_top > 0 ? g_recomp_stack[g_recomp_stack_top - 1] : "(root)";
+    aotprof_attr(top, d);
+    g_aotprof_last_t = now;
+  }
+  if (frame >= g_aotprof_from && frame <= g_aotprof_to) {
+    static AotProfEntry *top[32];
+    int n = 0;
+    double total = 0.0;
+    for (int i = 0; i < AOTPROF_CAP && n < 32; i++)
+      if (g_aotprof[i].name && g_aotprof[i].ms_frame > 0.05) {
+        top[n++] = &g_aotprof[i];
+        total += g_aotprof[i].ms_frame;
+      }
+    for (int a = 0; a < n; a++) {
+      int best = a;
+      for (int b = a + 1; b < n; b++)
+        if (top[b]->ms_frame > top[best]->ms_frame) best = b;
+      AotProfEntry *t = top[a]; top[a] = top[best]; top[best] = t;
+    }
+    fprintf(stderr, "[aotprof] frame %d: %.0f ms attributed, top %d:\n", frame, total, n);
+    for (int i = 0; i < n; i++)
+      fprintf(stderr, "  %8.1f ms  %7llu calls  %s\n",
+              top[i]->ms_frame, (unsigned long long)top[i]->calls_frame,
+              top[i]->name ? top[i]->name : "?");
+    fflush(stderr);
+  }
+  for (int i = 0; i < AOTPROF_CAP; i++) {
+    g_aotprof[i].ms_frame = 0.0;
+    g_aotprof[i].calls_frame = 0;
+  }
+}
+#endif /* SNESRECOMP_INTERP_PROFILE */
+
 void RecompStackPush(const char *name) {
+#ifdef SNESRECOMP_INTERP_PROFILE
+  if (g_aotprof_on < 0) aotprof_latch_env();
+  if (g_aotprof_on == 1) {
+    clock_t now = clock();
+    double d = 1000.0 * (double)(now - g_aotprof_last_t) / CLOCKS_PER_SEC;
+    const char *top = g_recomp_stack_top > 0 ? g_recomp_stack[g_recomp_stack_top - 1] : "(root)";
+    aotprof_attr(top, d);
+    g_aotprof_last_t = now;
+  }
+#endif
   if (g_recomp_stack_top < RECOMP_STACK_DEPTH) {
     int slot = g_recomp_stack_top++;
     g_recomp_stack[slot] = name;
-    if (g_wlog_aot_slot < 0 && wlog_func_matches(name)) {
+    if (g_wlog_aot_slot < 0 && g_wlog_configured != 0 &&
+        wlog_scope_available() &&
+        wlog_func_matches(name)) {
       g_wlog_aot_slot = slot;
       wlog_scope_enter(name);
     }
@@ -372,6 +489,7 @@ void RecompStackPush(const char *name) {
   // continues afterward — no longjmp. Compare the snapshot at
   // matching points across recomp + oracle for sub-frame-precise
   // state diff regardless of NMI ordering.
+#if SNESRECOMP_FUNC_SNAPSHOT
   if (g_recomp_snap_on_func) {
     extern int snes_frame_counter;
     int match;
@@ -391,6 +509,7 @@ void RecompStackPush(const char *name) {
       memcpy(g_recomp_snap_ring[slot].wram_slice, g_ram, RECOMP_SNAP_SLICE_LEN);
     }
   }
+#endif
 }
 
 void RecompStackDump(void) {
@@ -407,8 +526,8 @@ void RecompStackDump(void) {
  * PHP/PHA/PHX/PHY prologue whose matching pulls are skipped by a mis-routed
  * early exit). We accumulate net delta per function name (pointer-keyed —
  * the generated code passes interned string literals) so a per-frame leaker
- * stands out by sheer magnitude. Always on; dumped by the watchdog/crash
- * path and the post-mortem report. */
+ * stands out by sheer magnitude. Optional in production; dumped by the
+ * watchdog/crash path and the post-mortem report when enabled. */
 #define STACKBAL_MAX 2048
 typedef struct {
   const char *name;
@@ -417,6 +536,7 @@ typedef struct {
   long        nonzero;      /* # returns with a nonzero delta */
   int         last_delta;
 } StackBalEntry;
+#if SNESRECOMP_STACK_BALANCE_DIAGNOSTICS
 static StackBalEntry g_stackbal[STACKBAL_MAX];
 
 static StackBalEntry *stackbal_find(const char *name) {
@@ -428,9 +548,11 @@ static StackBalEntry *stackbal_find(const char *name) {
   }
   return NULL; /* table full — drop */
 }
+#endif
 
 /* Comparator helper: collect non-zero-delta entries into `out`, return count. */
 static int stackbal_collect(StackBalEntry **out, int cap) {
+#if SNESRECOMP_STACK_BALANCE_DIAGNOSTICS
   int n = 0;
   for (int i = 0; i < STACKBAL_MAX && n < cap; i++)
     if (g_stackbal[i].name && g_stackbal[i].total_delta != 0)
@@ -443,23 +565,34 @@ static int stackbal_collect(StackBalEntry **out, int cap) {
     StackBalEntry *t = out[a]; out[a] = out[best]; out[best] = t;
   }
   return n;
+#else
+  (void)out;
+  (void)cap;
+  return 0;
+#endif
 }
 
 void RecompStackBalDumpStderr(int topn) {
   StackBalEntry *top[64];
   if (topn > 64) topn = 64;
   int n = stackbal_collect(top, topn);
+#if SNESRECOMP_STACK_BALANCE_DIAGNOSTICS
   fprintf(stderr, "=== stack-balance auditor: top %d net-imbalanced funcs ===\n", n);
   for (int i = 0; i < n; i++)
     fprintf(stderr, "  %+lld bytes net over %ld calls (%ld nonzero, last %+d): %s\n",
             top[i]->total_delta, top[i]->calls, top[i]->nonzero,
             top[i]->last_delta, top[i]->name ? top[i]->name : "?");
+#else
+  (void)n;
+  fprintf(stderr, "=== stack-balance auditor: disabled ===\n");
+#endif
   fflush(stderr);
 }
 
 void RecompStackBalDumpJson(FILE *f) {
   StackBalEntry *top[64];
   int n = stackbal_collect(top, 40);
+#if SNESRECOMP_STACK_BALANCE_DIAGNOSTICS
   fprintf(f, "  \"stack_balance\": [");
   for (int i = 0; i < n; i++)
     fprintf(f, "%s{\"name\":\"%s\",\"total_delta\":%lld,\"calls\":%ld,"
@@ -467,14 +600,30 @@ void RecompStackBalDumpJson(FILE *f) {
             (i ? "," : ""), top[i]->name ? top[i]->name : "?",
             top[i]->total_delta, top[i]->calls, top[i]->nonzero, top[i]->last_delta);
   fprintf(f, "],\n");
+#else
+  (void)n;
+  fprintf(f, "  \"stack_balance\": [],\n");
+  fprintf(f, "  \"stack_balance_disabled\": true,\n");
+#endif
 }
 
 void RecompStackPop(void) {
+#ifdef SNESRECOMP_INTERP_PROFILE
+  if (g_aotprof_on < 0) aotprof_latch_env();
+  if (g_aotprof_on == 1) {
+    clock_t now = clock();
+    double d = 1000.0 * (double)(now - g_aotprof_last_t) / CLOCKS_PER_SEC;
+    const char *fn = g_recomp_stack_top > 0 ? g_recomp_stack[g_recomp_stack_top - 1] : "(none)";
+    aotprof_attr(fn, d);
+    g_aotprof_last_t = now;
+  }
+#endif
   // Record exit BEFORE the pop so stack_depth reflects pre-pop state and
   // the function name is still the topmost entry. Defensive against
   // empty stack: the auditor must NOT consume an entry_seq it didn't push.
   if (g_recomp_stack_top > 0) {
     const char *fn = g_recomp_stack[g_recomp_stack_top - 1];
+#if SNESRECOMP_STACK_BALANCE_DIAGNOSTICS
     int slot = g_recomp_stack_top - 1;
     int delta = (int)(int16_t)(g_cpu.S - g_cpu_entry_s[slot]) -
                 (int)g_cpu_entry_return_frame[slot];
@@ -483,6 +632,9 @@ void RecompStackPop(void) {
       e->calls++;
       if (delta) { e->total_delta += delta; e->nonzero++; e->last_delta = delta; }
     }
+#else
+    (void)fn;
+#endif
     boundary_audit_record_exit(g_recomp_stack[g_recomp_stack_top - 1]);
     if (g_wlog_aot_slot == g_recomp_stack_top - 1) {
       wlog_scope_exit();
@@ -566,6 +718,7 @@ void WatchdogCheck(void) {
    * Tunable via SNESRECOMP_BOOT_WATCHDOG_SECS (default: first sample at
    * 8 s, then every 3 s). Shared across every game's bring-up. */
   if (snes_frame_counter == 0) {
+#if SNESRECOMP_BOOT_WATCHDOG_DIAGNOSTICS
     static long    boot_calls = 0;
     static clock_t boot_first = 0, boot_last_print = 0;
     static double  boot_first_secs = -1.0;
@@ -590,6 +743,7 @@ void WatchdogCheck(void) {
         fprintf(stderr, "    [%d] %s\n", n, g_recomp_stack[i]);
       fflush(stderr);
     }
+#endif
     return;
   }
   if (!g_watchdog_enabled) return;
@@ -667,4 +821,3 @@ Snes *SnesInit(const uint8 *data, int data_size) {
   g_sram_size = g_snes->cart->ramSize;
   return g_snes;
 }
-

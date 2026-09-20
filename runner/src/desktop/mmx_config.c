@@ -1,3 +1,7 @@
+// Adapted from snesrev/smw src/config.c (MIT, (c) 2023 snesrev, (c) 2021
+// elzo_d), then substantially reworked for the Mega Man X trilogy hosts.
+// See THIRD_PARTY_ATTRIBUTION.md; this project's own work here is PolyForm
+// Noncommercial, the retained upstream material stays MIT.
 #include "config.h"
 #include "types.h"
 #include <stdio.h>
@@ -586,7 +590,9 @@ void WriteConfigFile(const char *filename) {
   CfgKV kvs[] = {
     { "Graphics", "WindowScale" },
     { "Graphics", "DisplayAspect" },
+    { "Graphics", "OutputMethod" },
     { "Graphics", "LinearFiltering" },
+    { "Graphics", "Shader" },
     { "Graphics", "Widescreen" },
     { "Sound",    "EnableAudio" },
     { "Sound",    "AudioFreq" },
@@ -603,14 +609,18 @@ void WriteConfigFile(const char *filename) {
       SnesDisplayAspect_Clamp(g_config.display_aspect);
   snprintf(kvs[0].val, sizeof(kvs[0].val), "%d", g_config.window_scale ? g_config.window_scale : 3);
   snprintf(kvs[1].val, sizeof(kvs[1].val), "%s", kDisplayAspectNames[display_aspect]);
-  snprintf(kvs[2].val, sizeof(kvs[2].val), "%d", g_config.linear_filtering ? 1 : 0);
-  snprintf(kvs[3].val, sizeof(kvs[3].val), "%d", g_config.widescreen ? 1 : 0);
-  snprintf(kvs[4].val, sizeof(kvs[4].val), "%d", g_config.enable_audio ? 1 : 0);
-  snprintf(kvs[5].val, sizeof(kvs[5].val), "%d", g_config.audio_freq);
-  snprintf(kvs[6].val, sizeof(kvs[6].val), "%s", g_config.enable_gamepad[0] ? "true" : "false");
-  snprintf(kvs[7].val, sizeof(kvs[7].val), "%s", g_config.enable_gamepad[1] ? "true" : "false");
-  snprintf(kvs[8].val, sizeof(kvs[8].val), "%d", g_config.skip_launcher ? 1 : 0);
-  snprintf(kvs[9].val, sizeof(kvs[9].val), "%d", g_config.gamepad_deadzone);
+  snprintf(kvs[2].val, sizeof(kvs[2].val), "%s",
+           g_config.output_method == kOutputMethod_OpenGL ? "OpenGL" :
+           g_config.output_method == kOutputMethod_SDLSoftware ? "SDL-Software" : "SDL");
+  snprintf(kvs[3].val, sizeof(kvs[3].val), "%d", g_config.linear_filtering ? 1 : 0);
+  snprintf(kvs[4].val, sizeof(kvs[4].val), "%s", g_config.shader ? g_config.shader : "");
+  snprintf(kvs[5].val, sizeof(kvs[5].val), "%d", g_config.widescreen ? 1 : 0);
+  snprintf(kvs[6].val, sizeof(kvs[6].val), "%d", g_config.enable_audio ? 1 : 0);
+  snprintf(kvs[7].val, sizeof(kvs[7].val), "%d", g_config.audio_freq);
+  snprintf(kvs[8].val, sizeof(kvs[8].val), "%s", g_config.enable_gamepad[0] ? "true" : "false");
+  snprintf(kvs[9].val, sizeof(kvs[9].val), "%s", g_config.enable_gamepad[1] ? "true" : "false");
+  snprintf(kvs[10].val, sizeof(kvs[10].val), "%d", g_config.skip_launcher ? 1 : 0);
+  snprintf(kvs[11].val, sizeof(kvs[11].val), "%d", g_config.gamepad_deadzone);
 
   char *data = NULL;
   long sz = 0;
@@ -659,6 +669,11 @@ void WriteConfigFile(const char *filename) {
           matched = 1;
           break;
         }
+      if (!matched && StringEqualsNoCase(cur, "Sound") &&
+          (CfgLineIsKey(line, "Msu1Enabled") ||
+           CfgLineIsKey(line, "Msu1Dir"))) {
+        matched = 1;
+      }
     }
     if (!matched) {
       CfgBuf_Str(&out, line);

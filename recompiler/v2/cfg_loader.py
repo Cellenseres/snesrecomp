@@ -25,6 +25,9 @@ v2 KEEPS:
 - `name <hex_addr> <name>` — friendly-naming for cross-bank labels.
   v2 emits these as `void NAME(CpuState *cpu);` forward declarations
   in funcs.h (Phase 6e/f). For now we just retain them.
+- `symbol <hex_addr> <name>` — non-promoting friendly label. Unlike
+  `name`, this never creates an emit entry or funcs.h declaration; it
+  only names an address if analysis reaches it through real code flow.
 - `force_lle <pc24>` — keep an exact architectural function boundary on
   the interpreter tier even when profile promotion or static reachability
   would otherwise materialise it as native code.
@@ -80,6 +83,7 @@ class BankCfg:
     includes: List[str] = field(default_factory=list)
     entries: List[BankEntry] = field(default_factory=list)
     names: List[NameDecl] = field(default_factory=list)
+    symbols: List[NameDecl] = field(default_factory=list)
     # Exact 24-bit function boundaries which must stay interpreter-only.
     # Unlike exclude_range, these are executable ROM routines; they merely
     # rely on behavior (for example return-stack rewriting) that the native
@@ -144,6 +148,12 @@ class BankCfg:
     # no-return heuristic.  The decoder severs lexical fall-through and the
     # emitter hands the caller's outer return context to the callee.
     terminal_jsr: set = field(default_factory=set)
+    # `noreturn_jsr <site_pc16>` — the direct JSR enters a path which is
+    # source-authoritatively known never to return (for example, an original
+    # game bug that transfers into non-code bytes and crashes).  Unlike
+    # terminal_jsr, the callee does not consume the call frame as inline data;
+    # emission preserves the real frame and hands the exceptional path to LLE.
+    noreturn_jsr: set = field(default_factory=set)
     # `hle_spc_upload <pc>` directives — replace the recompiled body of
     # the function starting at <pc> with a single call to the runtime
     # HLE helper RtlUploadSpcImageFromDp. The standard SNES SPC upload
@@ -434,7 +444,33 @@ def load_bank_cfg(path: str) -> BankCfg:
                 if site_pc16 in cfg.terminal_jsr:
                     raise ValueError(
                         f"{path}: terminal_jsr duplicate site ${site_pc16:04X}")
+                if site_pc16 in cfg.noreturn_jsr:
+                    raise ValueError(
+                        f"{path}: JSR site ${site_pc16:04X} cannot be both "
+                        "terminal_jsr and noreturn_jsr")
                 cfg.terminal_jsr.add(site_pc16)
+                continue
+
+            # noreturn_jsr <site_pc16> — source-authoritative no-return call.
+            # The decoder validates that the named opcode is a direct JSR.
+            if head == 'noreturn_jsr':
+                if len(tokens) != 2:
+                    raise ValueError(
+                        f"{path}: noreturn_jsr needs exactly one <site_pc16>, "
+                        f"got: {stripped!r}")
+                try:
+                    site_pc16 = _parse_hex(tokens[1]) & 0xFFFF
+                except ValueError as e:
+                    raise ValueError(
+                        f"{path}: noreturn_jsr bad site {tokens[1]!r}: {e}")
+                if site_pc16 in cfg.noreturn_jsr:
+                    raise ValueError(
+                        f"{path}: noreturn_jsr duplicate site ${site_pc16:04X}")
+                if site_pc16 in cfg.terminal_jsr:
+                    raise ValueError(
+                        f"{path}: JSR site ${site_pc16:04X} cannot be both "
+                        "terminal_jsr and noreturn_jsr")
+                cfg.noreturn_jsr.add(site_pc16)
                 continue
 
             # hle_dispatch <site_pc16> <c_function_name> — replace the
@@ -698,6 +734,22 @@ def load_bank_cfg(path: str) -> BankCfg:
                     continue
                 friendly = tokens[2]
                 cfg.names.append(NameDecl(addr_24=addr, name=friendly))
+                continue
+
+            # symbol <hex_addr> <friendly_name>
+            #
+            # Non-promoting label overlay. This feeds the name resolver for
+            # analysis/emission comments and discovered functions, but unlike
+            # `name` it never auto-promotes same-bank labels into cfg.entries.
+            if head == 'symbol':
+                if len(tokens) < 3:
+                    continue
+                try:
+                    addr = _parse_hex(tokens[1])
+                except ValueError:
+                    continue
+                friendly = tokens[2]
+                cfg.symbols.append(NameDecl(addr_24=addr, name=friendly))
                 continue
 
             # exclude_range <start> <end>
