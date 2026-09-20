@@ -243,20 +243,49 @@ def set_valid_variants(d, *, authoritative: bool = False) -> None:
     _VALID_VARIANTS_AUTHORITATIVE = bool(authoritative)
 
 
+def resolve_variant_owner(addr_24: int) -> int:
+    """Return the PC whose emitted bodies answer a validity question here.
+
+    LoROM maps banks $80-$BF onto the same ROM bytes as $00-$3F, so a target
+    with no emitted variant of its own may still have bodies under its
+    mirror. Those bodies are real and callable -- but they were emitted under
+    the MIRROR's symbol names, which are frequently not the same names.
+    `_cfg_name_maps` claims friendly names globally first-come-first-served,
+    so one side of a mirror pair takes the cfg label and the other falls back
+    to synthetic `bank_BB_AAAA`.
+
+    Answering "which variants exist?" through the mirror while naming the
+    call after the original bank is what produced Super Metroid's undefined
+    cross-bank symbols: `$88:B279` has no AOT body, its mirror `$08:B279`
+    has M1X1, and the dispatch switch emitted `bank_88_B279_M1X1(cpu)` for a
+    body that exists as `FxTypeFunc_2_Lava_M1X1`. Callers that resolve the
+    variant set through this function must resolve the NAME through the same
+    PC it returns.
+    """
+    a = addr_24 & 0xFFFFFF
+    if _VALID_VARIANTS.get(a):
+        return a
+    bank = (a >> 16) & 0xFF
+    if bank < 0x40 or 0x80 <= bank < 0xC0:
+        mirror = a ^ 0x800000
+        if _VALID_VARIANTS.get(mirror):
+            return mirror
+    return a
+
+
 def valid_variant_list(addr_24: int):
     """Return the (m, x) variants a dispatch switch should emit a case
     for at this call target, in canonical order. When v2_regen has
     recorded a pruned survivor set for the target (or its LoROM
     mirror), return that subset; otherwise return all four (pre-prune
-    or cross-bank target with no recorded set)."""
+    or cross-bank target with no recorded set).
+
+    A caller that turns this into a SYMBOL must name it after
+    :func:`resolve_variant_owner`, not after ``addr_24``.
+    """
     if not _VALID_VARIANTS and not _VALID_VARIANTS_AUTHORITATIVE:
         return _MX_VARIANTS
-    a = addr_24 & 0xFFFFFF
-    s = _VALID_VARIANTS.get(a)
-    if s is None:
-        bank = (a >> 16) & 0xFF
-        if bank < 0x40 or 0x80 <= bank < 0xC0:
-            s = _VALID_VARIANTS.get(a ^ 0x800000)
+    s = _VALID_VARIANTS.get(resolve_variant_owner(addr_24))
     if not s and not _VALID_VARIANTS_AUTHORITATIVE:
         return _MX_VARIANTS
     if not s:
@@ -300,7 +329,23 @@ def variant_dispatch_case_lines(addr_24: int, base_name: str,
     route to the (shrinking) survivor set, that perturbs the prune fixpoint
     into a non-terminating 1-clone-per-pass churn (observed regenerating
     ALttP). Single-line keeps the runtime (m, x) switch correctly out of the
-    direct-reference graph (a switch case never dangles at runtime)."""
+    direct-reference graph (a switch case never dangles at runtime).
+
+    `base_name` is the caller's name for `addr_24`. When the survivor set is
+    answered by the LoROM mirror instead (see `resolve_variant_owner`), the
+    bodies that exist carry the MIRROR's symbol name, so the cases must be
+    emitted against that name -- naming them `base_name` produces a call to
+    a function nothing defines."""
+    owner = resolve_variant_owner(addr_24)
+    if owner != (addr_24 & 0xFFFFFF):
+        # Emission truth first. `get_name_for_pc` aliases across the mirror,
+        # so asking it about the owner can hand back the name belonging to
+        # the very PC we just resolved away from. Fall back to it only when
+        # no emitted-name map is installed (the v2_regen path).
+        base_name = (
+            get_emitted_name(owner)
+            or (get_name_for_pc(owner) if not _EMITTED_NAMES else None)
+            or f"bank_{(owner >> 16) & 0xFF:02X}_{owner & 0xFFFF:04X}")
     survivors = list(valid_variant_list(addr_24))
     survivor_set = set(survivors)
     lines = []
@@ -334,6 +379,30 @@ def variant_dispatch_case_lines(addr_24: int, base_name: str,
         raise ValueError(
             f"incomplete variant set for ${addr_24:06X} without LLE fallback")
     return lines
+
+
+_EMITTED_NAMES: Dict[int, str] = {}
+
+
+def set_emitted_names(name_map: Dict[int, str]) -> None:
+    """Record the symbol each PC's body is actually emitted under.
+
+    Deliberately NOT the same map as :func:`set_name_resolver`, which installs
+    LoROM mirror aliases so a JML into `$80:8007` resolves to the function the
+    cfg declared at `$00:8007`. That aliasing is right for *resolving a branch
+    target* and wrong for *naming a definition*: emission names each body from
+    its own PC, and `_cfg_name_maps` hands a friendly label to whichever side
+    of a mirror pair claims it first, leaving the other side synthetic. Ask the
+    aliasing resolver what `$AD:E293` is called and it answers with `$2D:E293`'s
+    cfg label; the body emitted there is `bank_AD_E293`.
+    """
+    global _EMITTED_NAMES
+    _EMITTED_NAMES = dict(name_map or {})
+
+
+def get_emitted_name(pc24: int):
+    """The symbol a body at this exact PC carries, or None. No mirroring."""
+    return _EMITTED_NAMES.get(pc24 & 0xFFFFFF)
 
 
 def set_name_resolver(name_map: Dict[int, str]) -> None:

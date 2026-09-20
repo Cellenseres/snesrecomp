@@ -22,6 +22,7 @@ from snes65816 import (  # noqa: E402
     load_rom,
     register_reloc_region,
 )
+from v2.link_closure import assert_closed  # noqa: E402
 from v2.program_analysis import VariantKey  # noqa: E402
 from v2.program_emit import (  # noqa: E402
     CACHE_FORMAT_VERSION,
@@ -186,6 +187,13 @@ def main() -> int:
         help="whole-program analyzer (default: use the release native binary "
              "when present, otherwise Python)")
     parser.add_argument(
+        "--no-link-closure-check", action="store_true",
+        help="skip the post-emit check that every called <Name>_M<m>X<x> "
+             "variant is also defined somewhere in the generated tree. The "
+             "check exists because an unclosed tree otherwise surfaces as "
+             "linker noise long after generation reported success; turn it "
+             "off only to inspect a known-broken tree")
+    parser.add_argument(
         "--bank-shard-threshold-kib", type=int, default=4096,
         help="shard generated banks at or above this source size into "
              "stable translation units (default: 4096 KiB; 0 shards every "
@@ -275,6 +283,11 @@ def main() -> int:
         shard_pc_span=shard_pc_span,
     )
     cached = _verified_cached_stats(out_dir, analysis_input_digest)
+    if cached is not None and not args.no_link_closure_check:
+        # Reuse re-publishes an earlier run's verdict. If that tree predates
+        # this check (or was produced with it off), reusing it would silently
+        # hand the compiler the same unlinkable output again.
+        assert_closed(out_dir)
     if cached is not None:
         elapsed = time.perf_counter() - started
         print(
@@ -350,6 +363,7 @@ def main() -> int:
         enable_hle=not args.no_hle,
         shard_threshold_bytes=shard_threshold_bytes,
         shard_pc_span=shard_pc_span,
+        check_link_closure=not args.no_link_closure_check,
     )
     elapsed = time.perf_counter() - started
     print(

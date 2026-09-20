@@ -47,9 +47,20 @@ typedef RtlEnhancedRenderResult RtlEnhancedRenderFrameFunc(
     RtlEnhancedRendererFrame *frame);
 
 void WatchdogCheck(void);
+void snes_refresh_charge(void);   /* DRAM refresh tax; see common_cpu_infra.c */
+void snes_refresh_exempt(void);   /* mark a master-clock teleport (park, load) */
+/* Rollback: the refresh tax carries a sub-scanline remainder and a high-water
+ * mark across frames, and both decide how many cycles the NEXT block is
+ * charged. A rewind that leaves them on the discarded timeline replays the
+ * same code for a different number of master cycles. See common_cpu_infra.c. */
+void snes_refresh_state_get(uint64_t *phase, uint64_t *charged_upto);
+void snes_refresh_state_set(uint64_t phase, uint64_t charged_upto);
 void WatchdogFrameStart(void);
 void RecompStackPush(const char *name);
 void RecompStackPop(void);
+/* Pop for an LLE yield unwind: the frame is unfinished, so no balance figure
+ * is recorded. See common_cpu_infra.c. */
+void RecompStackPopYield(void);
 /* Optional stack-balance auditor (see common_cpu_infra.c): reports stack
  * movement beyond consumption of the caller's materialized JSR/JSL frame when
  * SNESRECOMP_STACK_BALANCE_DIAGNOSTICS is enabled. */
@@ -71,6 +82,9 @@ void CpuDispatchLogDumpJson(FILE *f);
 extern int g_recomp_stack_top;
 extern uint16_t g_cpu_entry_s[];
 int cpu_resolve_ancestor_skip(uint16_t ret_s);
+/* DIAGNOSTIC: dump the live recomp frame array (name, entry S, hrv per slot)
+ * to `out`, highlighting any slot whose entry S equals `mark` (0 = none). */
+void recomp_dump_frame_array(FILE *out, uint16_t mark);
 int cpu_resolve_post_return_skip(uint16_t post_s);
 typedef struct CpuTailcallContextSave {
   uint8_t valid;
@@ -124,6 +138,31 @@ typedef struct RtlGameInfo {
    * release runs do not create tier2_*.json/jsonl artifacts. Developers can
    * still opt in at launch with SNESRECOMP_TIER2_CAPTURE=1. */
   int tier2_capture;
+  /* Zero uses the framework minimum. A title can reject formats which
+   * predate required coprocessor or execution-state data before loading. */
+  uint32_t minimum_state_version;
+
+  /* ── Rewindable execution position (rollback snapshots only) ───────────
+   *
+   * A guest snapshot holds the machine; it does not hold WHERE THE GAME IS
+   * in its own code. For a title whose frame model runs the guest on a host
+   * fiber, that position is the fiber's C call chain, and rewinding the
+   * machine without it leaves the two out of step -- the frame after the
+   * rewind resumes where the speculation left off while the RAM says
+   * otherwise. Measured on Super Metroid: 21 frames in 1,200 ended in a
+   * state they would not otherwise have been in.
+   *
+   * These hooks let such a title put that position into a ROLLBACK snapshot
+   * (in-process, in-memory, this build only -- never a file, never a wire
+   * payload; see RtlRollbackSaveToMemory). A title whose execution position
+   * already rides in the savestate chunk, or that has none to speak of,
+   * leaves them NULL.
+   *
+   * exec_state_bound is an upper bound for sizing; exec_state_save returns
+   * the bytes written, or 0 to abandon the snapshot. */
+  size_t (*exec_state_bound)(void);
+  size_t (*exec_state_save)(void *out, size_t capacity);
+  int    (*exec_state_load)(const void *in, size_t size);
 } RtlGameInfo;
 
 extern const RtlGameInfo *g_rtl_game_info;

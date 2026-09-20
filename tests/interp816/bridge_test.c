@@ -40,6 +40,7 @@ static int      g_aot_double_rewrite;
 static int      g_aot_crosses_interp_owner;
 static int      g_aot_skips_interp_owner;
 static int      g_aot_deadline_unwind;
+static int      g_aot_gap_walks_into_wait;
 static int      g_owner_target_result;
 static int      g_aot_tail_chain_probe;
 static int      g_aot_skips_root;
@@ -71,6 +72,7 @@ void debug_on_block_enter(uint32_t pc, uint32_t a, uint32_t x, uint32_t y) {
 }
 void RtlApuLock(void) {}
 void RtlApuUnlock(void) {}
+
 void snes_refresh_charge(void) {}
 uint32_t cpu_region_speed(uint32_t addr24) {
     return (uint32_t)snes_region_speed(addr24, g_memsel);
@@ -91,14 +93,26 @@ static const char *g_push_log[16];
 static int g_push_count = 0;
 static int g_push_depth = 0;
 static int g_pop_underflow = 0;
+/* Model the real push/pop on g_recomp_stack_top too (common_cpu_infra.c
+ * seeds g_cpu_entry_s[slot] = S at push). The bridge keys its "did this
+ * rewritten return cross into a compiled ancestor" decision on
+ * s_interp_bounce_recomp_base = g_recomp_stack_top at bounce time; with a
+ * stub that never advanced the top, that whole branch was untestable and
+ * S8d below could not fail. */
+static CpuState g_c;
 void RecompStackPush(const char *name) {
     if (g_push_count < 16) g_push_log[g_push_count] = name;
     g_push_count++;
     g_push_depth++;
+    if (g_recomp_stack_top < 64) {
+        g_cpu_entry_s[g_recomp_stack_top] = g_c.S;
+        g_recomp_stack_top++;
+    }
 }
 void RecompStackPop(void) {
     if (g_push_depth <= 0) g_pop_underflow = 1;
     g_push_depth--;
+    if (g_recomp_stack_top > 0) g_recomp_stack_top--;
 }
 void snes_catchupApu(Snes *snes) { (void)snes; ++g_relative_syncs; }
 void snes_sync_master_clock(Snes *snes, uint64_t master_clock) {
@@ -187,6 +201,14 @@ RecompReturn cpu_dispatch_pc_paired(CpuState *cpu, uint32 pc24,
         if (g_owner_target_result)
             return interp_bridge_lle_yield_unwind(cpu, 0x008003);
         return RECOMP_RETURN_NORMAL;
+    }
+    if (g_aot_gap_walks_into_wait && (pc24 & 0xFFFFFF) == FAKE_AOT) {
+        /* An unresolved dispatch inside the compiled body opens a NESTED gap
+         * frame (yield_pc == 0), and the interpreted routine it lands in walks
+         * into the program's cooperative wait primitive. */
+        g_aot_called++;
+        return interp_tier_dispatch_balanced(cpu, 0x008300, 0x008000,
+                                             cpu->S, frame_size);
     }
     if (g_aot_deadline_unwind && (pc24 & 0xFFFFFF) == FAKE_AOT) {
         g_aot_called++;
@@ -319,7 +341,6 @@ static int g_fail = 0, g_check = 0;
 #define CHECK(cond, ...) do { g_check++; if (!(cond)) { \
     g_fail++; printf("    FAIL: "); printf(__VA_ARGS__); printf("\n"); } } while (0)
 
-static CpuState g_c;
 static void init_cpu(void) {
     memset(&g_c, 0, sizeof g_c);
     g_c.S = 0x01FF; g_c.emulation = 1; g_c.m_flag = 1; g_c.x_flag = 1;
@@ -627,6 +648,101 @@ int main(void) {
             "A.lo=%02X exp 5A (rewritten continuation executed)", g_c.A & 0xFF);
       CHECK(g_c.S == 0x01FF, "S=%04X exp 01FF (bounce frame consumed once)", g_c.S);
       g_aot_rewrites_return = 0; }
+
+    /* S8d: the scheduler frame resumes DEEP -- inside a wait routine's
+     * epilogue (WaitForNMI shape), i.e. below the S its caller runs at. The
+     * caller returns to, then JSLs an AOT callee that rewrites its return
+     * (inline arguments) from a SHALLOWER S than the frame's entry S. That
+     * entry S is a resume point, not a compiled-ancestor boundary, so the
+     * rewritten continuation must still come back to this interpreter.
+     *
+     * Without interp_owner_crossed()'s scheduler exemption it is classified
+     * as "crossed into a compiled ancestor", run in a nested tier frame, and
+     * surfaces as SKIP_1 that abandons the live frame. Super Metroid, Start
+     * at the title: FileSelectMenu_0_FadeOutConfigGfx -> (JSR) WaitForNMI ->
+     * LoadInitialMenuTiles -> JSL SetupDmaTransfer(+8 inline bytes), then
+     * garbage into InvalidInterrupt_Crash on the next frame.
+     *
+     * This test exists because the fix was lost once in a rebase and nothing
+     * failed (recomp-ai-rules/PRINCIPLES.md, "Enforce the Rule in the
+     * Artifact"). If it starts passing with the exemption removed, the
+     * harness has stopped modelling g_recomp_stack_top -- check that first. */
+    { memset(RAM, 0, MEMSZ); init_cpu(); g_aot_called = 0;
+      g_aot_rewrites_return = 1;
+      uint8_t wait_epilogue[] = {0x60};          /* $8300: RTS (frame entry) */
+      uint8_t caller[] = {
+          0x20,0x00,0x83,                        /* $8000: JSR $8300 (in progress) */
+          0x22,0x00,0x81,0x00,                   /* $8003: JSL fake AOT (rewrites) */
+          0xA9,0xEE                              /* $8007: must NOT execute */
+      };
+      uint8_t continuation[] = {
+          0xA9,0x5A,                             /* $8200: rewritten landing */
+          0xAD,0x20,0x00, 0xD0,0xFB             /* $8202: scheduler yield loop */
+      };
+      load(0x8000, caller, sizeof caller);
+      load(0x8200, continuation, sizeof continuation);
+      load(0x8300, wait_epilogue, sizeof wait_epilogue);
+      RAM[0x20] = 0;
+      /* The previous frame yielded inside $8300's callee frame: JSR $8300's
+       * return address ($8002) is on the stack and S is below the caller. */
+      RAM[0x1FF] = 0x80; RAM[0x1FE] = 0x02; g_c.S = 0x01FD;
+      int rc = interp_bridge_run_loop(&g_c, 0x008300, 0x008202, 0x0020, 0);
+      printf("S8d scheduler frame resumed below its caller keeps a rewritten return\n");
+      CHECK(rc == 1, "rc=%d exp 1 (frame yields, not bail)", rc);
+      CHECK(g_aot_called == 1, "aot_called=%d exp 1", g_aot_called);
+      CHECK((g_c.A & 0xFF) == 0x5A,
+            "A.lo=%02X exp 5A (rewritten continuation ran in its owner)",
+            g_c.A & 0xFF);
+      CHECK(g_c.S == 0x01FF, "S=%04X exp 01FF (JSL frame consumed once)", g_c.S);
+      CHECK(interp_bridge_lle_resume_pc() == 0x008202,
+            "resume=$%06X exp $008202 (yield loop)",
+            (unsigned)interp_bridge_lle_resume_pc());
+      g_aot_rewrites_return = 0; }
+
+    /* S8e: a NESTED gap frame (yield_pc == 0) that walks into the SCHEDULER's
+     * wait primitive must hand the block outward, not interpret it. Only the
+     * scheduler frame's contract can be satisfied here: the handshake flag is
+     * cleared by the host between scheduler frames, and the host cannot run
+     * while a frame below the scheduler is still on the stack. Interpreting
+     * the loop here spins to the step cap, and that cap is a BAIL --
+     * interp_tier_dispatch_balanced then abandons the site with its handler's
+     * side effects skipped, which is silent corruption rather than a stall.
+     *
+     * Super Metroid, Ceres entrance, frame 2619 (deterministic from boot, no
+     * input): StartGameplay_Async $80:A07B and InitAndLoadGameData_Async
+     * $82:8000 each reach an unresolved dispatch that opens a nested frame;
+     * inside it a bounce into the WaitForNMI HLE armed the LLE yield unwind,
+     * this frame consumed it, and it resumed interpreting $80:8338 -- whose
+     * loop at $80:8343 it could never satisfy. Two abandons, then ppu_read's
+     * assert(0) on the state they left behind. */
+    { memset(RAM, 0, MEMSZ); init_cpu(); g_aot_called = 0; g_abandon_called = 0;
+      g_aot_gap_walks_into_wait = 1;
+      uint8_t scheduler[] = {
+          0x22,0x00,0x81,0x00,                 /* $8000: JSL fake compiled root */
+          0xA9,0x5A,                           /* $8004: must not execute */
+          0xAD,0x20,0x00, 0xD0,0xFB            /* $8006: cooperative wait loop */
+      };
+      uint8_t gap_routine[] = {
+          0xEA,                                /* $8300: NOP */
+          0x4C,0x06,0x80                       /* $8301: JMP $8006 (the wait) */
+      };
+      load(0x8000, scheduler, sizeof scheduler);
+      load(0x8300, gap_routine, sizeof gap_routine);
+      RAM[0x20] = 0;
+      int rc = interp_bridge_run_loop(&g_c, 0x008000, 0x008006, 0x0020, 0);
+      printf("S8e nested gap frame hands the scheduler's wait outward\n");
+      CHECK(rc == 1, "rc=%d exp 1 (frame yields, not bail)", rc);
+      CHECK(g_aot_called == 1, "aot_called=%d exp 1", g_aot_called);
+      CHECK(g_abandon_called == 0,
+            "abandon_called=%d exp 0 (a wait is not an unresolved site)",
+            g_abandon_called);
+      CHECK((g_c.A & 0xFF) == 0x00,
+            "A.lo=%02X exp 00 (scheduler continuation not executed)",
+            g_c.A & 0xFF);
+      CHECK(interp_bridge_lle_resume_pc() == 0x008006,
+            "resume=$%06X exp $008006 (wait loop owns the block point)",
+            (unsigned)interp_bridge_lle_resume_pc());
+      g_aot_gap_walks_into_wait = 0; }
 
     /* S8b: an AOT root reached from the LLE scheduler can non-locally return
      * through its own compiled host frame while still landing normally in the

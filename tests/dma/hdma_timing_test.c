@@ -76,6 +76,19 @@ uint8_t joypad_auto_read_reg(uint16_t state, unsigned reg) {
     (void)reg;
     return 0;
 }
+/* Multitap-era joypad surface (feat/rollback-multitap-newproject): snes.c
+ * now routes $4016/$4017/$4218-$421F and WRIO through joypad.c. Same
+ * harness policy as the stubs above — none of it participates in HDMA
+ * timing. */
+void joypad_write_iobit(struct Snes *snes, uint8_t wrio) { (void)snes; (void)wrio; }
+uint8_t joypad_read_iobit(void) { return 0; }
+uint8_t joypad_read_port(struct Snes *snes, unsigned port) {
+    (void)snes; (void)port; return 0;
+}
+void joypad_auto_read(struct Snes *snes) { (void)snes; }
+uint8_t joypad_auto_read_reg_addr(struct Snes *snes, uint16_t reg) {
+    (void)snes; (void)reg; return 0;
+}
 void ppudma_record_dma(int channel, int fromB, uint8_t aBank, uint16_t aAdr,
                        uint8_t bAdr, uint16_t size) {
     (void)channel;
@@ -160,6 +173,108 @@ int main(void) {
     failures += check(ppu_regs[0x27] == 0x66, "external beam owner can run HDMA HBlank hook");
     failures += check(dma->channel[0].tableAdr == 0x0203, "external beam owner consumed terminator");
     failures += check(dma->channel[0].hdmaActive, "external beam owner preserves HDMAEN state");
+
+    /* Which A-bus DMA sources read as "not cartridge data".
+     *
+     * The question is asked where the channel is ARMED, from the address the
+     * game programmed, because a DMA's source wraps within its bank: a legal
+     * transfer that runs off the end of a bank spends its tail at $xx:0000,
+     * and the old per-byte check called that a fault. Super Metroid uploads
+     * 16 KB from $9A:D200 every intro -- the record is ROM data at $82:8319 --
+     * and wrapped into $9A:0000 for the last 4,608 bytes, exactly as hardware
+     * does. */
+    failures += check(!dma_source_is_offmap(CART_LOROM, false, 0x9a, 0xd200),
+                      "a LoROM source at $9A:D200 is ordinary ROM");
+    failures += check(dma_source_is_offmap(CART_LOROM, false, 0x9a, 0x0000),
+                      "a LoROM source at $9A:0000 is the mirror, not ROM");
+    failures += check(!dma_source_is_offmap(CART_LOROM, false, 0x7e, 0x3000),
+                      "WRAM bank $7E is a normal source at any address");
+    failures += check(!dma_source_is_offmap(CART_LOROM, true, 0x9a, 0x0000),
+                      "a PPU-to-CPU transfer has no A-bus source to judge");
+    failures += check(!dma_source_is_offmap(CART_HIROM, false, 0xf8, 0x0fa6),
+                      "HiROM maps $C0-$FF whole, so $F8:0FA6 is cartridge data");
+    failures += check(dma_source_is_offmap(CART_DSP1, false, 0x9a, 0x0000),
+                      "a DSP1 cartridge is mapped like LoROM here");
+
+    /* ONE transfer per HBlank, and none at all when the host owns HDMA.
+     *
+     * Two single-line entries writing different values to the same register:
+     * after the first HBlank the register must hold the FIRST entry's value.
+     * A beam that ran the table twice in one HBlank would show the second,
+     * which is what shipped between 2026-08-28 and 2026-09-12 -- the gate
+     * below was added beside the ungated call instead of replacing it, so
+     * every table was consumed twice and a host that walked the tables
+     * itself got the beam's pass on top of its own. */
+    dma_reset(dma);
+    memset(ram, 0, sizeof ram);
+    memset(ppu_regs, 0, sizeof ppu_regs);
+    snes.hPos = 0;
+    snes.vPos = 0;
+    snes.beamMasterLast = 0;
+    snes.hIrqEnabled = snes.vIrqEnabled = false;
+    snes.inIrq = false;
+    snes.hdmaBeamOff = false;
+
+    ram[0x0300] = 0x01;   /* one line */
+    ram[0x0301] = 0x11;
+    ram[0x0302] = 0x01;   /* one line */
+    ram[0x0303] = 0x22;
+    ram[0x0304] = 0x00;   /* terminator */
+    dma_write(dma, 0x4300, 0x00);
+    dma_write(dma, 0x4301, 0x28);
+    dma_write(dma, 0x4302, 0x00);
+    dma_write(dma, 0x4303, 0x03);
+    dma_write(dma, 0x4304, 0x7e);
+    dma_startDma(dma, 0x01, true);
+    dma_initHdma(dma);
+
+    snes_advance_master_cycles(&snes, 1024);
+    failures += check(ppu_regs[0x28] == 0x11,
+                      "beam HDMA transfers once per HBlank, not twice");
+
+    /* Same table, host-owned HDMA: the beam must not touch it at all. */
+    dma_reset(dma);
+    memset(ppu_regs, 0, sizeof ppu_regs);
+    snes.hPos = 0;
+    snes.vPos = 0;
+    snes.beamMasterLast = 0;
+    snes.hdmaBeamOff = true;
+    dma_write(dma, 0x4300, 0x00);
+    dma_write(dma, 0x4301, 0x28);
+    dma_write(dma, 0x4302, 0x00);
+    dma_write(dma, 0x4303, 0x03);
+    dma_write(dma, 0x4304, 0x7e);
+    dma_startDma(dma, 0x01, true);
+    dma_initHdma(dma);
+
+    snes_advance_master_cycles(&snes, 1024);
+    failures += check(ppu_regs[0x28] == 0x00,
+                      "snes_set_hdma_beam_enabled(false) keeps the beam off HDMA");
+    snes.hdmaBeamOff = false;
+
+    /* A masked, pending IRQ must not freeze beam polling (Star Fox boot
+     * waits for a later raster position before unmasking interrupts). */
+    dma_reset(dma);
+    snes.hPos = 100;
+    snes.vPos = 10;
+    snes.inIrq = true;
+    snes.hIrqEnabled = snes.vIrqEnabled = false;
+    snes_advance_master_cycles(&snes, 200);
+    failures += check(snes.hPos == 300 && snes.vPos == 10,
+                      "pending IRQ still allows beam progress");
+    failures += check(snes.inIrq, "beam advance does not acknowledge pending IRQ");
+
+    /* A NEW IRQ still yields at the comparator edge so hosts can service
+     * it promptly, before clocks after that edge have been consumed. */
+    snes.inIrq = false;
+    snes.hIrqEnabled = true;
+    snes.hTimer = 100;
+    snes_advance_master_cycles(&snes, 200);
+    failures += check(snes.inIrq && snes.hPos == 401,
+                      "new IRQ stops at its comparator edge");
+    snes_advance_master_cycles(&snes, 50);
+    failures += check(snes.hPos == 451,
+                      "subsequent clocks advance while IRQ remains pending");
 
     dma_free(dma);
     if (failures) return 1;

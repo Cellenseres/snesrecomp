@@ -13,6 +13,7 @@
 #include "sdd1.h"
 
 extern uint32_t g_interp816_cur_pc;
+#include "sdd1.h"
 
 static uint8_t cart_readLorom(Cart* cart, uint8_t bank, uint16_t adr);
 static void cart_writeLorom(Cart* cart, uint8_t bank, uint16_t adr, uint8_t val);
@@ -53,6 +54,8 @@ void cart_reset(Cart* cart) {
 
 void cart_saveload(Cart *cart, SaveLoadInfo *sli) {
   sli->func(sli, cart->ram, cart->ramSize);
+  if (cart->superfx && snes_saveload_get_version() >= 9)
+    superfx_saveload(cart->superfx, sli);
   /* Cx4 games have no battery RAM, so the block above streams nothing; the
    * coprocessor's own 8 KB of working RAM is the guest-visible state that a
    * mid-game state must carry. */
@@ -183,6 +186,11 @@ case CART_CX4: {
       break;
     }
     case CART_SDD1: {
+      /* The $4800-$4807 chip window is never ROM. main reached this via the
+       * generic LoROM rule below; this branch checked it outright, and the
+       * explicit check is kept because sdd1_lorom_window_offset() runs first. */
+      if (cart_is_sdd1_window(cart, bank, adr))
+        return NULL;
       /* S-DD1 carts are LoROM. The $4800-$4807 window in banks $00-$3F/$80-$BF
        * belongs to the decompression chip, not the ROM — return NULL so callers
        * route it through cart_read/cart_write. */

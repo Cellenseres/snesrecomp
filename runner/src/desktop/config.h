@@ -31,6 +31,16 @@ enum {
   kKeys_ToggleWidescreen,
   kKeys_VolumeUp,
   kKeys_VolumeDown,
+  /* Save-state slot browser (snes_savestate_menu.c). Appended here rather
+   * than inserted above so the kKeys_Load / kKeys_Save 20-slot ranges keep
+   * their numbering — those are index arithmetic, not just enum labels. */
+  kKeys_SaveStateMenu,
+  /* Local rewind filmstrip (snes_rewind.c). Appended for the same reason as
+   * SaveStateMenu: the Load/Save ranges above are index arithmetic. */
+  kKeys_Rewind,
+  /* OpenGL-only framebuffer capture. Kept separate from the diagnostic
+   * SNESRECOMP_SCREENSHOT path, which is driven by environment variables. */
+  kKeys_Screenshot,
   kKeys_Total,
 };
 
@@ -38,6 +48,15 @@ enum {
   kOutputMethod_SDL,
   kOutputMethod_SDLSoftware,
   kOutputMethod_OpenGL,
+};
+
+/* config.ini [Graphics] VSync. Off and On keep the historical 0/1 spellings so
+ * an existing config.ini reads identically; Adaptive is written as the word,
+ * and maps to a late-swap-tearing interval (-1) where the driver has one. */
+enum {
+  kSnesVSync_Off = 0,
+  kSnesVSync_On = 1,
+  kSnesVSync_Adaptive = 2,
 };
 
 typedef struct Config {
@@ -71,6 +90,43 @@ typedef struct Config {
   // --launcher argument or by setting SkipLauncher = 0 in config.ini.
   bool skip_launcher;
 
+  /* Netplay display name, persisted so the lobby does not prompt on every
+   * launch. Framework-owned (config.ini [Netplay] PlayerName) so every SNES
+   * port inherits it — the alternative was a copy of this field in each
+   * game's own config, which is how MetalWarriors carried it. */
+  char netplay_player_name[64];
+
+  /* Rewind's controller gesture, config.ini [Controller] RewindGesture:
+   * pad buttons joined with '+', e.g. "Select+R3" (the default when empty),
+   * or "none". The host parses it; the SNES pad has no stick buttons, so
+   * L3/R3 come from the gamepad itself. */
+  char rewind_gesture[64];
+
+  /* Presentation and emulation options the desktop host offers through the
+   * launcher's Display page, persisted by WriteConfigFile:
+   *   [Graphics] FrameBlend  average each presented frame with the previous
+   *                          one (alternate-frame flicker reads as translucency)
+   *   [Graphics] VSync       driver vsync at present time (default on);
+   *                          tri-state, kSnesVSync_* below. The launcher has
+   *                          offered Off/On/Adaptive for as long as the row
+   *                          has existed; this host used to store a bool, so
+   *                          Adaptive silently came back as On on the next
+   *                          launch. Legacy 0/1/true/false spellings still
+   *                          read exactly as before.
+   *   [Graphics] Renderer    "auto" (SDL's pick), "opengl" (the native GL
+   *                          presenter), "software", or an SDL render driver
+   *                          name such as "vulkan"; empty follows OutputMethod
+   *   [General]  RunAhead    frames of local input-latency hiding (0 = off)
+   * The [Video] / [Emulation] spellings a per-game host used for the same
+   * settings are accepted on read. */
+  bool frame_blend;
+  uint8 vsync;
+  int run_ahead;
+  char renderer[32];
+  /* [Sound] Volume, 0..100 (default 100): the mixer level the VolumeUp /
+   * VolumeDown keys move in 5% steps and the launcher's slider edits. */
+  int volume;
+
   /* Oracle-build only. When false, main.c skips snes_oracle_init_default
    * and calls snes_oracle_set_disabled_by_game so the dispatcher refuses
    * every emu_* command with a structured warning naming the reason. For
@@ -84,6 +140,12 @@ typedef struct Config {
   const char *shader;
 
   bool enable_gamepad[2];
+  /* Which input device drives each player, from config.ini [Controller]
+   * SourceP1/SourceP2 as the launcher writes it: 0 none, 1 keyboard,
+   * 2 gamepad. Player 1 defaults to keyboard so a config without the section
+   * behaves as it always did; player 2 defaults to none, because a second
+   * keyboard player sharing one keyboard has to be asked for. */
+  int player_src[2];
   int gamepad_deadzone;
 
   // Which players have keyboard controls
@@ -114,11 +176,32 @@ enum {
 
 extern Config g_config;
 
+void ConfigUseStateMenuDefaults(void);
 void ParseConfigFile(const char *filename);
 // Re-apply only the [KeyMap] section (launcher hotkey editor wrote it after
 // the initial parse). Keyboard command map is rebuilt; gamepad map and all
 // scalar settings are left alone.
 void ConfigReloadKeyMap(const char *filename);
+/* True when ParseConfigFile read a [KeyMap] line that carried a former
+ * generated default and mapped it to the current one; WriteConfigFile then
+ * rewrites that line. The host writes the file once when this is set. */
+bool ConfigKeyMapMigrated(void);
+/* True when the file carried the former generated GamepadDeadzone (10000 raw
+ * units, 30%) and it was read as the current default instead. The caller
+ * rewrites config.ini once so the file says what the game is using. */
+bool ConfigDeadzoneMigrated(void);
+
+/* True when config.ini actually named [Controller] SourceP<player+1>. A file
+ * written before this key existed has not said anything about the player's
+ * device, and the caller falls back to the older EnableGamepadN spelling
+ * rather than to the seeded default. player is 0 or 1. */
+bool ConfigHasPlayerSource(int player);
+
+/* Analog stick deadzone, in raw axis units of a 32767 full scale. 10% is the
+ * default because it clears a resting stick on the pads players actually own
+ * without eating a third of the throw, which 10000 (30%) did. */
+#define SNES_CONFIG_DEFAULT_DEADZONE 3277
+#define SNES_CONFIG_LEGACY_DEADZONE  10000
 // Persist the launcher-editable settings back into `filename` (or config.ini)
 // with a surgical, comment-preserving in-place update. Called after the GUI
 // launcher returns PLAY.

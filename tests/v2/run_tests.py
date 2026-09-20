@@ -59,12 +59,20 @@ TEST_MODULES = [
     'test_prune_unresolved_indirect_goto',
     'test_atomic_output',
     'test_translation_units',
+    'test_link_closure',
+    'test_variant_mirror_naming',
     'test_variant_demand',
     'test_program_analysis',
     'test_analysis_tool',
     'test_variant_dispatch_lle_fallback',
     'test_program_profile_roots',
     'test_ingest_dkc2_disasm',
+    # The C-side runtime contract (tests/interp816/run.sh). Registered here
+    # because CI runs this driver and ran nothing else; see the module.
+    'test_interp_bridge_contract',
+    'test_host_clock',
+    # Shipped entry points must parse; see the module.
+    'test_cli_imports',
 ]
 
 

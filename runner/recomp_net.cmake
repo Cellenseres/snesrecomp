@@ -24,6 +24,10 @@ if(NOT SNESRECOMP_RECOMP_NET_ROOT)
     get_filename_component(SNESRECOMP_RECOMP_NET_ROOT
         "${CMAKE_CURRENT_LIST_DIR}/../lib/recomp-net" ABSOLUTE)
 endif()
+if(NOT SNESRECOMP_RBENGINE_ROOT)
+    get_filename_component(SNESRECOMP_RBENGINE_ROOT
+        "${CMAKE_CURRENT_LIST_DIR}/../lib/retcomm-rbengine" ABSOLUTE)
+endif()
 
 option(SNESRECOMP_ENABLE_NET
     "Build and expose recomp-net (delay-sync netcode) for game targets" OFF)
@@ -31,6 +35,11 @@ option(SNESRECOMP_NET_ICE
     "Enable ICE/libjuice transport in recomp-net (needs network at configure if libjuice is not vendored)" OFF)
 option(SNESRECOMP_NET_FORCE_TURN
     "Testing: require Coturn TURN for ICE and only use typ relay candidates (both peers must match)" OFF)
+# Kept so an existing -DSNESRECOMP_NET_ROLLBACK=ON configure does not warn.
+# No longer consulted: retcomm-rbengine is linked for every netplay port --
+# the rollback session is part of netplay, not a second option beside it.
+option(SNESRECOMP_NET_ROLLBACK
+    "(ignored) rollback is built for every netplay target" ON)
 
 # Internal: add_subdirectory once; disable examples/tests when embedded.
 function(_snesrecomp_add_recomp_net)
@@ -69,6 +78,62 @@ function(_snesrecomp_add_recomp_net)
     endif()
 endfunction()
 
+# Internal: add retcomm-rbengine once. It links recomp_net itself, and finds
+# it through RECOMP_NET_ROOT rather than re-adding the subdirectory.
+function(_snesrecomp_add_rbengine)
+    if(TARGET retcomm_rbengine)
+        return()
+    endif()
+
+    if(NOT EXISTS "${SNESRECOMP_RBENGINE_ROOT}/CMakeLists.txt")
+        message(FATAL_ERROR
+            "retcomm-rbengine submodule missing at ${SNESRECOMP_RBENGINE_ROOT}.\n"
+            "Run: git submodule update --init --recursive lib/retcomm-rbengine")
+    endif()
+
+    _snesrecomp_add_recomp_net()
+    # rbengine is C++; a C-only project() needs the language switched on.
+    enable_language(CXX)
+    set(RECOMP_NET_ROOT "${SNESRECOMP_RECOMP_NET_ROOT}" CACHE PATH "" FORCE)
+    set(RBE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    add_subdirectory(
+        "${SNESRECOMP_RBENGINE_ROOT}"
+        "${CMAKE_BINARY_DIR}/retcomm-rbengine-build"
+        EXCLUDE_FROM_ALL)
+
+    if(NOT TARGET retcomm_rbengine)
+        message(FATAL_ERROR
+            "retcomm-rbengine CMake did not create target retcomm_rbengine")
+    endif()
+endfunction()
+
+# Link the rollback host into a game executable. Additive over
+# snesrecomp_enable_recomp_net: delay-sync stays available and stays the
+# default at runtime (SNES_NET_MODE=rollback opts in).
+function(snesrecomp_enable_rollback target)
+    if(NOT TARGET ${target})
+        message(FATAL_ERROR
+            "snesrecomp_enable_rollback: '${target}' is not a CMake target.")
+    endif()
+    # Idempotent: the desktop host helper enables rollback for every port,
+    # and a port that predates that still calls this itself.
+    get_target_property(_rb_done ${target} SNESRECOMP_ROLLBACK_ENABLED)
+    if(_rb_done)
+        return()
+    endif()
+    set_target_properties(${target} PROPERTIES SNESRECOMP_ROLLBACK_ENABLED TRUE)
+    _snesrecomp_add_rbengine()
+    target_link_libraries(${target} PRIVATE retcomm_rbengine)
+    target_compile_definitions(${target} PRIVATE SNESRECOMP_NET_ROLLBACK=1)
+    if(NOT SNESRECOMP_ENABLE_NET)
+        target_sources(${target} PRIVATE
+            "${SNESRECOMP_RUNNER_ROOT}/src/netplay/snes_netplay_rb.c"
+            "${SNESRECOMP_RUNNER_ROOT}/src/netplay/snes_rb_probe.c"
+            "${SNESRECOMP_RUNNER_ROOT}/src/netplay/snes_state_digest.c")
+    endif()
+    message(STATUS "SNESRECOMP_NET_ROLLBACK: ${target} links retcomm_rbengine")
+endfunction()
+
 # Link recomp-net into a game executable (and ensure it is built).
 function(snesrecomp_enable_recomp_net target)
     if(NOT TARGET ${target})
@@ -96,6 +161,7 @@ function(snesrecomp_enable_recomp_net target)
             "${SNESRECOMP_RUNNER_ROOT}/src/netplay/snes_netplay.c"
             "${SNESRECOMP_RUNNER_ROOT}/src/netplay/snes_host_session.c"
             "${SNESRECOMP_RUNNER_ROOT}/src/netplay/snes_host_lobby.c"
+        "${SNESRECOMP_RUNNER_ROOT}/src/netplay/snes_netplay_identity.c"
             "${SNESRECOMP_RUNNER_ROOT}/src/netplay/snes_host_app.c"
             "${SNESRECOMP_RUNNER_ROOT}/src/lobby/snes_lobby_client.c"
             "${SNESRECOMP_RUNNER_ROOT}/src/lobby/ws/rnet_ws.c"
@@ -105,6 +171,11 @@ function(snesrecomp_enable_recomp_net target)
             "${SNESRECOMP_RUNNER_ROOT}/src/lobby"
             "${SNESRECOMP_RUNNER_ROOT}/src/lobby/ws")
     endif()
+    # Every netplay port carries the rollback session (retcomm-rbengine +
+    # snes_netplay_rb): delay-sync stays the runtime default, rollback is
+    # there to opt into (SNES_NET_MODE=rollback). It used to be a scaffold
+    # checkbox most projects answered no to.
+    snesrecomp_enable_rollback(${target})
     target_compile_definitions(${target} PRIVATE SNES_HAS_LOBBY_CLIENT=1)
     # Host lobby adapter needs recomp-ui types when the launcher is linked.
     if(DEFINED RECOMP_UI_ROOT AND EXISTS "${RECOMP_UI_ROOT}/src/recomp_launcher.h")
@@ -121,10 +192,20 @@ endfunction()
 # pick it up without a separate helper call.
 if(SNESRECOMP_ENABLE_NET)
     _snesrecomp_add_recomp_net()
+    _snesrecomp_add_rbengine()
+    list(APPEND SNESRECOMP_RUNNER_SOURCES
+        "${SNESRECOMP_RUNNER_ROOT}/src/netplay/snes_netplay_rb.c"
+        "${SNESRECOMP_RUNNER_ROOT}/src/netplay/snes_rb_probe.c"
+        "${SNESRECOMP_RUNNER_ROOT}/src/netplay/snes_state_digest.c")
+    list(APPEND SNESRECOMP_RUNNER_LIBRARIES retcomm_rbengine)
+    list(APPEND SNESRECOMP_RUNNER_INCLUDE_DIRS
+        "${SNESRECOMP_RBENGINE_ROOT}/include")
+    add_compile_definitions(SNESRECOMP_NET_ROLLBACK=1)
     list(APPEND SNESRECOMP_RUNNER_SOURCES
         "${SNESRECOMP_RUNNER_ROOT}/src/netplay/snes_netplay.c"
         "${SNESRECOMP_RUNNER_ROOT}/src/netplay/snes_host_session.c"
         "${SNESRECOMP_RUNNER_ROOT}/src/netplay/snes_host_lobby.c"
+        "${SNESRECOMP_RUNNER_ROOT}/src/netplay/snes_netplay_identity.c"
         "${SNESRECOMP_RUNNER_ROOT}/src/netplay/snes_host_app.c"
         "${SNESRECOMP_RUNNER_ROOT}/src/lobby/snes_lobby_client.c"
         "${SNESRECOMP_RUNNER_ROOT}/src/lobby/ws/rnet_ws.c"

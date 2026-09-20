@@ -25,6 +25,18 @@ for path in (ROOT, ROOT / "recompiler", ROOT / "tools"):
 
 from snes65816 import detect_rom_mapping, load_rom  # noqa: E402
 from tools import v2_emit  # noqa: E402
+# generate / verify-rom are the documented headless contract
+# (docs/LOCAL_CODEGEN_SDK.md): one JSON object per line on stdout, exit 3 on a
+# ROM digest mismatch. tools/sdk_generate.py is that contract's only
+# implementation -- this front end must not grow a second one, because the copy
+# that lived here shipped without --json-progress and every launcher-driven
+# rebuild died with "unrecognized arguments: --json-progress" (exit 2).
+from tools.sdk_generate import (  # noqa: E402
+    EXIT_ERROR,
+    add_generate_parser,
+    add_verify_parser,
+)
+from tools.sdk_progress import ProgressReporter  # noqa: E402
 
 
 def safe_name(value: str) -> str:
@@ -54,18 +66,80 @@ def run_tool(tool, arguments: list[str]) -> int:
         sys.argv = original
 
 
-def build_project(args: argparse.Namespace) -> int:
-    rom_path = pathlib.Path(args.rom).expanduser().resolve()
-    output = pathlib.Path(args.output).expanduser().resolve()
-    if not rom_path.is_file():
-        raise ValueError(f"ROM not found: {rom_path}")
-    if rom_path.suffix.lower() not in (".sfc", ".smc"):
+ROM_SUFFIXES = (".sfc", ".smc")
+
+
+def read_rom(path: pathlib.Path) -> bytes:
+    """Validate ROM shape and return its bytes, or raise ValueError."""
+    if not path.is_file():
+        raise ValueError(f"ROM not found: {path}")
+    if path.suffix.lower() not in ROM_SUFFIXES:
         raise ValueError("ROM must be an .sfc or .smc file")
-    raw = rom_path.read_bytes()
+    raw = path.read_bytes()
     if len(raw) < 32 * 1024 or len(raw) > 16 * 1024 * 1024:
         raise ValueError("ROM size is outside the supported 32 KiB to 16 MiB range")
     if len(raw) % 1024 not in (0, 512):
         raise ValueError("ROM size is not a standard SNES image size")
+    return raw
+
+
+def resolve_analyzer(backend: str) -> str:
+    """Point the emitter at the native analyzer when one is available.
+
+    `auto` uses the native analyzer if it is built and the Python analyzer
+    otherwise; `native` insists and fails loudly when it is missing, because
+    silently dropping to a different analyzer would change what gets emitted.
+    """
+    analyzer = ROOT / "recompiler-rs" / "target" / "release" / (
+        "snesrecomp-analyze.exe" if os.name == "nt" else "snesrecomp-analyze")
+    if analyzer.is_file():
+        os.environ["SNESRECOMP_NATIVE_ANALYZER"] = str(analyzer)
+        return backend if backend != "auto" else "native"
+    if backend == "native":
+        raise RuntimeError(
+            "--analysis-backend native was requested but the analyzer is not "
+            f"built at {analyzer} (build it with "
+            "tools/build_native_analyzer.py)")
+    return "python" if backend == "auto" else backend
+
+
+def run_emit(rom: pathlib.Path, cfg_dir: pathlib.Path, out_dir: pathlib.Path,
+             *, backend: str = "auto", cfg_roots: bool = False,
+             no_host_root_scan: bool = False,
+             source_roots: list[str] | None = None,
+             profile_manifests: list[str] | None = None) -> None:
+    """Generate C from a ROM plus its bank configs. Raises on failure."""
+    resolved = resolve_analyzer(backend)
+    arguments = [
+        "--rom", str(rom),
+        "--cfg-dir", str(cfg_dir),
+        "--out-dir", str(out_dir),
+        "--analysis-backend", resolved,
+    ]
+    if cfg_roots:
+        arguments.append("--cfg-roots")
+    if no_host_root_scan:
+        arguments.append("--no-host-root-scan")
+    for root in source_roots or []:
+        arguments.extend(["--source-root", root])
+    # Runtime profiles select OPTIONAL ahead-of-time work: a manifest of
+    # observed tier-2 coverage seeds extra AOT roots, so it changes which
+    # functions are compiled versus interpreted. v2_emit has always taken
+    # these; this front end did not forward them, which meant a project that
+    # used one could not be regenerated through the modern entry point at
+    # all -- SuperMetroidRecomp's tools/regen.sh had to call v2_emit
+    # directly, and a template sync that pointed it here silently dropped
+    # its profile and changed the emitted C.
+    for manifest in profile_manifests or []:
+        arguments.extend(["--profile-manifest", manifest])
+    if run_tool(v2_emit, arguments):
+        raise RuntimeError("source generation failed")
+
+
+def build_project(args: argparse.Namespace) -> int:
+    rom_path = pathlib.Path(args.rom).expanduser().resolve()
+    output = pathlib.Path(args.output).expanduser().resolve()
+    raw = read_rom(rom_path)
     if output.exists():
         if not output.is_dir():
             raise ValueError(f"output path is not a directory: {output}")
@@ -88,21 +162,9 @@ def build_project(args: argparse.Namespace) -> int:
 
     print("[1/4] Created the starter bank configuration.")
 
-    analyzer = ROOT / "recompiler-rs" / "target" / "release" / (
-        "snesrecomp-analyze.exe" if os.name == "nt" else "snesrecomp-analyze")
-    if not analyzer.is_file():
-        raise RuntimeError("the packaged native analyzer is missing")
-    os.environ["SNESRECOMP_NATIVE_ANALYZER"] = str(analyzer)
-
     print("[2/4] Analyzing the ROM and generating C source...")
-    if run_tool(v2_emit, [
-        "--rom", str(rom_path),
-        "--cfg-dir", str(config_dir),
-        "--out-dir", str(generated_dir),
-        "--analysis-backend", "native",
-        "--no-host-root-scan",
-    ]):
-        raise RuntimeError("source generation failed")
+    run_emit(rom_path, config_dir, generated_dir,
+             backend="native", no_host_root_scan=True)
 
     print("[3/4] Copying the integration framework...")
     runner_source = ROOT / "framework" / "runner"
@@ -115,9 +177,18 @@ def build_project(args: argparse.Namespace) -> int:
     framework_root = ROOT / "framework"
     if not (framework_root / "LICENSE").is_file():
         framework_root = ROOT
-    shutil.copy2(framework_root / "LICENSE", framework_output)
-    shutil.copy2(
-        framework_root / "THIRD_PARTY_ATTRIBUTION.md", framework_output)
+    # Both notices, each with the same packaged-vs-source fallback. This was
+    # two straight-line copy2 calls with an orphaned `if not source.is_file()`
+    # fragment dangling off the second one -- the remains of this loop, left
+    # by a conflict resolution. It is a SyntaxError, so the whole module fails
+    # to import and `snesrecomp_cli.py generate` cannot run at all: every
+    # port's tools/regen.sh dies with IndentationError before it reaches the
+    # ROM. Nothing caught it because no test imports this file.
+    for notice in ("LICENSE", "THIRD_PARTY_ATTRIBUTION.md"):
+        source = framework_root / notice
+        if not source.is_file():
+            source = ROOT / "framework" / notice
+        shutil.copy2(source, framework_output)
 
     cmake = f"""cmake_minimum_required(VERSION 3.20)
 project({project_name} C)
@@ -141,6 +212,9 @@ $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 cmake -S $Root -B (Join-Path $Root 'build') -G Ninja -DCMAKE_BUILD_TYPE=Release
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 cmake --build (Join-Path $Root 'build') --config Release --parallel
+if ($LASTEXITCODE -eq 0) {
+    Write-Host 'No playable executable was produced; this build creates the generated-code static library only.'
+}
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 Write-Host ''
 Write-Host 'Built the generated-code static library.'
@@ -154,6 +228,7 @@ cmake -S "$ROOT" -B "$ROOT/build" -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build "$ROOT/build" --config Release --parallel
 printf '\n%s\n' 'Built the generated-code static library.'
 printf '%s\n' 'No playable executable was produced; see README.md under "Continue the port".'
+echo "No playable executable was produced; this build creates the generated-code static library only."
 """)
     write_text(output / ".gitignore", "build/\ngenerated/\n")
     write_text(output / "project.txt", (
@@ -181,6 +256,8 @@ On macOS or Linux, run `sh build.sh`.
 playable executable. The library contains the automatically discovered
 recompiled code. The original ROM is not copied into this project.
 
+Expected build result: generated-code static library only. No playable executable is produced by this starter project.
+
 ## Continue the port
 
 An arbitrary SNES game still needs game-specific function boundaries,
@@ -193,6 +270,7 @@ unless you have permission.
 """)
     print("[4/4] Wrote project files.")
     print(f"\nReady: {output}")
+    print("Expected build result: generated-code static library only")
     print(f"Build with: {output / ('build.ps1' if os.name == 'nt' else 'build.sh')}")
     print("Expected build result: generated-code static library only.")
     print("A playable executable requires game-specific host integration; "
@@ -211,16 +289,40 @@ def parser() -> argparse.ArgumentParser:
     build.add_argument("--output", "-o", required=True, help="new output directory")
     build.add_argument("--name", help="project title (defaults to the ROM filename)")
     build.set_defaults(handler=build_project)
+
+    add_generate_parser(commands)
+    add_verify_parser(commands)
+
     return result
 
 
 def main() -> int:
     arguments = parser().parse_args()
+    handler = arguments.handler
+
+    # The SDK commands own their own ProgressReporter and exit codes (0/1/2/3,
+    # docs/LOCAL_CODEGEN_SDK.md); build is the interactive scaffolder.
+    if arguments.command in ("generate", "verify-rom"):
+        progress = ProgressReporter(
+            json_progress=bool(getattr(arguments, "json_progress", False)),
+        )
+        if arguments.command == "generate":
+            # Packaged builds ship the native analyzer beside this file, so the
+            # backend is resolved here rather than left to the emitter's own
+            # repo-relative lookup.
+            try:
+                arguments.analysis_backend = resolve_analyzer(
+                    arguments.analysis_backend)
+            except RuntimeError as exc:
+                progress.error(str(exc), code=EXIT_ERROR)
+                return EXIT_ERROR
+        return handler(arguments, progress)
+
     try:
-        return arguments.handler(arguments)
+        return handler(arguments)
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"snesrecomp: error: {exc}", file=sys.stderr)
-        return 1
+        return EXIT_ERROR
 
 
 if __name__ == "__main__":

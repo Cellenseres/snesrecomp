@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import pathlib
 import subprocess
 import tempfile
@@ -67,6 +68,42 @@ def main() -> int:
                 "playable executable" not in readme):
             raise RuntimeError(
                 "generated README omitted static-library artifact guidance")
+
+        # The launcher drives `generate --json-progress`, not `build`. Prove the
+        # packaged binary answers that contract: a package that ships the CLI
+        # without the SDK modules it dispatches through, or without
+        # v2_sync_funcs_h, fails here instead of in a player's rebuild.
+        generate = subprocess.run([
+            str(executable), "generate",
+            "--rom", str(rom_path),
+            "--cfg-dir", str(output / "config"),
+            "--out-dir", str(output / "generated"),
+            "--funcs-h", str(output / "config" / "funcs.h"),
+            "--no-host-root-scan",
+            "--json-progress",
+        ], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        print(generate.stderr, end="")
+        if generate.returncode != 0:
+            raise RuntimeError(
+                f"packaged generate failed: rc={generate.returncode}\n"
+                f"stdout:\n{generate.stdout}\nstderr:\n{generate.stderr}")
+        events = []
+        for line in generate.stdout.splitlines():
+            if not line.strip():
+                continue
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    "packaged generate stdout is not clean JSONL: "
+                    f"{line!r} ({exc})") from exc
+        phases = [e.get("phase") for e in events if e.get("event") == "phase"]
+        for phase in ("verify", "emit", "sync_funcs_h", "done"):
+            if phase not in phases:
+                raise RuntimeError(
+                    f"packaged generate missing phase {phase!r}: {phases}")
+        if not any(e.get("event") == "result" and e.get("ok") for e in events):
+            raise RuntimeError(f"packaged generate missing result event: {events}")
     print("packaged CLI smoke test passed")
     return 0
 

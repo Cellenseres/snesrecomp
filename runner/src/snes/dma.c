@@ -237,8 +237,6 @@ void dma_write(Dma* dma, uint16_t adr, uint8_t val) {
   }
 }
 
-extern bool g_fail;
-
 void dma_doDma(Dma* dma) {
   if(dma->dmaTimer > 0) {
     dma->dmaTimer -= 2;
@@ -255,18 +253,6 @@ void dma_doDma(Dma* dma) {
     // no active channels
     dma->dmaBusy = false;
     return;
-  }
-
-  /* This heuristic was written for LoROM, where a high bank with A < $8000
-   * is usually not ROM. HiROM maps banks $C0-$FF across the full address
-   * range, so sources such as DKC2's $F8:0FA6 are ordinary cartridge data. */
-  if (!dma->channel[i].fromB && dma->snes && dma->snes->cart &&
-      (dma->snes->cart->type == CART_LOROM ||
-       dma->snes->cart->type == CART_DSP1) &&
-      (dma->channel[i].aBank & 0x80) &&
-      !(dma->channel[i].aAdr & 0x8000) && !g_fail) {
-    printf("Warning! DMA from addr 0x%x\n", dma->channel[i].aBank << 16 | dma->channel[i].aAdr);
-    g_fail = true;
   }
 
   // do channel i
@@ -396,6 +382,10 @@ void dma_doHdma(Dma* dma) {
   for (int i = 0; i < 8; i++) {
     DmaChannel* ch = &dma->channel[i];
     if (!ch->hdmaActive) continue;
+    /* A channel switched on part-way through a frame spends its first HDMA
+     * slot loading the table header, and only transfers from the slot after.
+     * Measured against Mesen on Gundam Wing's pre-fight screen, which enables
+     * $420C at line 21 and whose first HDMA write of $212C lands on line 23. */
     if (dma->hdmaPendingInit & (1u << i)) {
       dma->hdmaPendingInit &= (uint8_t)~(1u << i);
       ch->tableAdr = ch->aAdr;
@@ -423,6 +413,52 @@ void dma_doHdma(Dma* dma) {
   }
 }
 
+/* ── HDMA ────────────────────────────────────────────────────────────────
+ *
+ * dma_startDma(..., hdma=true) has always set channel[i].hdmaActive from
+ * $420C, and DmaChannel has carried tableAdr / repCount / doTransfer /
+ * terminated / indBank since forever — but nothing ever consumed any of it.
+ * There was no HDMA transfer engine in the tree at all, so a game's per-
+ * scanline register stream simply never happened.
+ *
+ * Measured on Gundam Wing Endless Duel: through the intro cutscene, channel 1
+ * is HDMA-active onto $212C (TM, main-screen layer enable), rewriting which
+ * BG layers are on per scanline. That is the letterbox — BG off on the top
+ * and bottom bands, on in the middle, with OBJ left enabled so the characters
+ * still draw over the bars. Without the engine every line got one TM value
+ * and the whole effect was lost.
+ *
+ * Standard algorithm: dma_initHdma() reloads each enabled channel's table
+ * pointer at the top of the field; dma_doHdma() runs once per scanline.
+ * `size` doubles as the indirect address, as the struct comment notes. */
+
+/* Estimated master clocks one frame of HDMA steals from the CPU.
+ *
+ * Hardware pauses the CPU during every active channel's per-line transfer:
+ * ~18 clocks of per-line overhead when any channel is live, plus per channel
+ * 8 clocks of address work and 8 per byte moved (1/2/2/4/4/4/2/4 bytes for
+ * modes 0-7), plus 16 more when the channel reloads an indirect address.
+ * With the six-channel gradient/scroll setup this title runs on its menu and
+ * VS screens that is ~170 clocks x 224 lines = ~10.7%% of the frame -- more
+ * than DRAM refresh -- and it was never charged: measured, our menu lag
+ * blocks ran one frame short of Mesen's (7 vs 8) while the HDMA-off loading
+ * screens matched exactly. The phase error that mispairs the sprite-table
+ * and tile-art updates at scene entry rides on exactly that deficit.
+ *
+ * An estimate from the live channel state at frame start; terminated-early
+ * tables overcharge slightly, which is the conservative side. */
+
+
+
+
+uint8_t dma_hdma_pending_init_get(const Dma* dma) {
+  return dma ? dma->hdmaPendingInit : 0u;
+}
+
+void dma_hdma_pending_init_set(Dma* dma, uint8_t mask) {
+  if(dma) dma->hdmaPendingInit = mask;
+}
+
 bool dma_cycle(Dma* dma) {
   if(dma->dmaBusy) {
     dma_doDma(dma);
@@ -431,9 +467,60 @@ bool dma_cycle(Dma* dma) {
   return false;
 }
 
+/* Does this A-bus DMA source look like a wild pointer rather than data?
+ *
+ * A LoROM cartridge maps ROM at $8000-$FFFF of each bank, so a source in a
+ * $80+ bank BELOW $8000 is the system-area mirror -- WRAM and registers --
+ * which a graphics upload has no business reading. HiROM maps $C0-$FF across
+ * the whole address range, so sources such as DKC2's $F8:0FA6 are ordinary
+ * cartridge data and the question does not apply.
+ *
+ * Pure, and separate from the reporting, so the policy can be tested without
+ * a machine: see tests/dma/hdma_timing_test.c.
+ */
+bool dma_source_is_offmap(int cart_type, bool from_b, uint8_t a_bank,
+                          uint16_t a_adr) {
+  if (from_b) return false;                 /* PPU -> CPU; no A-bus source */
+  if (cart_type != CART_LOROM && cart_type != CART_DSP1) return false;
+  return (a_bank & 0x80) != 0 && (a_adr & 0x8000) == 0;
+}
+
 void dma_startDma(Dma* dma, uint8_t val, bool hdma) {
+  /* Checked HERE, when the channel is armed, and not once per transferred
+   * byte as it used to be.
+   *
+   * A DMA's source address wraps within its bank: a transfer that starts in
+   * ROM and runs off the end of the bank spends its tail at $xx:0000, which
+   * is the mirror region and trips the test above. Super Metroid does exactly
+   * that every time it uploads 16 KB from $9A:D200 -- the record is ROM data
+   * at $82:8319, and hardware wraps the same way -- so the per-byte check
+   * reported an authentic transfer as a fault, on stdout, where it landed in
+   * a different place in the log from the host's own breadcrumbs. Judging the
+   * source once, as the game programmed it, tells a wild pointer apart from a
+   * legal wrap.
+   *
+   * It also no longer sets g_fail. That latch gates the off-rails ROM-pointer
+   * report, so one false positive here used to silence a real diagnostic for
+   * the rest of the session. */
+  if (!hdma && dma->snes && dma->snes->cart) {
+    static bool s_reported;
+    for (int i = 0; i < 8 && !s_reported; i++) {
+      if (!(val & (1 << i))) continue;
+      if (!dma_source_is_offmap(dma->snes->cart->type, dma->channel[i].fromB,
+                                dma->channel[i].aBank, dma->channel[i].aAdr))
+        continue;
+      fprintf(stderr,
+              "[dma] channel %d armed from $%02X:%04X, which is not ROM on "
+              "this cartridge (%u bytes to $21%02X)\n",
+              i, dma->channel[i].aBank, dma->channel[i].aAdr,
+              (unsigned)dma->channel[i].size, dma->channel[i].bAdr);
+      s_reported = true;
+    }
+  }
   for(int i = 0; i < 8; i++) {
     if(hdma) {
+      /* Only a channel going from off to on owes an initialization; rewriting
+       * $420C with a channel already running must not restart its table. */
       bool now_on = (val & (1 << i)) != 0;
       if(now_on && !dma->channel[i].hdmaActive)
         dma->hdmaPendingInit |= (uint8_t)(1u << i);

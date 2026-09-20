@@ -13,6 +13,25 @@ static int check(int condition, const char *message) {
   return 0;
 }
 
+typedef struct ObservationLog {
+  unsigned calls;
+  uint32_t pc[8];
+  uint8_t value[8];
+  uint64_t clock[8];
+  int valid_views;
+} ObservationLog;
+static void observe(void *context, const Sa1Observation *view) {
+  ObservationLog *log = context;
+  unsigned i = log->calls++;
+  if (i < 8) {
+    log->pc[i] = view->pc;
+    log->value[i] = view->iram[0];
+    log->clock[i] = view->master_clock;
+  }
+  log->valid_views = view->iram_size == 2048 && view->bwram_size == 32768 &&
+                     view->iram && view->bwram;
+}
+
 int main(void) {
   int fails = 0;
   const size_t rom_size = 4u * 1024u * 1024u;
@@ -41,16 +60,44 @@ int main(void) {
   Sa1 *sa1 = sa1_create(rom, (uint32_t)rom_size, bwram, 32u * 1024u);
   fails += check(sa1 != NULL, "sa1_create");
   if (!sa1) return 2;
+  ObservationLog log = {0};
+  uint32_t watched[] = {0x800c, 0x800f, 0x8000 + sizeof(program)};
+  fails += check(sa1_set_observer(sa1, watched, 3, observe, &log), "install observer");
+  uint32_t invalid = 0x1000000;
+  fails += check(!sa1_set_observer(sa1, &invalid, 1, observe, &log), "reject invalid watch address");
+  fails += check(!sa1_set_observer(sa1, NULL, 1, observe, &log), "reject missing watch addresses");
 
   /* The chip powers up held in reset. */
   sa1_sync(sa1, 1000);
   fails += check(sa1_instructions_executed(sa1) == 0,
                  "SA-1 stays idle while reset is asserted");
+  fails += check(log.calls == 0, "no observer calls while held in reset");
 
   sa1_cpu_write(sa1, 0, 0x2203, 0x00);
   sa1_cpu_write(sa1, 0, 0x2204, 0x80);
   sa1_cpu_write(sa1, 0, 0x2200, 0x00);
   sa1_sync(sa1, 10000);
+  fails += check(log.calls == 2 && log.pc[0] == 0x800c && log.pc[1] == 0x800f,
+                 "only actual watched instructions are observed, not WAI idle cycles");
+  fails += check(log.valid_views && log.value[0] == 0 && log.value[1] == 0x42 &&
+                 log.clock[1] > log.clock[0], "observation precedes execution with valid read-only views");
+
+  uint8_t *control_bwram = calloc(1, 32768);
+  Sa1 *control = sa1_create(rom, (uint32_t)rom_size, control_bwram, 32768);
+  if (!control_bwram || !control) return 2;
+  sa1_sync(control, 1000);
+  sa1_cpu_write(control, 0, 0x2203, 0);
+  sa1_cpu_write(control, 0, 0x2204, 0x80);
+  sa1_cpu_write(control, 0, 0x2200, 0);
+  sa1_sync(control, 10000);
+  fails += check(sa1_master_clock(control) == sa1_master_clock(sa1) &&
+                 sa1_instructions_executed(control) == sa1_instructions_executed(sa1) &&
+                 memcmp(control_bwram, bwram, 32768) == 0 &&
+                 memcmp(sa1_cpu_memory_ptr(control, 0, 0x3000),
+                        sa1_cpu_memory_ptr(sa1, 0, 0x3000), 2048) == 0,
+                 "observer preserves all shared memory and execution clocks");
+  sa1_destroy(control);
+  free(control_bwram);
 
   fails += check(sa1_cpu_read(sa1, 0, 0x3000, 0xff) == 0x42,
                  "SA-1 CPU writes shared I-RAM");
@@ -78,6 +125,20 @@ int main(void) {
                  "SA-1 synchronizes to the requested master clock");
   fails += check(sa1_instructions_executed(sa1) > 10,
                  "SA-1 interpreter executed the reset program");
+
+  sa1_reset(sa1);
+  sa1_cpu_write(sa1, 0, 0x2203, 0);
+  sa1_cpu_write(sa1, 0, 0x2204, 0x80);
+  sa1_cpu_write(sa1, 0, 0x2200, 0);
+  sa1_sync(sa1, 10000);
+  fails += check(log.calls == 4, "reset retains host observer configuration");
+  fails += check(sa1_set_observer(sa1, NULL, 0, NULL, NULL), "disable observer");
+  sa1_reset(sa1);
+  sa1_cpu_write(sa1, 0, 0x2203, 0);
+  sa1_cpu_write(sa1, 0, 0x2204, 0x80);
+  sa1_cpu_write(sa1, 0, 0x2200, 0);
+  sa1_sync(sa1, 10000);
+  fails += check(log.calls == 4, "disabled observer receives no calls");
 
   sa1_destroy(sa1);
   free(bwram);

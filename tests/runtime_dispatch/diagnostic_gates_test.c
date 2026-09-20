@@ -59,11 +59,63 @@ void cart_set_master_clock_source(Cart *cart, const uint64_t *master_clock) {
 }
 void ppu_reset(Ppu *ppu) { (void)ppu; }
 void dma_reset(Dma *dma) { (void)dma; }
+void cpu_state_init(CpuState *cpu, uint8_t *ram) {
+  (void)cpu;
+  (void)ram;
+}
+void rtl_reset_host_pacing(void) {}
 
 static int check(int condition, const char *message) {
   if (!condition)
     fprintf(stderr, "FAIL: %s\n", message);
   return condition ? 0 : 1;
+}
+
+static int hle_entry_s_frames_do_not_resolve_returns(void) {
+  const uint16_t entry_s = 0x01d0;
+  int failures = 0;
+
+  g_recomp_stack_top = 0;
+  g_cpu.S = entry_s;
+  g_cpu.host_return_valid = 0;
+
+  /* Prime slot zero with a valid generated-frame entry, then reuse the same
+   * slot for an HLE forwarding frame. That frame has no generated prologue. */
+  RecompStackPush("previous_generated_frame");
+  RecompStackPop();
+  RecompStackPush("hle_forwarding_stub");
+  cpu_take_tailcall_return_context(NULL, NULL);
+  RecompStackPush("generated_child");
+
+  failures += check(cpu_resolve_ancestor_skip(entry_s) == -1,
+                    "HLE entry-S is excluded from ancestor return resolution");
+  failures += check(cpu_resolve_post_return_skip(entry_s) == -1,
+                    "HLE entry-S is excluded from post-return resolution");
+
+  RecompStackPop();
+  RecompStackPop();
+  return failures;
+}
+
+static int generated_entry_s_frames_still_resolve_returns(void) {
+  const uint16_t parent_entry_s = 0x01d0;
+  int failures = 0;
+
+  g_recomp_stack_top = 0;
+  g_cpu.host_return_valid = 0;
+  g_cpu.S = parent_entry_s;
+  RecompStackPush("generated_parent");
+  g_cpu.S = 0x01ce;
+  RecompStackPush("generated_child");
+
+  failures += check(cpu_resolve_ancestor_skip(parent_entry_s) == 1,
+                    "generated entry-S remains eligible for ancestor returns");
+  failures += check(cpu_resolve_post_return_skip(parent_entry_s) == 1,
+                    "generated entry-S remains eligible for post-return resolution");
+
+  RecompStackPop();
+  RecompStackPop();
+  return failures;
 }
 
 static int json_matches_stack_balance_mode(void) {
@@ -104,6 +156,8 @@ int main(void) {
   RecompStackPop();
   failures += check(g_recomp_stack_top == 0,
                     "functional recomp stack still pushes and pops");
+  failures += hle_entry_s_frames_do_not_resolve_returns();
+  failures += generated_entry_s_frames_still_resolve_returns();
   failures += check(json_matches_stack_balance_mode(),
                     "stack-balance dump matches diagnostic mode");
 

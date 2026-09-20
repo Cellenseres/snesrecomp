@@ -30,6 +30,7 @@
 #define SNESRECOMP_SDL_EVENT_BUTTON(event) ((event).gbutton.button)
 #define SNESRECOMP_SDL_EVENT_KEY(event) ((event).key.key)
 #define SNESRECOMP_SDL_EVENT_MOD(event) ((event).key.mod)
+#define SNESRECOMP_SDL_EVENT_REPEAT(event) ((event).key.repeat)
 #else
 #define SNESRECOMP_SDL_EVENT_DEVICE(event) ((event).cdevice.which)
 #define SNESRECOMP_SDL_EVENT_AXIS_DEVICE(event) ((event).caxis.which)
@@ -39,6 +40,7 @@
 #define SNESRECOMP_SDL_EVENT_BUTTON(event) ((event).cbutton.button)
 #define SNESRECOMP_SDL_EVENT_KEY(event) ((event).key.keysym.sym)
 #define SNESRECOMP_SDL_EVENT_MOD(event) ((event).key.keysym.mod)
+#define SNESRECOMP_SDL_EVENT_REPEAT(event) ((event).key.repeat)
 #endif
 
 static inline bool snesrecomp_sdl_init(Uint32 flags) {
@@ -100,18 +102,42 @@ static inline bool snesrecomp_sdl_lock_mutex(SDL_mutex *mutex) {
 #endif
 }
 
+/* vsync is a swap INTERVAL, not a flag: 0 immediate, 1 wait for the panel,
+ * -1 late-swap-tearing (the launcher's "Adaptive"). SDL2's renderer has no
+ * adaptive mode, and a driver may refuse -1 even on SDL3, so both fall back
+ * to an ordinary wait rather than silently dropping to immediate. */
 static inline SDL_Renderer *snesrecomp_sdl_create_renderer(
-    SDL_Window *window, bool software, bool vsync) {
+    SDL_Window *window, bool software, int vsync) {
 #if SNESRECOMP_SDL3
   SDL_Renderer *renderer =
       SDL_CreateRenderer(window, software ? "software" : NULL);
-  if (renderer && !software) SDL_SetRenderVSync(renderer, vsync ? 1 : 0);
+  if (renderer && !software) {
+    if (!SDL_SetRenderVSync(renderer, vsync) && vsync < 0)
+      SDL_SetRenderVSync(renderer, 1);
+  }
   return renderer;
 #else
   return SDL_CreateRenderer(
       window, -1, software ? SDL_RENDERER_SOFTWARE
                            : SDL_RENDERER_ACCELERATED |
-                                 (vsync ? SDL_RENDERER_PRESENTVSYNC : 0));
+                                 (vsync != 0 ? SDL_RENDERER_PRESENTVSYNC : 0));
+#endif
+}
+
+/* Render drivers this SDL build actually has, so a host can offer the ones
+ * that exist rather than a hardcoded platform matrix that goes stale. SDL2
+ * reports through a struct, SDL3 returns the name directly. */
+static inline int snesrecomp_sdl_num_render_drivers(void) {
+  return SDL_GetNumRenderDrivers();
+}
+
+static inline const char *snesrecomp_sdl_render_driver_name(int index) {
+#if SNESRECOMP_SDL3
+  return SDL_GetRenderDriver(index);
+#else
+  static SDL_RendererInfo info;
+  if (SDL_GetRenderDriverInfo(index, &info) != 0) return NULL;
+  return info.name;
 #endif
 }
 
@@ -186,6 +212,16 @@ static inline bool snesrecomp_sdl_get_texture_size(
 #else
   return SDL_QueryTexture(
              texture, NULL, NULL, width, height) == 0;
+#endif
+}
+
+/* SDL3 grew a modifier-state out-parameter on this; SDL2 takes the keycode
+ * alone. Callers that only want "which physical key is this" pass neither. */
+static inline SDL_Scancode snesrecomp_sdl_scancode_from_key(SDL_Keycode key) {
+#if SNESRECOMP_SDL3
+  return SDL_GetScancodeFromKey(key, NULL);
+#else
+  return SDL_GetScancodeFromKey(key);
 #endif
 }
 

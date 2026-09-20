@@ -4,6 +4,7 @@
 // Noncommercial, the retained upstream material stays MIT.
 #include "config.h"
 #include "types.h"
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 #include "sdl_compat.h"
@@ -17,6 +18,20 @@ enum {
 };
 
 Config g_config;
+static bool s_state_menu_defaults;
+/* Set when a [KeyMap] line carried a binding this framework used to GENERATE
+ * as its default and has since changed; the line is read as the new default
+ * and WriteConfigFile rewrites it, so the file stops disagreeing with the
+ * binding. See ParseKeyArray. */
+static bool s_keymap_migrated;
+bool ConfigKeyMapMigrated(void) { return s_keymap_migrated; }
+static bool s_deadzone_migrated;
+bool ConfigDeadzoneMigrated(void) { return s_deadzone_migrated; }
+/* Set per player when [Controller] SourceP1/SourceP2 was actually present. */
+static bool s_player_src_seen[2];
+bool ConfigHasPlayerSource(int player) {
+  return (unsigned)player < 2 && s_player_src_seen[player];
+}
 
 #define REMAP_SDL_KEYCODE(key) ((key) & SDLK_SCANCODE_MASK ? kKeyMod_ScanCode : 0) | (key) & (kKeyMod_ScanCode - 1)
 #define _(x) REMAP_SDL_KEYCODE(x)
@@ -24,7 +39,7 @@ Config g_config;
 #define A(x) REMAP_SDL_KEYCODE(x) | kKeyMod_Alt
 #define C(x) REMAP_SDL_KEYCODE(x) | kKeyMod_Ctrl
 #define N 0
-static const uint16 kDefaultKbdControls[kKeys_Total] = {
+static uint16 kDefaultKbdControls[kKeys_Total] = {
   0,
   // Controls
   _(SDLK_UP), _(SDLK_DOWN), _(SDLK_LEFT), _(SDLK_RIGHT), _(SDLK_RSHIFT), _(SDLK_RETURN), _(SDLK_x), _(SDLK_z), _(SDLK_s), _(SDLK_a), _(SDLK_c), _(SDLK_v),
@@ -36,9 +51,32 @@ static const uint16 kDefaultKbdControls[kKeys_Total] = {
   S(SDLK_F1), S(SDLK_F2), S(SDLK_F3), S(SDLK_F4), S(SDLK_F5), S(SDLK_F6), S(SDLK_F7), S(SDLK_F8), S(SDLK_F9), S(SDLK_F10), N, N, N, N, N, N, N, N, N, N,
   // Fullscreen, Reset, Pause, PauseDimmed, Turbo, WindowBigger, WindowSmaller, DisplayPerf, ToggleRenderer, ToggleWidescreen
   A(SDLK_RETURN), C(SDLK_r), S(SDLK_p), _(SDLK_p), _(SDLK_TAB), N, N, _(SDLK_f), _(SDLK_r), A(SDLK_w),
-  // VolumeUp VolumeDown
-  0, 0,
+  // VolumeUp VolumeDown: the keypad's + and -, which collide with nothing
+  // else in this table. They were unbound, so a player had no way to change
+  // the volume in-game unless their config.ini said otherwise.
+  _(SDLK_KP_PLUS), _(SDLK_KP_MINUS),
+  /* SaveStateMenu / Rewind. recomp-ui offers F7 / F8, but on SNES F1..F10
+   * are the ten LoadState slots above, so those would collide and
+   * KeyMapHash_Add would drop one with a "Duplicate key" line. They were
+   * left UNBOUND for that reason, which meant a keyboard player had no way
+   * into either overlay unless the port's config.ini said otherwise -- and
+   * Super Metroid's did not, so its rewind could not be opened at all. F11
+   * and F12 collide with nothing in this table. A port's [KeyMap] can still
+   * move them. */
+  _(SDLK_F11),
+  _(SDLK_F12),
+  /* Screenshot is opt-in through a port's config.ini so it does not displace
+   * existing F-key overlay defaults. */
+  N,
 };
+/* Opt in before parsing: existing hosts keep their legacy slot defaults. */
+void ConfigUseStateMenuDefaults(void) {
+  s_state_menu_defaults = true;
+  kDefaultKbdControls[kKeys_Load + 6] = _(SDLK_F11);
+  kDefaultKbdControls[kKeys_Load + 7] = _(SDLK_F12);
+  kDefaultKbdControls[kKeys_SaveStateMenu] = _(SDLK_F7);
+  kDefaultKbdControls[kKeys_Rewind] = _(SDLK_F8);
+}
 #undef _
 #undef A
 #undef C
@@ -58,6 +96,7 @@ static const KeyNameId kKeyNameId[] = {
   M(Load), M(Save),
   S(Fullscreen), S(Reset),
   S(Pause), S(PauseDimmed), S(Turbo), S(WindowBigger), S(WindowSmaller), S(VolumeUp), S(VolumeDown), S(DisplayPerf), S(ToggleRenderer), S(ToggleWidescreen),
+  S(SaveStateMenu), S(Rewind), S(Screenshot),
 };
 #undef S
 #undef M
@@ -94,8 +133,17 @@ static bool KeyMapHash_Add(uint16 key, uint16 cmd) {
   uint16 *cur = &keymap_hash_first[j];
   while (*cur) {
     KeyMapHashEnt *ent = &keymap_hash[*cur - 1];
-    if (ent->key == key)
-      return false;
+    if (ent->key == key) {
+      /* Launcher-editable menu actions take precedence over legacy slot
+       * shortcuts, independently of config line/default registration order. */
+      bool new_menu = cmd == kKeys_SaveStateMenu || cmd == kKeys_Rewind;
+      bool old_menu = ent->cmd == kKeys_SaveStateMenu || ent->cmd == kKeys_Rewind;
+      bool new_slot = cmd >= kKeys_Load && cmd <= kKeys_Save_Last;
+      bool old_slot = ent->cmd >= kKeys_Load && ent->cmd <= kKeys_Save_Last;
+      if (new_menu && old_slot) ent->cmd = cmd;
+      keymap_hash_size--;
+      return (new_menu && old_slot) || (old_menu && new_slot);
+    }
     cur = &ent->next;
   }
   *cur = i + 1;
@@ -130,8 +178,9 @@ int FindCmdForSdlKey(SDL_Keycode code, SDL_Keymod mod) {
 static void ParseKeyArray(char *value, int cmd, int size) {
   char *s;
   int i = 0;
-  for (; i < size && (s = NextDelim(&value, ',')) != NULL; i++, cmd += (cmd != 0)) {
-    if (*s == 0)
+  for (; (i < size || size == 1) && (s = NextDelim(&value, ',')) != NULL;
+       i++, cmd += (cmd != 0 && size != 1)) {
+    if (*s == 0 || StringEqualsNoCase(s, "None") || StringEqualsNoCase(s, "(unbound)"))
       continue;
     int key_with_mod = 0;
     for (;;) {
@@ -146,6 +195,23 @@ static void ParseKeyArray(char *value, int cmd, int size) {
       }
     }
     SDL_Keycode key = SDL_GetKeyFromName(s);
+    /* Old config.ini files loaded slots 7/8 on the new shared menu keys.
+     * Migrate those two defaults without rewriting the user's config. */
+    if (s_state_menu_defaults && !key_with_mod && cmd == kKeys_Load + 6 && key == SDLK_F7) key = SDLK_F11;
+    if (s_state_menu_defaults && !key_with_mod && cmd == kKeys_Load + 7 && key == SDLK_F8) key = SDLK_F12;
+    /* Volume keys. The config.ini this host wrote on a first launch said
+     * "VolumeUp = Shift+=" / "VolumeDown = Shift+-" for years; the defaults
+     * are Keypad + / Keypad - now (they collide with nothing, and Shift+=
+     * is not a key most players find). A file still carrying that generated
+     * pair is read as the new pair, rewritten once, and said so -- otherwise
+     * every existing install keeps the old keys forever and "the volume keys
+     * do nothing" is the report. A deliberate Shift+= can be kept by binding
+     * VolumeDown to anything but Shift+-. */
+    if (key_with_mod == kKeyMod_Shift && cmd == kKeys_VolumeUp && key == SDLK_EQUALS) {
+      key_with_mod = 0; key = SDLK_KP_PLUS; s_keymap_migrated = true;
+    } else if (key_with_mod == kKeyMod_Shift && cmd == kKeys_VolumeDown && key == SDLK_MINUS) {
+      key_with_mod = 0; key = SDLK_KP_MINUS; s_keymap_migrated = true;
+    }
     if (key == SDLK_UNKNOWN) {
       fprintf(stderr, "Unknown key: '%s'\n", s);
       continue;
@@ -173,7 +239,13 @@ static int CountBits32(uint32 n) {
 }
 
 static void GamepadMap_Add(int button, uint32 modifiers, uint16 cmd) {
-  if ((joymap_size & 0xff) == 0) {
+  /* Grow every 64 entries, which is the 64 this grows BY. The test was
+   * `(joymap_size & 0xff) == 0` -- a check every 256 against an allocation of
+   * 64 -- so entry 64 wrote one element past the block and quietly corrupted
+   * the heap. A single parse of a shipped config.ini stops short of 64 (12
+   * default binds per player plus whatever [GamepadMap] names), which is why
+   * nothing had tripped it; parse the same config twice and it does. */
+  if ((joymap_size & 0x3f) == 0) {
     if (joymap_size > 1000)
       Die("Too many joypad keys");
     joymap_ents = (GamepadMapEnt*)realloc(joymap_ents, sizeof(GamepadMapEnt) * (joymap_size + 64));
@@ -289,7 +361,49 @@ static int GetIniSection(const char *s) {
     return 4;
   if (StringEqualsNoCase(s, "[GamepadMap]"))
     return 5;
+  if (StringEqualsNoCase(s, "[Netplay]"))
+    return 6;
+  if (StringEqualsNoCase(s, "[Controller]"))
+    return 7;
+  /* [Controller.<guid>] -- a saved per-device profile. The launcher owns
+   * these; the runner only needs to not treat them as a malformed file. Each
+   * one would otherwise print "Invalid .ini section" on every start. */
+  if (StringStartsWithNoCase(s, "[Controller."))
+    return 8;
+  /* HOST-owned sections, for the same reason as [Controller.<guid>] above:
+   * the runner does not read them, but a per-game host does (its own
+   * config reader opens the same file), and every one of them printed
+   * "Invalid .ini section" on every start. A section this core has no
+   * business parsing is not a malformed file. */
+  if (StringEqualsNoCase(s, "[Video]") ||
+      StringEqualsNoCase(s, "[Emulation]"))
+    return 9;
   return -1;
+}
+
+/* [Graphics] VSync is tri-state (see kSnesVSync_* in config.h). Every boolean
+ * spelling an older config.ini could hold still means exactly what it meant;
+ * "adaptive" (or a bare 2) is the new third value. */
+static bool ParseVSync(const char *value, uint8 *result) {
+  bool b;
+  if (StringEqualsNoCase(value, "adaptive") || StringEqualsNoCase(value, "2")) {
+    *result = kSnesVSync_Adaptive;
+    return true;
+  }
+  if (!ParseBool(value, &b)) return false;
+  *result = b ? kSnesVSync_On : kSnesVSync_Off;
+  return true;
+}
+
+/* [Controller] SourceP1/SourceP2: which device drives each player, matching
+ * the launcher's three-way row -- 0 none, 1 keyboard, 2 gamepad. EnableGamepadN
+ * cannot carry this: it has no way to say "player 2 is on the keyboard". */
+static bool ParsePlayerSource(int player, const char *value) {
+  long v = strtol(value, (char **)NULL, 10);
+  if (v < 0 || v > 2) return false;
+  g_config.player_src[player] = (int)v;
+  s_player_src_seen[player] = true;
+  return true;
 }
 
 static bool HandleIniConfig(int section, const char *key, char *value) {
@@ -308,6 +422,17 @@ static bool HandleIniConfig(int section, const char *key, char *value) {
       return ParseBool(value, &g_config.enable_gamepad[1]);
     } else if (StringEqualsNoCase(key, "GamepadDeadzone")) {
       g_config.gamepad_deadzone = (int)strtol(value, (char**)NULL, 10);
+      /* The generated default was 10000 raw units for years, which the
+       * launcher shows as 30% -- far past where any stick rests, so the first
+       * third of every throw was dead and the pad felt unresponsive. The
+       * default is 10% now. A file still carrying the old generated number is
+       * read as the new one and rewritten once, the same treatment the volume
+       * keys got; a deliberate 30% survives as any other value near it, e.g.
+       * 9999 or 10001. */
+      if (g_config.gamepad_deadzone == SNES_CONFIG_LEGACY_DEADZONE) {
+        g_config.gamepad_deadzone = SNES_CONFIG_DEFAULT_DEADZONE;
+        s_deadzone_migrated = true;
+      }
       return true;
     } else {
       for (int i = 0; i < countof(kKeyNameId); i++) {
@@ -319,8 +444,47 @@ static bool HandleIniConfig(int section, const char *key, char *value) {
         }
       }
     }
+  } else if (section == 7) {
+    if (StringEqualsNoCase(key, "RewindGesture")) {
+      snprintf(g_config.rewind_gesture, sizeof(g_config.rewind_gesture), "%s", value);
+      return true;
+    } else if (StringEqualsNoCase(key, "SourceP1")) {
+      return ParsePlayerSource(0, value);
+    } else if (StringEqualsNoCase(key, "SourceP2")) {
+      return ParsePlayerSource(1, value);
+    }
+    /* GuidPn / DeadzonePn are the launcher's business; accepted silently so
+     * the runner does not report the launcher's own keys as unknown. */
+    return true;
+  } else if (section == 8) {
+    return true;                 /* saved profile; launcher-owned */
+  } else if (section == 9) {
+    /* [Video] / [Emulation]: the spellings a per-game host (Gundam Wing)
+     * used for the settings the framework host now owns. Accepted so a
+     * config.ini written for that host keeps meaning the same thing. */
+    if (StringEqualsNoCase(key, "FrameBlend")) {
+      return ParseBool(value, &g_config.frame_blend);
+    } else if (StringEqualsNoCase(key, "Vsync")) {
+      return ParseVSync(value, &g_config.vsync);
+    } else if (StringEqualsNoCase(key, "Renderer")) {
+      snprintf(g_config.renderer, sizeof(g_config.renderer), "%s", value);
+      return true;
+    } else if (StringEqualsNoCase(key, "LinearFilter")) {
+      return ParseBool(value, &g_config.linear_filtering);
+    } else if (StringEqualsNoCase(key, "RunAhead")) {
+      g_config.run_ahead = (int)strtol(value, (char **)NULL, 10);
+      return true;
+    }
+    return true;                 /* other host-owned keys */
   } else if (section == 1) {
-    if (StringEqualsNoCase(key, "WindowSize")) {
+    if (StringEqualsNoCase(key, "FrameBlend")) {
+      return ParseBool(value, &g_config.frame_blend);
+    } else if (StringEqualsNoCase(key, "VSync")) {
+      return ParseVSync(value, &g_config.vsync);
+    } else if (StringEqualsNoCase(key, "Renderer")) {
+      snprintf(g_config.renderer, sizeof(g_config.renderer), "%s", value);
+      return true;
+    } else if (StringEqualsNoCase(key, "WindowSize")) {
       char *s;
       if (StringEqualsNoCase(value, "Auto")){
         g_config.window_width  = 0;
@@ -376,7 +540,11 @@ static bool HandleIniConfig(int section, const char *key, char *value) {
       return true;
     }
   } else if (section == 2) {
-    if (StringEqualsNoCase(key, "EnableAudio")) {
+    if (StringEqualsNoCase(key, "Volume")) {
+      int v = (int)strtol(value, (char **)NULL, 10);
+      g_config.volume = v < 0 ? 0 : v > 100 ? 100 : v;
+      return true;
+    } else if (StringEqualsNoCase(key, "EnableAudio")) {
       return ParseBool(value, &g_config.enable_audio);
     } else if (StringEqualsNoCase(key, "AudioFreq")) {
       g_config.audio_freq = (uint16)strtol(value, (char**)NULL, 10);
@@ -389,7 +557,10 @@ static bool HandleIniConfig(int section, const char *key, char *value) {
       return true;
     }
   } else if (section == 3) {
-    if (StringEqualsNoCase(key, "Autosave")) {
+    if (StringEqualsNoCase(key, "RunAhead")) {
+      g_config.run_ahead = (int)strtol(value, (char **)NULL, 10);
+      return true;
+    } else if (StringEqualsNoCase(key, "Autosave")) {
       g_config.autosave = (bool)strtol(value, (char **)NULL, 10);
       return true;
     } else if (StringEqualsNoCase(key, "DisplayPerfInTitle")) {
@@ -400,6 +571,12 @@ static bool HandleIniConfig(int section, const char *key, char *value) {
       return ParseBool(value, &g_config.enable_snes9x_oracle);
     } else if (StringEqualsNoCase(key, "SkipLauncher")) {
       return ParseBool(value, &g_config.skip_launcher);
+    }
+  } else if (section == 6) {
+    if (StringEqualsNoCase(key, "PlayerName")) {
+      snprintf(g_config.netplay_player_name,
+               sizeof(g_config.netplay_player_name), "%s", value);
+      return true;
     }
   } else if (section == 4) {
   }
@@ -444,6 +621,8 @@ static bool ParseOneConfigFile(const char *filename, int depth) {
 
 void ParseConfigFile(const char *filename) {
   g_config.enable_audio = true;
+  g_config.vsync = kSnesVSync_On;
+  g_config.volume = 100;
   /* Audio defaults match the values shipped in config.ini's [Sound]
    * section. Without these a release with no config.ini next to the
    * exe leaves audio_freq/audio_channels/audio_samples at 0, which
@@ -461,7 +640,15 @@ void ParseConfigFile(const char *filename) {
    * = false` in config.ini overrides this. */
   g_config.enable_gamepad[0] = true;
   g_config.enable_gamepad[1] = true;
-  g_config.gamepad_deadzone = 10000;
+  /* Seeded BEFORE the file is read, so a config.ini with no [Controller]
+   * section behaves exactly as it did before the section existed: player 1 on
+   * the keyboard, player 2 silent until someone assigns it a device. Leaving
+   * these zero would have read as "no slot uses the keyboard" and taken the
+   * keyboard away from every existing install. */
+  g_config.player_src[0] = 1;   /* keyboard */
+  g_config.player_src[1] = 0;   /* none */
+  s_player_src_seen[0] = s_player_src_seen[1] = false;
+  g_config.gamepad_deadzone = SNES_CONFIG_DEFAULT_DEADZONE;
   g_config.display_aspect = kSnesDisplayAspect_Crt4x3;
   g_config.skip_launcher = false;
   /* Default ON to preserve current behaviour across other ports that
@@ -572,6 +759,33 @@ static void CfgFlushSection(CfgBuf *out, CfgKV *kvs, int n, const char *sec) {
     }
 }
 
+/* Address a kvs row by the name it actually carries. The values used to be
+ * assigned through hardcoded indices (kvs[0], kvs[1], ...), so inserting a row
+ * anywhere but the end silently reassigned every value after it -- a trap that
+ * had to be disarmed before Fullscreen could be added in its natural place. */
+static CfgKV *CfgFind(CfgKV *kvs, int n, const char *section, const char *key) {
+  for (int i = 0; i < n; i++)
+    if (StringEqualsNoCase(section, kvs[i].section) &&
+        StringEqualsNoCase(key, kvs[i].key))
+      return &kvs[i];
+  Die("WriteConfigFile: no kvs row for the requested key");
+  return NULL;
+}
+
+static void CfgSet(CfgKV *kvs, int n, const char *section, const char *key,
+                   const char *fmt, ...) {
+  CfgKV *kv = CfgFind(kvs, n, section, key);
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(kv->val, sizeof(kv->val), fmt, ap);
+  va_end(ap);
+}
+
+/* Leave this key exactly as the file already has it (or absent). */
+static void CfgSkip(CfgKV *kvs, int n, const char *section, const char *key) {
+  CfgFind(kvs, n, section, key)->done = 1;
+}
+
 static int CfgLineIsKey(const char *line, const char *key) {
   const char *p = line;
   while (*p == ' ' || *p == '\t') p++;
@@ -589,6 +803,7 @@ void WriteConfigFile(const char *filename) {
 
   CfgKV kvs[] = {
     { "Graphics", "WindowScale" },
+    { "Graphics", "Fullscreen" },
     { "Graphics", "DisplayAspect" },
     { "Graphics", "OutputMethod" },
     { "Graphics", "LinearFiltering" },
@@ -600,6 +815,18 @@ void WriteConfigFile(const char *filename) {
     { "GamepadMap", "EnableGamepad2" },
     { "General",    "SkipLauncher" },
     { "GamepadMap", "GamepadDeadzone" },
+    { "Netplay",    "PlayerName" },
+    { "Graphics",   "FrameBlend" },
+    { "Graphics",   "VSync" },
+    { "Graphics",   "Renderer" },
+    { "General",    "RunAhead" },
+    { "Sound",      "Volume" },
+    { "Controller", "SourceP1" },
+    { "Controller", "SourceP2" },
+    /* Only after a migration (see ParseKeyArray): [KeyMap] is otherwise the
+     * player's, and left exactly as written. */
+    { "KeyMap",     "VolumeUp" },
+    { "KeyMap",     "VolumeDown" },
   };
   const int N = (int)countof(kvs);
   static const char *const kDisplayAspectNames[kSnesDisplayAspect_Count] = {
@@ -607,20 +834,44 @@ void WriteConfigFile(const char *filename) {
   };
   SnesDisplayAspect display_aspect =
       SnesDisplayAspect_Clamp(g_config.display_aspect);
-  snprintf(kvs[0].val, sizeof(kvs[0].val), "%d", g_config.window_scale ? g_config.window_scale : 3);
-  snprintf(kvs[1].val, sizeof(kvs[1].val), "%s", kDisplayAspectNames[display_aspect]);
-  snprintf(kvs[2].val, sizeof(kvs[2].val), "%s",
-           g_config.output_method == kOutputMethod_OpenGL ? "OpenGL" :
-           g_config.output_method == kOutputMethod_SDLSoftware ? "SDL-Software" : "SDL");
-  snprintf(kvs[3].val, sizeof(kvs[3].val), "%d", g_config.linear_filtering ? 1 : 0);
-  snprintf(kvs[4].val, sizeof(kvs[4].val), "%s", g_config.shader ? g_config.shader : "");
-  snprintf(kvs[5].val, sizeof(kvs[5].val), "%d", g_config.widescreen ? 1 : 0);
-  snprintf(kvs[6].val, sizeof(kvs[6].val), "%d", g_config.enable_audio ? 1 : 0);
-  snprintf(kvs[7].val, sizeof(kvs[7].val), "%d", g_config.audio_freq);
-  snprintf(kvs[8].val, sizeof(kvs[8].val), "%s", g_config.enable_gamepad[0] ? "true" : "false");
-  snprintf(kvs[9].val, sizeof(kvs[9].val), "%s", g_config.enable_gamepad[1] ? "true" : "false");
-  snprintf(kvs[10].val, sizeof(kvs[10].val), "%d", g_config.skip_launcher ? 1 : 0);
-  snprintf(kvs[11].val, sizeof(kvs[11].val), "%d", g_config.gamepad_deadzone);
+  CfgSet(kvs, N, "Graphics", "WindowScale", "%d",
+         g_config.window_scale ? g_config.window_scale : 3);
+  CfgSet(kvs, N, "Graphics", "Fullscreen", "%d", (int)g_config.fullscreen);
+  CfgSet(kvs, N, "Graphics", "DisplayAspect", "%s",
+         kDisplayAspectNames[display_aspect]);
+  CfgSet(kvs, N, "Graphics", "OutputMethod", "%s",
+         g_config.output_method == kOutputMethod_OpenGL ? "OpenGL" :
+         g_config.output_method == kOutputMethod_SDLSoftware ? "SDL-Software" : "SDL");
+  CfgSet(kvs, N, "Graphics", "LinearFiltering", "%d", g_config.linear_filtering ? 1 : 0);
+  CfgSet(kvs, N, "Graphics", "Shader", "%s", g_config.shader ? g_config.shader : "");
+  CfgSet(kvs, N, "Graphics", "Widescreen", "%d", g_config.widescreen ? 1 : 0);
+  CfgSet(kvs, N, "Sound", "EnableAudio", "%d", g_config.enable_audio ? 1 : 0);
+  CfgSet(kvs, N, "Sound", "AudioFreq", "%d", (int)g_config.audio_freq);
+  CfgSet(kvs, N, "GamepadMap", "EnableGamepad1", "%s",
+         g_config.enable_gamepad[0] ? "true" : "false");
+  CfgSet(kvs, N, "GamepadMap", "EnableGamepad2", "%s",
+         g_config.enable_gamepad[1] ? "true" : "false");
+  CfgSet(kvs, N, "General", "SkipLauncher", "%d", g_config.skip_launcher ? 1 : 0);
+  CfgSet(kvs, N, "GamepadMap", "GamepadDeadzone", "%d", g_config.gamepad_deadzone);
+  CfgSet(kvs, N, "Netplay", "PlayerName", "%s", g_config.netplay_player_name);
+  CfgSet(kvs, N, "Graphics", "FrameBlend", "%d", g_config.frame_blend ? 1 : 0);
+  CfgSet(kvs, N, "Graphics", "VSync", "%s",
+         g_config.vsync == kSnesVSync_Adaptive ? "adaptive" :
+         g_config.vsync == kSnesVSync_Off ? "0" : "1");
+  CfgSet(kvs, N, "Graphics", "Renderer", "%s",
+         g_config.renderer[0] ? g_config.renderer : "auto");
+  CfgSet(kvs, N, "General", "RunAhead", "%d", g_config.run_ahead);
+  CfgSet(kvs, N, "Sound", "Volume", "%d", g_config.volume);
+  CfgSet(kvs, N, "Controller", "SourceP1", "%d", g_config.player_src[0]);
+  CfgSet(kvs, N, "Controller", "SourceP2", "%d", g_config.player_src[1]);
+  if (s_keymap_migrated) {
+    CfgSet(kvs, N, "KeyMap", "VolumeUp", "%s", "Keypad +");
+    CfgSet(kvs, N, "KeyMap", "VolumeDown", "%s", "Keypad -");
+  } else {
+    /* [KeyMap] is the player's; only a migration may rewrite it. */
+    CfgSkip(kvs, N, "KeyMap", "VolumeUp");
+    CfgSkip(kvs, N, "KeyMap", "VolumeDown");
+  }
 
   char *data = NULL;
   long sz = 0;
