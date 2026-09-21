@@ -1,4 +1,5 @@
 #include "ppu.h"
+#include "mode7_hd.h"
 
 extern unsigned char g_snesrecomp_last_hdmaen;
 #include "ppu_legacy.h"
@@ -63,6 +64,7 @@ void ppu_sec_read(double *eval, double *line, double *bg, double *spr,
 #endif
 
 static void PpuDrawWholeLine(Ppu *ppu, uint y);
+static void PpuDrawMode7HdLine(Ppu *ppu, unsigned line);
 
 static bool ppu_evaluateSprites(Ppu* ppu, int line);
 static uint16_t ppu_getVramRemap(Ppu* ppu);
@@ -85,6 +87,7 @@ void ppu_reset(Ppu* ppu) {
     size_t pitch = ppu->renderPitch;
     uint8_t *renderBuffer = ppu->renderBuffer;
     uint32_t renderFlags = ppu->renderFlags;
+    PpuMode7HdSurface mode7Hd = ppu->mode7Hd;
     uint32_t overlayPitch[kPpuOverlaySource_Count];
     uint8_t *overlayBuffer[kPpuOverlaySource_Count];
     memcpy(overlayPitch, ppu->overlayRenderPitch, sizeof(overlayPitch));
@@ -93,6 +96,7 @@ void ppu_reset(Ppu* ppu) {
     ppu->renderBuffer = renderBuffer;
     ppu->renderPitch = (uint32_t)pitch;
     ppu->renderFlags = renderFlags;
+    ppu->mode7Hd = mode7Hd;
     memcpy(ppu->overlayRenderPitch, overlayPitch, sizeof(overlayPitch));
     memcpy(ppu->overlayRenderBuffer, overlayBuffer, sizeof(overlayBuffer));
   }
@@ -170,6 +174,25 @@ void PpuSetWidescreenLineEnhancer(Ppu *ppu,
                                   void *context) {
   ppu->widescreenLineEnhancer = enhancer;
   ppu->widescreenLineEnhancerContext = enhancer ? context : NULL;
+}
+
+bool PpuBindMode7HdSurface(Ppu *ppu, uint32_t *pixels, size_t capacity,
+                            size_t pitch, unsigned width, unsigned height,
+                            unsigned scale) {
+  if (!ppu) return false;
+  if (!pixels) {
+    memset(&ppu->mode7Hd, 0, sizeof(ppu->mode7Hd));
+    return true;
+  }
+  if (width < 256 || width > kPpuBufWidth || (width & 1) ||
+      !height || height > 240 || !scale || scale > 4 ||
+      (uintptr_t)pixels % sizeof(uint32_t) || pitch % sizeof(uint32_t) ||
+      pitch < width * scale * sizeof(uint32_t) ||
+      pitch > SIZE_MAX / (height * scale) ||
+      capacity < pitch * height * scale)
+    return false;
+  ppu->mode7Hd = (PpuMode7HdSurface){pixels, pitch, width, height, scale};
+  return true;
 }
 
 void PpuClearOverlayCaptures(Ppu *ppu) {
@@ -742,6 +765,8 @@ void ppu_runLine(Ppu* ppu, int line) {
     } else {
       ppu_draw_whole_line_legacy(ppu, line);
     }
+    if (ppu->mode7Hd.pixels)
+      PpuDrawMode7HdLine(ppu, (unsigned)line);
   }
 }
 
@@ -2395,6 +2420,129 @@ static NOINLINE void PpuDrawWholeLine(Ppu *ppu, uint y) {
   } while (cw_clip_math >>= 1, ++windex < cwin.nr);
 
   PpuWriteOverlayRenderLine(ppu, kPpuOverlaySource_Obj, y);
+}
+
+static bool PpuHdWindowCondition(unsigned mode, bool inside) {
+  return mode == 3 || (mode == 1 && !inside) || (mode == 2 && inside);
+}
+
+/* Resolve colour after HD background sampling and native OBJ priority. An
+ * opaque native BG pixel cannot serve as a mask: a fractional sample may be
+ * transparent and reveal a sprite that the native sample had covered. */
+static uint32_t PpuHdColour(const Ppu *ppu, uint16_t main, uint16_t sub,
+                            bool inside) {
+  unsigned layer = (main >> 8) & 15;
+  unsigned colour = ppu->cgram[main & 255];
+  bool clip = PpuHdWindowCondition(PPU_clipMode(ppu), inside);
+  bool math = !PpuHdWindowCondition(PPU_preventMathMode(ppu), inside) &&
+      (PPU_mathEnabled(ppu) & (1u << layer));
+  unsigned other = ppu->fixedColor;
+  bool half = math && PPU_halfColor(ppu);
+  if (math && PPU_addSubscreen(ppu)) {
+    if (sub & 255) other = ppu->cgram[sub & 255];
+    else half = false;
+  }
+  uint32_t output = 0;
+  for (unsigned c = 0; c < 3; ++c) {
+    int value = clip ? 0 : (colour >> (5 * c)) & 31;
+    if (math) {
+      int second = (other >> (5 * c)) & 31;
+      value += PPU_subtractColor(ppu) ? -second : second;
+      if (value < 0) value = 0;
+      if (half) value /= 2;
+      if (value > 31) value = 31;
+    }
+    output |= (uint32_t)ppu->brightnessMult[value] << (16 - 8 * c);
+  }
+  return output;
+}
+
+static void PpuHdMarkWindow(uint8_t visibility[kPpuBufWidth],
+                            const PpuWindows *window, uint8_t bit,
+                            bool mark_inside) {
+  for (unsigned span = 0; span < window->nr; ++span) {
+    bool inside = (window->bits & (1u << span)) != 0;
+    if (inside != mark_inside) continue;
+    for (int x = window->edges[span]; x < window->edges[span + 1]; ++x)
+      visibility[x + kPpuExtraLeftRight] |= bit;
+  }
+}
+
+static void PpuDrawMode7HdLine(Ppu *ppu, unsigned line) {
+  const PpuMode7HdSurface *surface = &ppu->mode7Hd;
+  if (!line || line > surface->height) return;
+  const unsigned width = surface->width, scale = surface->scale;
+  uint8_t *first = (uint8_t *)surface->pixels +
+      (line - 1) * scale * surface->pitch;
+  /* A host changing viewports must rebind. Clear instead of reading beyond
+   * the native scanout or leaving an old scene visible in this surface. */
+  if (!ppu->renderBuffer || width != 256u + 2u * ppu->extraLeftRight ||
+      ppu->renderPitch < width * sizeof(uint32_t)) {
+    for (unsigned sy = 0; sy < scale; ++sy)
+      memset(first + sy * surface->pitch, 0, width * scale * sizeof(uint32_t));
+    return;
+  }
+  bool hd = scale > 1 && PPU_mode(ppu) == 7 &&
+      !PPU_forcedBlank(ppu) && !PPU_m7extBg(ppu) &&
+      !PPU_directColor(ppu) && !PPU_interlace(ppu) &&
+      !PPU_pseudoHires(ppu) &&
+      !(PPU_mosaicEnabled(ppu, 0) && PPU_mosaicSize(ppu) > 1) &&
+      !ppu->widescreenLineEnhancer && !(ppu->wsHudSplitHeight & 0x80);
+  /* An independently promoted surface is composed by the host. Keep those
+   * pixels identical until that host also opts into HD overlay composition. */
+  for (unsigned source = 0; hd && source < kPpuOverlaySource_Count; ++source)
+    if (PpuOverlayActiveOnLine(ppu, (PpuOverlaySource)source, (int)line - 1))
+      hd = false;
+  if (!hd) {
+    const uint32_t *native = (const uint32_t *)(ppu->renderBuffer +
+        (line - 1) * ppu->renderPitch);
+    uint32_t *row = (uint32_t *)first;
+    for (unsigned x = 0; x < width; ++x)
+      for (unsigned sx = 0; sx < scale; ++sx) row[x * scale + sx] = native[x];
+    for (unsigned sy = 1; sy < scale; ++sy)
+      memcpy(first + sy * surface->pitch, first, width * scale * sizeof(uint32_t));
+    return;
+  }
+
+  uint8_t visibility[kPpuBufWidth] = {0};
+  PpuWindows window;
+  for (unsigned sub = 0; sub < 2; ++sub) {
+    for (unsigned object = 0; object < 2; ++object) {
+      unsigned layer = object ? 4 : 0;
+      if (!IS_SCREEN_ENABLED(ppu, sub, layer)) continue;
+      if (IS_SCREEN_WINDOWED(ppu, sub, layer))
+        PpuWindows_Calc(&window, ppu, layer, (int)line);
+      else
+        PpuWindows_Clear(&window, ppu, layer, (int)line);
+      PpuHdMarkWindow(visibility, &window, (uint8_t)(1u << (sub + 2 * object)), false);
+    }
+  }
+  PpuWindows_Calc(&window, ppu, 5, (int)line);
+  PpuHdMarkWindow(visibility, &window, 16, true);
+  SnesMode7HdTransform transform =
+      SnesMode7HdMakeTransform(ppu->m7matrix, ppu->m7sel, line);
+  const uint16_t *vram = PpuRenderVram(ppu);
+  for (unsigned sy = 0; sy < scale; ++sy) {
+    uint32_t *row = (uint32_t *)(first + sy * surface->pitch);
+    memset(row, 0, width * scale * sizeof(uint32_t));
+    double subline = (double)sy / scale;
+    for (int x = -(int)ppu->extraLeftCur; x < 256 + ppu->extraRightCur; ++x) {
+      unsigned i = (unsigned)(x + kPpuExtraLeftRight);
+      uint8_t visible = visibility[i];
+      uint16_t object = ppu->objBuffer.data[i];
+      for (unsigned sx = 0; sx < scale; ++sx) {
+        uint8_t index = SnesMode7HdSample(&transform, vram,
+                                          x + (double)sx / scale, subline);
+        uint16_t bg = index ? (uint16_t)(0x5000 | index) : 0x0500;
+        uint16_t main = visible & 1 ? bg : 0x0500;
+        uint16_t sub = visible & 2 ? bg : 0x0500;
+        if ((visible & 4) && object > main) main = object;
+        if ((visible & 8) && object > sub) sub = object;
+        row[(x + ppu->extraLeftRight) * scale + sx] =
+            PpuHdColour(ppu, main, sub, (visible & 16) != 0);
+      }
+    }
+  }
 }
 
 static bool PpuWidescreenHudOamSlot(Ppu *ppu, uint8_t index, uint8_t y) {
