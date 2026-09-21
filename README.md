@@ -22,6 +22,10 @@ and save states. The framework is game-agnostic: each title supplies its own
 analysis configuration and integration code while improvements to the CPU and
 hardware model benefit every project.
 
+An opt-in [HD Mode 7 renderer](docs/HD_MODE7.md) provides higher-resolution
+background sampling for frontends and custom game renderers while retaining
+the normal PPU output.
+
 <table>
   <tr>
     <td width="29%"><img src="docs/assets/games/super-mario-world-wide.png" alt="Super Mario World running in SNESRecomp at 16:9" width="100%"><br><sub><b>Super Mario World</b></sub></td>
