@@ -37,16 +37,26 @@ echo "=== PPU sprite limits ==="
     "$ROOT/tests/ppu/ppu_sprite_limit_test.c" \
     "$ROOT/runner/src/snes/ppu.c" \
     "$ROOT/runner/src/snes/ppu_legacy.c" \
-    -o "$OUT/ppu_sprite_limit_test"
+    -lm -o "$OUT/ppu_sprite_limit_test"
 "$OUT/ppu_sprite_limit_test"
 
 echo "=== PPU widescreen world-mirror band ==="
-"$CC" -std=c11 -Wall -Wextra -O1     -DSNESRECOMP_REVERSE_DEBUG=0     -I "$ROOT/runner/src" -I "$ROOT/runner/src/snes"     "$ROOT/tests/ppu/ppu_world_mirror_test.c"     "$ROOT/runner/src/snes/ppu.c"     "$ROOT/runner/src/snes/ppu_legacy.c"     -o "$OUT/ppu_world_mirror_test"
+"$CC" -std=c11 -Wall -Wextra -O1     -DSNESRECOMP_REVERSE_DEBUG=0     -I "$ROOT/runner/src" -I "$ROOT/runner/src/snes"     "$ROOT/tests/ppu/ppu_world_mirror_test.c"     "$ROOT/runner/src/snes/ppu.c"     "$ROOT/runner/src/snes/ppu_legacy.c"     -lm -o "$OUT/ppu_world_mirror_test"
 "$OUT/ppu_world_mirror_test"
 
 echo "=== PPU widescreen elastic anchor band ==="
-"$CC" -std=c11 -Wall -Wextra -O1     -DSNESRECOMP_REVERSE_DEBUG=0     -I "$ROOT/runner/src" -I "$ROOT/runner/src/snes"     "$ROOT/tests/ppu/ppu_elastic_band_test.c"     "$ROOT/runner/src/snes/ppu.c"     "$ROOT/runner/src/snes/ppu_legacy.c"     -o "$OUT/ppu_elastic_band_test"
+"$CC" -std=c11 -Wall -Wextra -O1     -DSNESRECOMP_REVERSE_DEBUG=0     -I "$ROOT/runner/src" -I "$ROOT/runner/src/snes"     "$ROOT/tests/ppu/ppu_elastic_band_test.c"     "$ROOT/runner/src/snes/ppu.c"     "$ROOT/runner/src/snes/ppu_legacy.c"     -lm -o "$OUT/ppu_elastic_band_test"
 "$OUT/ppu_elastic_band_test"
+
+echo "=== HD Mode 7 sampling and composition ==="
+"$CC" -std=c11 -Wall -Wextra -O1 \
+    -DSNESRECOMP_REVERSE_DEBUG=0 \
+    -I "$ROOT/runner/src" -I "$ROOT/runner/src/snes" \
+    "$ROOT/tests/ppu/ppu_mode7_hd_test.c" \
+    "$ROOT/runner/src/snes/ppu.c" \
+    "$ROOT/runner/src/snes/ppu_legacy.c" \
+    -lm -o "$OUT/ppu_mode7_hd_test"
+"$OUT/ppu_mode7_hd_test"
 
 echo "=== DMA / HDMA ==="
 # sdd1.c is upstream's vendored S-DD1 decoder and is not -Werror clean here:
