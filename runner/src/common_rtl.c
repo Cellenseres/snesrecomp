@@ -251,6 +251,7 @@ void rtl_apu_restore_pacing(uint64_t frame_start_master, uint8_t frame_time_vali
  * guest time and must not become permanent A/V latency. The short ramp joins
  * the last delivered sample to the first current sample without a hard edge. */
 #define RTL_AUDIO_RECOVERY_RAMP 128u
+#define RTL_AUDIO_TARGET_NATIVES 2136u /* 4 native blocks, ~67 ms cushion */
 static bool g_audio_fast_forward;
 static uint32_t g_audio_recovery_frames;
 static uint32_t g_audio_recovery_remaining;
@@ -2068,10 +2069,12 @@ void RtlAudioSetFastForward(bool active) {
   if (!active && g_audio_recovery_frames != 0) {
     uint32_t available = g_snes->apu->dsp->sampleWrite -
                          g_snes->apu->dsp->sampleRead;
-    /* Keep two current blocks: one for the next callback and one scheduling
-     * cushion. Repeat at frame boundaries only while post-turbo CPU work is
-     * settling, then restore the ordinary FIFO unchanged. */
-    uint32_t discarded = dsp_trimSamples(g_snes->apu->dsp, 1068);
+    /* Preserve the consumer's startup cushion. A stage upload or starvation
+     * can re-enter priming during turbo; trimming below its threshold would
+     * prevent playback from ever restarting and perpetually renew recovery.
+     * Remove stale latency while allowing the same delivery gate to open. */
+    uint32_t discarded = dsp_trimSamples(g_snes->apu->dsp,
+                                          RTL_AUDIO_TARGET_NATIVES);
     if (discarded != 0) {
       audio_trace_on_fast_forward_discard(discarded,
                                            available - discarded);
@@ -2124,7 +2127,6 @@ void RtlAudioSetFastForward(bool active) {
  * half a percent cannot become a clock.
  */
 #define RTL_AUDIO_NATIVE_RATE    32040.0 /* SPC output rate: 1.024 MHz / 32   */
-#define RTL_AUDIO_TARGET_NATIVES 2136u /* 4 native blocks, ~67 ms cushion */
 #define RTL_AUDIO_SERVO_GAIN     0.05  /* gentle: full-scale error -> 5%, clamped */
 #define RTL_AUDIO_SERVO_MAX      0.005 /* +/-0.5% == ~8 cents, inaudible        */
 /* Occupancy is sampled at callback entry, but production arrives in 534-native
