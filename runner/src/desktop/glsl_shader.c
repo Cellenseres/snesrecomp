@@ -12,6 +12,7 @@
 #include "glsl_shader.h"
 #include "util.h"
 #include "config.h"
+#include "sdl_compat.h"
 #include <stdio.h>
 #include <assert.h>
 #include <string.h>
@@ -321,13 +322,37 @@ static bool IsGlslFilename(const char *filename) {
 }
 
 GlslShader *GlslShader_CreateFromFile(const char *filename) {
+  /* Bundled choices are stored as stable resource paths, never the temporary
+   * AppImage mount path. Custom absolute/relative paths keep their meaning. */
+  char *resource_path = NULL;
+  if (!strncmp(filename, "assets/shaders/", 15)) {
+#if SNESRECOMP_SDL3
+    const char *base = SDL_GetBasePath();
+#else
+    char *base = SDL_GetBasePath();
+#endif
+    if (base) {
+      size_t size = strlen(base) + strlen(filename) + 1;
+      resource_path = (char *)malloc(size);
+      if (resource_path) {
+        snprintf(resource_path, size, "%s%s", base, filename);
+        FILE *probe = fopen(resource_path, "rb");
+        if (probe) { fclose(probe); filename = resource_path; }
+      }
+    }
+#if !SNESRECOMP_SDL3
+    SDL_free(base);
+#endif
+  }
   char buffer[256];
   GLint link_status;
   ByteArray shader_code = { 0 };
   bool success = false;
   GlslShader *gs = (GlslShader *)calloc(sizeof(GlslShader), 1);
-  if (!gs)
+  if (!gs) {
+    free(resource_path);
     return gs;
+  }
 
   if (IsGlslFilename(filename)) {
     GlslShader_InitializePasses(gs, 1);
@@ -421,6 +446,7 @@ FAIL:
     gs = NULL;
   }
   ByteArray_Destroy(&shader_code);
+  free(resource_path);
   return gs;
 }
 

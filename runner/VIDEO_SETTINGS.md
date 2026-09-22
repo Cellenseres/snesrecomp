@@ -31,6 +31,10 @@ named aliases also work). Custom config readers should call
 `SnesDisplayAspect_Parse`; writers should use `SnesDisplayAspect_Name`.
 The native 256x224 picture's horizontal pixel ratios are 7:6, 1:1 and 7:8.
 
+Bundled shader choices use stable `assets/shaders/...` resource paths. The
+shared GLSL loader resolves these against the executable, including a fresh
+AppImage mount on each launch. Custom file paths retain their normal meaning.
+
 Adaptive renderers should call `SnesDisplayAspect_ComputeAdaptiveFrame` with
 their native dimensions, maximum composition width, desired screen ratio and
 selected DisplayAspect. Use `SnesDisplayAspect_FitViewport` to present the
