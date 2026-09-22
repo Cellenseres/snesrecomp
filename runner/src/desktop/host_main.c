@@ -63,6 +63,7 @@
 #include "launcher.h"
 #include "launcher_cache.h"
 #include "host_paths.h"
+#include "host_args.h"
 #include "keybinds.h"
 #include "host_report.h"
 #include "post_mortem.h"
@@ -2184,38 +2185,30 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
   /* Capture program path before argv shift — used to place keybinds.ini
    * next to the executable. */
   const char *program_path = (argc >= 1) ? argv[0] : NULL;
+  /* The command line is defined ONCE, in runner/src/host_args.c, and shared by
+   * every port whether or not it has its own main(). See host_args.h: the flags
+   * used to be re-implemented per port and the implementations disagreed, so
+   * --no-launcher silently showed the launcher on one game and was mistaken for
+   * the ROM path on another.
+   *
+   * A positional ROM does NOT suppress the launcher. That was wrong in the case
+   * that matters most: Studio always knows the ROM and always passes it, so the
+   * launcher never appeared from its Build tab. A ROM says which ROM to use,
+   * not whether a human is present. Suppression stays explicit, because
+   * scripted harnesses launch as `<exe> <rom>` and expect to boot straight in. */
+  SnesrecompHostArgs args;
+  if (!snesrecomp_host_args_parse(&argc, &argv, &args)) return 2;
+  if (args.help) { snesrecomp_host_args_usage(program_path, NULL); return 0; }
+  if (!snesrecomp_host_args_reject_unknown(argc, argv, program_path, NULL))
+    return 2;
   argc--, argv++;
-  /* --launcher / --no-launcher may appear anywhere. A positional ROM used to
-   * suppress the launcher outright, which was wrong in the one case that
-   * matters most: Studio ALWAYS knows the ROM and always passes it, so the
-   * launcher never appeared from its Build tab. A ROM on the command line
-   * says which ROM to use, not whether a human is present. Suppression stays
-   * explicit, because scripted harnesses launch as `<exe> <rom>` and expect
-   * to boot straight in. */
-  int force_launcher = 0, no_launcher = 0;
-  {
-    /* `--rom <path>` is the positional ROM under another spelling: Studio's
-     * `build run` passes it that way, and a host that did not know the flag
-     * treated the path as absent and asked for one. It goes to the END:
-     * the ordered flags below (--config, --paused, --script, --framedump)
-     * are consumed from the front and the positional follows them. */
-    char *rom_flag = NULL;
-    int w = 0;
-    for (int i = 0; i < argc; ++i) {
-      if (argv[i] && strcmp(argv[i], "--launcher") == 0) { force_launcher = 1; continue; }
-      if (argv[i] && strcmp(argv[i], "--no-launcher") == 0) { no_launcher = 1; continue; }
-      if (argv[i] && strcmp(argv[i], "--rom") == 0 && i + 1 < argc) { rom_flag = argv[++i]; continue; }
-      argv[w++] = argv[i];
-    }
-    argc = w;
-    if (rom_flag)
-      argv[argc++] = rom_flag;
-  }
-  const char *config_file = NULL;
-  if (argc >= 2 && strcmp(argv[0], "--config") == 0) {
-    config_file = argv[1];
-    argc -= 2, argv += 2;
-  } else {
+  const int force_launcher = args.force_launcher;
+  const int no_launcher = args.no_launcher;
+  const int start_paused = args.start_paused;
+  const char *script_file = args.script_file;
+  const char *framedump_dir = args.framedump_dir;
+  const char *config_file = args.config_file;
+  if (!config_file) {
     /* Anchor cwd to the binary's own directory FIRST. This is what makes an
      * AppImage work: host_paths.c prefers $APPIMAGE over /proc/self/exe, so
      * "next to the binary" means next to the user-visible .AppImage file
@@ -2233,21 +2226,6 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
                              getcwd(cwdbuf, sizeof(cwdbuf)) ? cwdbuf : "(unknown)",
                              anchored ? "ok" : "declined");
     }
-  }
-  int start_paused = 0;
-  if (argc >= 1 && strcmp(argv[0], "--paused") == 0) {
-    start_paused = 1;
-    argc -= 1, argv += 1;
-  }
-  const char *script_file = NULL;
-  if (argc >= 2 && strcmp(argv[0], "--script") == 0) {
-    script_file = argv[1];
-    argc -= 2, argv += 2;
-  }
-  const char *framedump_dir = NULL;
-  if (argc >= 2 && strcmp(argv[0], "--framedump") == 0) {
-    framedump_dir = argv[1];
-    argc -= 2, argv += 2;
   }
   if (game->state_menu_hotkeys) ConfigUseStateMenuDefaults();
   ParseConfigFile(config_file);
@@ -2343,7 +2321,10 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
     rom_identity_ok = DecodeRomIdentity(kExpectedSha256, &kExpectedCrc32);
     int rom_resolved_by_launcher = 0;
     char beside_exe[1024] = "";
-    int have_positional = (argc >= 1 && argv[0] && argv[0][0] != '-' && argv[0][0] != '\0');
+    /* The ROM comes from the shared parser now: positional or --rom,
+     * both spellings resolved and absolutized there. */
+    const char *arg_rom = (args.rom && args.rom[0]) ? args.rom : NULL;
+    int have_positional = (arg_rom != NULL);
     if (!have_positional)
       FindRomBesideExe(beside_exe, sizeof(beside_exe));
 
@@ -2430,7 +2411,7 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
          * beside the executable, then whatever the last run cached. */
         char init_rom[1024]; init_rom[0] = '\0';
         if (have_positional)
-          snprintf(init_rom, sizeof(init_rom), "%s", argv[0]);
+          snprintf(init_rom, sizeof(init_rom), "%s", arg_rom);
         else if (beside_exe[0])
           snprintf(init_rom, sizeof(init_rom), "%s", beside_exe);
         if (!init_rom[0] && !snesrecomp_rom_cache_read(init_rom, sizeof(init_rom)))
@@ -2615,7 +2596,7 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
     if (!rom_resolved_by_launcher) {
       char *la_argv[2] = {
         (char *)(program_path ? program_path : "snesrecomp"),
-        (char *)(have_positional ? argv[0] : (beside_exe[0] ? beside_exe : ""))
+        (char *)(arg_rom ? arg_rom : (beside_exe[0] ? beside_exe : ""))
       };
       int la_argc = (la_argv[1][0] != '\0') ? 2 : 1;
       if (!snesrecomp_launcher_resolve_rom_sha256(la_argc, la_argv, rom_path_buf,
@@ -2623,11 +2604,9 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
                                                   rom_identity_ok ? kExpectedSha256
                                                                   : NULL)) {
         /* User cancelled the picker or repeatedly chose a non-matching ROM. */
-        fprintf(stderr,
-                "usage: %s [--config <ini>] [--paused] [--script <file>] "
-                "[--framedump <dir>] [--launcher|--no-launcher] [path-to-rom.sfc]\n"
-                "You must legally own a copy of %s.\n",
-                program_path ? program_path : "<exe>", game->display_name);
+        snesrecomp_host_args_usage(program_path, NULL);
+        fprintf(stderr, "\nYou must legally own a copy of %s.\n",
+                game->display_name);
         return 1;
       }
     }

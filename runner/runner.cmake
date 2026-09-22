@@ -171,6 +171,7 @@ set(SNESRECOMP_RUNNER_SOURCES
     ${SNESRECOMP_RUNNER_ROOT}/src/recomp_hw.c
     ${SNESRECOMP_RUNNER_ROOT}/src/framedump.c
     ${SNESRECOMP_RUNNER_ROOT}/src/host_paths.c
+    ${SNESRECOMP_RUNNER_ROOT}/src/host_args.c
     ${SNESRECOMP_RUNNER_ROOT}/src/launcher.c
     ${SNESRECOMP_RUNNER_ROOT}/src/launcher_cache.c
     ${SNESRECOMP_RUNNER_ROOT}/src/launcher_picker.c
