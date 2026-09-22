@@ -2298,8 +2298,8 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
    * an empty one is valid. */
   if (game->game_id && game->game_id[0]) {
     char mods_dir[1024];
-    if (config_file) snprintf(mods_dir, sizeof(mods_dir), "mods/preloaded");
-    if (config_file || snesrecomp_exe_dir_path("mods/preloaded", mods_dir, sizeof(mods_dir))) {
+    if (config_file) snprintf(mods_dir, sizeof(mods_dir), SNES_MOD_CATALOG_ROOT);
+    if (config_file || snesrecomp_exe_dir_path(SNES_MOD_CATALOG_ROOT, mods_dir, sizeof(mods_dir))) {
       g_mods_ready = snes_mod_runtime_initialize_c(
           mods_dir, game->game_id,
           game->expected_sha256_hex ? game->expected_sha256_hex : "");

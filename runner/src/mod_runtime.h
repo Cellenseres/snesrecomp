@@ -48,6 +48,15 @@ typedef int (*SNESModApuWriteCallback)(uint16_t reg, uint8_t value);
 
 struct RecompLauncherCModProvider;
 
+/* The directory the BUILD stages the preloaded catalog into, relative to the
+ * executable. Pass this as `root` to snes_mod_runtime_initialize_c rather than
+ * spelling it out: the framework moved the layout from "mods" to
+ * "mods/preloaded" (see SNESRECOMP_MOD_CATALOG_DEST in runner.cmake), the
+ * shared desktop host was updated, and every port that resolved the root for
+ * itself kept looking in the old place -- which presents to a player as a Mods
+ * page with nothing in it, no error anywhere. */
+#define SNES_MOD_CATALOG_ROOT "mods/preloaded"
+
 int snes_mod_runtime_initialize_c(const char* root,
                                   const char* game_id,
                                   const char* rom_sha256);
