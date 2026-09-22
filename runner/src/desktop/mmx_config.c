@@ -525,21 +525,7 @@ static bool HandleIniConfig(int section, const char *key, char *value) {
     } else if (StringEqualsNoCase(key, "IgnoreAspectRatio")) {
       return ParseBool(value, &g_config.ignore_aspect_ratio);
     } else if (StringEqualsNoCase(key, "DisplayAspect")) {
-      if (StringEqualsNoCase(value, "4:3") ||
-          StringEqualsNoCase(value, "CRT") || StringEqualsNoCase(value, "0")) {
-        g_config.display_aspect = kSnesDisplayAspect_Crt4x3;
-      } else if (StringEqualsNoCase(value, "8:7") ||
-                 StringEqualsNoCase(value, "SquarePixels") ||
-                 StringEqualsNoCase(value, "1")) {
-        g_config.display_aspect = kSnesDisplayAspect_SquarePixels8x7;
-      } else if (StringEqualsNoCase(value, "1:1") ||
-                 StringEqualsNoCase(value, "SquareFrame") ||
-                 StringEqualsNoCase(value, "2")) {
-        g_config.display_aspect = kSnesDisplayAspect_SquareFrame1x1;
-      } else {
-        return false;
-      }
-      return true;
+      return SnesDisplayAspect_Parse(value, &g_config.display_aspect);
     } else if (StringEqualsNoCase(key, "Fullscreen")) {
       g_config.fullscreen = (uint8)strtol(value, (char**)NULL, 10);
       return true;
@@ -858,16 +844,11 @@ void WriteConfigFile(const char *filename) {
     { "KeyMap",     "VolumeDown" },
   };
   const int N = (int)countof(kvs);
-  static const char *const kDisplayAspectNames[kSnesDisplayAspect_Count] = {
-    "4:3", "8:7", "1:1"
-  };
-  SnesDisplayAspect display_aspect =
-      SnesDisplayAspect_Clamp(g_config.display_aspect);
   CfgSet(kvs, N, "Graphics", "WindowScale", "%d",
          g_config.window_scale ? g_config.window_scale : 3);
   CfgSet(kvs, N, "Graphics", "Fullscreen", "%d", (int)g_config.fullscreen);
   CfgSet(kvs, N, "Graphics", "DisplayAspect", "%s",
-         kDisplayAspectNames[display_aspect]);
+         SnesDisplayAspect_Name(g_config.display_aspect));
   CfgSet(kvs, N, "Graphics", "OutputMethod", "%s",
          g_config.output_method == kOutputMethod_OpenGL ? "OpenGL" :
          g_config.output_method == kOutputMethod_SDLSoftware ? "SDL-Software" : "SDL");

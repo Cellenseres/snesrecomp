@@ -13,6 +13,7 @@
  * added to the launcher and forgotten in WriteConfigFile fails here.
  */
 #include "config.h"
+#include "display_aspect.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -249,11 +250,33 @@ static void test_rewind_opt_in(void) {
   CHECK(!g_config.rewind_enabled, "rewind off did not survive");
 }
 
+static void test_video_settings_roundtrip(void) {
+  write_file("[Graphics]\nDisplayAspect = SquarePixels\nShader = assets/shaders/crt-soft.glslp\n");
+  ParseConfigFile(kPath);
+  CHECK(g_config.display_aspect == kSnesDisplayAspect_SquarePixels8x7,
+        "pixel aspect alias not parsed");
+  CHECK(g_config.shader && !strcmp(g_config.shader, "assets/shaders/crt-soft.glslp"),
+        "shader preset not parsed");
+  g_config.display_aspect = kSnesDisplayAspect_SquareFrame1x1;
+  g_config.shader = "assets/shaders/warm-composite.glslp";
+  WriteConfigFile(kPath);
+  ParseConfigFile(kPath);
+  CHECK(g_config.display_aspect == kSnesDisplayAspect_SquareFrame1x1,
+        "pixel aspect did not survive");
+  CHECK(g_config.shader && !strcmp(g_config.shader, "assets/shaders/warm-composite.glslp"),
+        "shader preset did not survive");
+  g_config.shader = NULL;
+  WriteConfigFile(kPath);
+  ParseConfigFile(kPath);
+  CHECK(!g_config.shader, "cleared shader did not survive");
+}
+
 int main(void) {
   test_fullscreen_roundtrip();
   test_player_sources_roundtrip();
   test_vsync_tristate();
   test_written_from_nothing();
+  test_video_settings_roundtrip();
   /* Last: it flips the process-wide opt-in and never flips it back. */
   test_rewind_opt_in();
   remove(kPath);
