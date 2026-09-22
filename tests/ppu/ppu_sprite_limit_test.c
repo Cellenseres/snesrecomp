@@ -135,6 +135,41 @@ static unsigned count_argb_pixels(const uint32_t *pixels, size_t count) {
     return nonzero;
 }
 
+static void fill_solid_4bpp_tile(Ppu *ppu, uint16_t tile_base, uint8_t color) {
+    uint16_t lo = 0, hi = 0;
+    for (int bit = 0; bit < 8; bit++) {
+        if (color & 1) lo |= (uint16_t)(1u << bit);
+        if (color & 2) lo |= (uint16_t)(1u << (8 + bit));
+        if (color & 4) hi |= (uint16_t)(1u << bit);
+        if (color & 8) hi |= (uint16_t)(1u << (8 + bit));
+    }
+    for (int row = 0; row < 8; row++) {
+        ppu->vram[tile_base + row] = lo;
+        ppu->vram[tile_base + 8 + row] = hi;
+    }
+}
+
+static void setup_halved_subscreen_bg(Ppu *ppu) {
+    ppu_reset(ppu);
+    ppu->inidisp = 0x0f;
+    ppu->bgmode = 1;
+    ppu->screenEnabled[0] = 0;
+    ppu->screenEnabled[1] = 1 << 1;
+    ppu->cgwsel = 0x02;
+    ppu->cgadsub = 0x60;
+    ppu->cgram[0] = 0x0000;
+    for (uint8_t color = 1; color < 16; color++) {
+        ppu->cgram[color] =
+            (uint16_t)((color & 0x1f) |
+                       (((color * 3) & 0x1f) << 5) |
+                       (((color * 7) & 0x1f) << 10));
+        fill_solid_4bpp_tile(ppu, color * 16, color);
+    }
+    ppu->bgXsc[1] = 4;
+    for (int col = 0; col < 32; col++)
+        ppu->vram[0x400 + col] = (uint16_t)((col % 15) + 1);
+}
+
 int main(void) {
     enum { kPitch = kPpuXPixels * 4 };
     uint8_t pixels[kPitch];
@@ -687,6 +722,87 @@ int main(void) {
         failures += check(wide_pixels[kExtra - 1] == 0 &&
                               wide_pixels[kExtra - 8] == 0,
                           "initial parked unhinted OAM remains clipped");
+    }
+
+    /* New-renderer color math must not change the authentic 256 columns just
+     * because side margins are enabled. This is the #30 shape: main backdrop
+     * plus a halved subscreen layer (cgwsel=$02, cgadsub=$60). */
+    {
+        enum { kMaxExtra = 96, kWidePixels = kPpuXPixels + kMaxExtra * 2 };
+        static const int extras[] = { 8, 32, 96 };
+        static const int scrolls[] = { 0, 1, 7, 8, 31, 127, 255 };
+        uint32_t native_pixels[kPpuXPixels];
+        uint32_t wide_pixels[kWidePixels];
+
+        for (size_t si = 0; si < sizeof scrolls / sizeof scrolls[0]; si++) {
+            memset(native_pixels, 0, sizeof native_pixels);
+            setup_halved_subscreen_bg(ppu);
+            ppu->hScroll[1] = (uint16_t)scrolls[si];
+            PpuBeginDrawing(ppu, (uint8_t *)native_pixels,
+                            sizeof(uint32_t) * kPpuXPixels,
+                            kPpuRenderFlags_NewRenderer);
+            ppu_runLine(ppu, 0);
+            ppu_runLine(ppu, 1);
+
+            for (size_t ei = 0; ei < sizeof extras / sizeof extras[0]; ei++) {
+                int extra = extras[ei];
+                memset(wide_pixels, 0, sizeof wide_pixels);
+                setup_halved_subscreen_bg(ppu);
+                ppu->hScroll[1] = (uint16_t)scrolls[si];
+                PpuBeginDrawing(ppu, (uint8_t *)wide_pixels,
+                                sizeof(uint32_t) * (kPpuXPixels + extra * 2),
+                                kPpuRenderFlags_NewRenderer);
+                PpuSetExtraSpace(ppu, (uint8_t)extra);
+                ppu_runLine(ppu, 0);
+                ppu_runLine(ppu, 1);
+
+                for (int x = 0; x < kPpuXPixels; x++) {
+                    if (wide_pixels[extra + x] != native_pixels[x]) {
+                        failures += check(
+                            false,
+                            "halved subscreen math preserves native columns");
+                        goto color_math_unclamped_done;
+                    }
+                }
+            }
+        }
+color_math_unclamped_done:
+
+        for (size_t si = 0; si < sizeof scrolls / sizeof scrolls[0]; si++) {
+            memset(native_pixels, 0, sizeof native_pixels);
+            setup_halved_subscreen_bg(ppu);
+            ppu->hScroll[1] = (uint16_t)scrolls[si];
+            PpuBeginDrawing(ppu, (uint8_t *)native_pixels,
+                            sizeof(uint32_t) * kPpuXPixels,
+                            kPpuRenderFlags_NewRenderer);
+            ppu_runLine(ppu, 0);
+            ppu_runLine(ppu, 1);
+
+            for (size_t ei = 0; ei < sizeof extras / sizeof extras[0]; ei++) {
+                int extra = extras[ei];
+                memset(wide_pixels, 0, sizeof wide_pixels);
+                setup_halved_subscreen_bg(ppu);
+                ppu->hScroll[1] = (uint16_t)scrolls[si];
+                PpuBeginDrawing(ppu, (uint8_t *)wide_pixels,
+                                sizeof(uint32_t) * (kPpuXPixels + extra * 2),
+                                kPpuRenderFlags_NewRenderer);
+                PpuSetExtraSpace(ppu, (uint8_t)extra);
+                PpuSetWidescreenLayerClamp(ppu, 0x0f);
+                ppu_runLine(ppu, 0);
+                ppu_runLine(ppu, 1);
+
+                for (int x = 0; x < kPpuXPixels; x++) {
+                    if (wide_pixels[extra + x] != native_pixels[x]) {
+                        failures += check(
+                            false,
+                            "halved subscreen math survives BG clamping");
+                        goto color_math_clamped_done;
+                    }
+                }
+            }
+        }
+color_math_clamped_done:
+        ;
     }
 
     ppu_free(ppu);
