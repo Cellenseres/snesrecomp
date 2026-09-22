@@ -900,6 +900,18 @@ function(snesrecomp_target_generated_code target gen_dir)
         "rebuild wizard is the only path forward in this binary")
 endfunction()
 
+# Opt-in, shared CC0 shader catalog for hosts exposing shader_supported.
+# Keep user-added presets in place; updating built-ins must not delete them.
+function(snesrecomp_target_shader_presets target)
+    set(_presets "${SNESRECOMP_RUNNER_ROOT}/assets/shaders")
+    file(GLOB_RECURSE _preset_files CONFIGURE_DEPENDS "${_presets}/*")
+    set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS ${_preset_files})
+    add_custom_command(TARGET ${target} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${_presets}" "$<TARGET_FILE_DIR:${target}>/assets/shaders"
+        COMMENT "${target}: staging shared SNES shader presets" VERBATIM)
+endfunction()
+
 # Optional desktop GLSL preset renderer. It deliberately stays out of
 # SNESRECOMP_RUNNER_SOURCES because headless tools and non-OpenGL frontends do
 # not carry the game-owned gl_core/stb/config dependencies it consumes.

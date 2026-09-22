@@ -2,6 +2,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <ctype.h>
 
 /* Host-presentation choices for a 256x224 SNES frame. These do not alter the
  * emulated PPU; they only define the horizontal pixel aspect used at present. */
@@ -23,6 +24,30 @@ static inline SnesDisplayAspect SnesDisplayAspect_Clamp(int value) {
   return value >= 0 && value < kSnesDisplayAspect_Count
       ? (SnesDisplayAspect)value : kSnesDisplayAspect_Crt4x3;
 }
+
+static inline const char *SnesDisplayAspect_Name(int value) {
+  static const char *const names[] = {"4:3", "8:7", "1:1"};
+  return names[SnesDisplayAspect_Clamp(value)];
+}
+
+/* Shared by the standard desktop config reader and custom game hosts. */
+static inline bool SnesDisplayAspect_Parse(const char *text, uint8_t *value) {
+  static const char *const aliases[][3] = {
+    {"4:3", "CRT", "0"}, {"8:7", "SquarePixels", "1"},
+    {"1:1", "SquareFrame", "2"}
+  };
+  if (!text || !value) return false;
+  for (int i = 0; i < kSnesDisplayAspect_Count; ++i) {
+    for (int j = 0; j < 3; ++j) {
+      const char *a = text, *b = aliases[i][j];
+      while (*a && *b && tolower((unsigned char)*a) == tolower((unsigned char)*b)) {
+        ++a; ++b;
+      }
+      if (*a == *b) { *value = (uint8_t)i; return true; }
+    }
+  }
+  return false;
+}
 /* Horizontal:vertical pixel aspect. A 256x224 frame therefore presents as
  * 4:3, 8:7, or 1:1 respectively. */
 static inline void SnesDisplayAspect_GetPixelAspect(
@@ -32,6 +57,48 @@ static inline void SnesDisplayAspect_GetPixelAspect(
   aspect = SnesDisplayAspect_Clamp((int)aspect);
   if (numerator) *numerator = kNumerators[aspect];
   if (denominator) *denominator = kDenominators[aspect];
+}
+
+/* Adaptive/fixed widescreen controls the visible field; DisplayAspect
+ * independently controls pixel shape. Even widths keep the native field
+ * centered. Native/capacity bounds letterbox instead of stretching pixels. */
+typedef struct SnesDisplayFrame {
+  int width, extra;
+  double aspect;
+} SnesDisplayFrame;
+
+static inline SnesDisplayFrame SnesDisplayAspect_ComputeAdaptiveFrame(
+    int native_width, int frame_height, int max_width, double target_aspect,
+    SnesDisplayAspect display_aspect) {
+  if (native_width <= 0) native_width = 256;
+  if (frame_height <= 0) frame_height = 224;
+  if (max_width < native_width) max_width = native_width;
+  max_width -= (max_width - native_width) & 1;
+  int par_num, par_den;
+  SnesDisplayAspect_GetPixelAspect(display_aspect, &par_num, &par_den);
+  double pixels_per_aspect = (double)frame_height * par_den / par_num;
+  double minimum = native_width / pixels_per_aspect;
+  double maximum = max_width / pixels_per_aspect;
+  if (!(target_aspect >= minimum)) target_aspect = minimum; /* also NaN */
+  if (target_aspect > maximum) target_aspect = maximum;
+  int extra = (int)((target_aspect * pixels_per_aspect - native_width) / 2 + 0.5);
+  int width = native_width + 2 * extra;
+  return (SnesDisplayFrame){width, extra, target_aspect};
+}
+
+static inline SnesDisplayViewport SnesDisplayAspect_FitViewport(
+    double aspect, int width, int height) {
+  if (width <= 0 || height <= 0 || !(aspect > 0))
+    return (SnesDisplayViewport){0};
+  int w, h;
+  if ((double)width / height > aspect) {
+    h = height; w = (int)(height * aspect + 0.5);
+  } else {
+    w = width; h = (int)(width / aspect + 0.5);
+  }
+  if (w < 1) w = 1;
+  if (h < 1) h = 1;
+  return (SnesDisplayViewport){(width - w) / 2, (height - h) / 2, w, h};
 }
 
 /* Widescreen is a horizontal 4/3 expansion of the authentic 256-pixel field.

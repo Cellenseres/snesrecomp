@@ -79,6 +79,7 @@
 
 #if defined(RECOMP_LAUNCHER)
 #include "recomp_launcher.h"   /* recomp_launcher_run_window() */
+#include "launcher_video.h"
 #include "launcher_profile.h"  /* launcher_profile_apply("snes", &gi) */
 /* The shared presentation blend is recomp-ui's (src/recomp_frame_blend.h,
  * master since 2026-09). A project pinned to an older recomp-ui builds
@@ -2465,6 +2466,9 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
 #if defined(SNESRECOMP_HOST_HAS_BLEND)
         gi.has_frame_blend  = 1;
 #endif
+        SnesLauncherVideo_Configure(&ls, &gi,
+            game->display_aspect_supported && !game->aspect_labels,
+            game->shader_supported, g_config.display_aspect, g_config.shader);
         if (game->aspect_labels && game->num_aspect_labels > 0) {
           /* A port that rasterizes its own field owns the choices and the
            * meaning of the index; this host only carries them to the row. */
@@ -2474,18 +2478,7 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
                                         ? game->aspect_setting_label
                                         : "Aspect ratio";
           gi.aspect_setting_help = game->aspect_setting_help;
-        } else if (game->display_aspect_supported) {
-          static const char *const labels[] = {
-            "4:3 (CRT)", "8:7 (Square pixels)", "1:1 (Square frame)"
-          };
-          gi.aspect_labels = labels;
-          gi.num_aspect_labels = kSnesDisplayAspect_Count;
-          gi.aspect_setting_label = "Display aspect";
-          gi.aspect_setting_help =
-              "4:3 recreates a traditional TV. 8:7 uses square pixels. "
-              "1:1 presents the native picture in a square.";
         }
-        gi.has_shader = game->shader_supported;
         /* Rewind rows. The runtime has always had the ring; without this the
          * player has no way to size it or switch it off. */
         gi.has_rewind_depth = game->rewind_settings ? 1 : 0;
