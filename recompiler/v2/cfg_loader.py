@@ -101,7 +101,8 @@ class BankCfg:
     # backward compat with hand-written hints that pre-date the
     # per-variant work.
     exit_mx_at: List[Tuple[int, int, int, int]] = field(default_factory=list)
-    # Per-entry-variant exit (m, x) tuples populated by the auto-router.
+    # Per-entry-variant exit (m, x) tuples from the auto-router or a
+    # hand-authored exit_mx_variant directive.
     # Each entry is (bank, addr16, entry_m, entry_x, exit_m, exit_x).
     # Consumed by v2_regen.py's callee_exit_mx builder; per-variant
     # entries OVERRIDE the legacy 4-tuple broadcast for their specific
@@ -798,6 +799,31 @@ def load_bank_cfg(path: str) -> BankCfg:
                 bank_id = (addr_24 >> 16) & 0xFF
                 addr16 = addr_24 & 0xFFFF
                 cfg.exit_mx_at.append((bank_id, addr16, m_val, x_val))
+                continue
+
+            # exit_mx_variant <hex_24bit_addr> <entry MmXn> <exit MmXn>
+            #
+            # One exact exit for one entry variant. Unlike exit_mx_at this
+            # does not assert the same exit for other entry widths.
+            if head == 'exit_mx_variant':
+                if len(tokens) != 4:
+                    raise ValueError(
+                        f"{path}: exit_mx_variant needs <addr24> "
+                        f"<entry MmXn> <exit MmXn> in {stripped!r}")
+                try:
+                    addr_24 = _parse_hex(tokens[1])
+                except ValueError as exc:
+                    raise ValueError(
+                        f"{path}: exit_mx_variant bad address in {stripped!r}") from exc
+                entry = _parse_mx(tokens[2])
+                exit_mode = _parse_mx(tokens[3])
+                if entry is None or exit_mode is None:
+                    raise ValueError(
+                        f"{path}: exit_mx_variant needs M0X0..M1X1 "
+                        f"entry and exit modes in {stripped!r}")
+                cfg.exit_mx_at_per_variant.append((
+                    (addr_24 >> 16) & 0xFF, addr_24 & 0xFFFF,
+                    entry[0], entry[1], exit_mode[0], exit_mode[1]))
                 continue
 
             # exit_mx_set <hex_24bit_addr> <entry MmXn> <exit MmXn>[,<exit MmXn>...]

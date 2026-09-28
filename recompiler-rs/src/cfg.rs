@@ -746,6 +746,39 @@ pub fn parse_bank_cfg(text: &str, path: &str) -> Result<BankCfg, String> {
             }
             continue;
         }
+        // One exact exit for one entry variant; unlike exit_mx_at, this
+        // does not broadcast the assertion to other entry widths.
+        // exit_mx_variant <hex_24bit_addr> <entry MmXn> <exit MmXn>
+        if head == "exit_mx_variant" {
+            if tokens.len() != 4 {
+                return Err(format!(
+                    "{path}: exit_mx_variant needs <addr24> <entry MmXn> <exit MmXn> in {stripped:?}"
+                ));
+            }
+            let addr_24 = parse_hex(tokens[1])
+                .map_err(|e| format!("{path}: exit_mx_variant bad address: {e}"))?;
+            let entry = parse_mx(tokens[2]).ok_or_else(|| {
+                format!(
+                    "{path}: exit_mx_variant bad entry {:?} (want M0X0..M1X1)",
+                    tokens[2]
+                )
+            })?;
+            let exit = parse_mx(tokens[3]).ok_or_else(|| {
+                format!(
+                    "{path}: exit_mx_variant bad exit {:?} (want M0X0..M1X1)",
+                    tokens[3]
+                )
+            })?;
+            cfg.exit_mx_at_per_variant.push((
+                ((addr_24 >> 16) & 0xFF) as u8,
+                addr_24 & 0xFFFF,
+                entry.0,
+                entry.1,
+                exit.0,
+                exit.1,
+            ));
+            continue;
+        }
         // exit_mx_set <hex_24bit_addr> <entry MmXn> <exit MmXn>[,<exit MmXn>...]
         //
         // A callee that returns in several widths from a single entry variant.

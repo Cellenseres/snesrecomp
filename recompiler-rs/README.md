@@ -39,6 +39,13 @@ python tools/v2_emit.py --rom game.sfc --cfg-dir recomp \
 
 `--max-insns` and `--max-nodes` are passed through to the analyzer.
 
+For an independently proven single exit width of one entry variant, a bank
+CFG may declare `exit_mx_variant <pc24> <entry MmXn> <exit MmXn>`. For example,
+`exit_mx_variant 028000 M1X0 M1X0` asserts only the M1X0 entry's exit; it
+does not assign an exit to M0X0, M0X1, or M1X1 entries. Use `exit_mx_at` only
+when one exit width is proven for every entry variant. `exit_mx_set` remains
+the declaration for several proven exits from one entry variant.
+
 `tools/v2_compare_analysis.py` compares two manifests at the emission
 compatibility boundary, for checking an analyzer change against a baseline;
 `--strict-summaries` also compares diagnostic graph details.
